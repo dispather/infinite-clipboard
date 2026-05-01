@@ -1,0 +1,79 @@
+# Maintainer: dispather <dispather@users.noreply.github.com>
+# ─────────────────────────────────────────────────────────────────────
+# Infinite Clipboard v2 — Arch/CachyOS 패키지
+#
+# 빌드:  build_linux.sh 로 dist/InfiniteClipboard/ 생성 후
+#        cd build && makepkg -f
+# 설치:  sudo pacman -U infinite-clipboard-2.2.1-1-x86_64.pkg.tar.zst
+# 삭제:  sudo pacman -R infinite-clipboard
+# ─────────────────────────────────────────────────────────────────────
+
+pkgname=infinite-clipboard
+pkgver=2.2.1
+pkgrel=1
+pkgdesc="Tailscale LAN 내 PC 간 클립보드·파일 실시간 공유 트레이 앱"
+arch=('x86_64')
+url="https://github.com/dispather/infinite-clipboard"
+license=('MIT')
+depends=(
+    # 런타임 필수 — 시스템 패키지
+    'libayatana-appindicator'    # 트레이 아이콘 (Wayland/KDE SNI)
+    'python-gobject'              # GI 바인딩 (AppIndicator 로드)
+    'wl-clipboard'                # Wayland 클립보드 (wl-copy/wl-paste)
+    'xclip'                       # X11 폴백
+)
+optdepends=(
+    'tailscale: LAN VPN으로 다른 PC와 연결'
+)
+options=(!strip !debug)
+# PyInstaller onedir 은 이미 자체 strip/압축 적용. 추가 strip 시 바이너리 손상 위험.
+
+source=()
+# 로컬 빌드용 PKGBUILD — 소스 다운로드 없이 프로젝트의 dist/ 를 직접 패키징.
+# 전제: 이 PKGBUILD 파일이 있는 `build/` 의 상위 `infinite-clipboard/` 에서
+#       build_linux.sh 가 실행되어 dist/InfiniteClipboard/ 가 존재해야 함.
+
+package() {
+    # $startdir = PKGBUILD 위치 (즉 infinite-clipboard/build/)
+    # 프로젝트 루트 기준으로 경로 계산
+    local project_root="$startdir/.."
+    local repo_root="$project_root/.."
+
+    local dist="$project_root/dist/InfiniteClipboard"
+    if [[ ! -d "$dist" ]]; then
+        echo "❌ $dist 없음. 먼저 build/build_linux.sh 실행."
+        return 1
+    fi
+
+    # 1. 실행 파일 + 런타임 전체를 /opt/infinite-clipboard/ 에 복사
+    install -d "$pkgdir/opt/infinite-clipboard"
+    cp -r "$dist"/* "$pkgdir/opt/infinite-clipboard/"
+
+    # 2. /usr/bin 심볼릭 링크 (터미널에서 명령어로 실행 가능)
+    install -d "$pkgdir/usr/bin"
+    ln -s /opt/infinite-clipboard/InfiniteClipboard "$pkgdir/usr/bin/infinite-clipboard"
+
+    # 3. .desktop 파일 (애플리케이션 메뉴 등록)
+    install -d "$pkgdir/usr/share/applications"
+    cat > "$pkgdir/usr/share/applications/infinite-clipboard.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Infinite Clipboard
+Comment=Tailscale LAN 클립보드·파일 공유
+Exec=/opt/infinite-clipboard/InfiniteClipboard
+Icon=infinite-clipboard
+Terminal=false
+Categories=Utility;Network;
+StartupNotify=false
+X-GNOME-UsesNotifications=true
+EOF
+
+    # 4. 아이콘 설치 (hicolor 테마)
+    install -d "$pkgdir/usr/share/icons/hicolor/512x512/apps"
+    install -m644 "$project_root/assets/generated/icon-512.png" \
+        "$pkgdir/usr/share/icons/hicolor/512x512/apps/infinite-clipboard.png"
+
+    # 5. LICENSE
+    install -d "$pkgdir/usr/share/licenses/$pkgname"
+    install -m644 "$repo_root/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

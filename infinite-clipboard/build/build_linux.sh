@@ -1,45 +1,88 @@
-#!/bin/bash
-# Infinite Clipboard - Linux build (spec-based)
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────
+# Infinite Clipboard v2 — Linux 빌드 (CachyOS/Arch 기본)
 #
-# 함정 #16 회피: 직접 PyInstaller 인자 대신 build/infinite-clipboard.spec
-# 호출. assets/generated, ui/assets, customtkinter datas + PIL hidden imports
-# 3종이 자동 포함됨.
-#
-# venv 는 --system-site-packages 필수: pystray 가 KDE Plasma Wayland 등 SNI
-# 기반 DE 에서 트레이 메뉴 띄우려면 시스템 PyGObject + libayatana-appindicator
-# 참조 필요.
+# 산출물: dist/InfiniteClipboard/InfiniteClipboard (실행 파일)
+#         build/infinite-clipboard-<version>-1-x86_64.pkg.tar.zst (pacman 설치 패키지)
+# ─────────────────────────────────────────────────────────────────────────
+set -euo pipefail
 
-set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(dirname "$SCRIPT_DIR")"
+cd "$ROOT"
 
-echo "========================================"
-echo "  Infinite Clipboard - Linux Build"
-echo "========================================"
+echo "━━━ Infinite Clipboard v2 — Linux 빌드 ━━━"
+echo
 
-cd "$(dirname "$0")/.." || exit 1
-
-# venv 활성화 (없으면 생성)
-if [ -d ".venv" ]; then
-    source .venv/bin/activate
-else
-    echo "[1/3] Creating venv with --system-site-packages ..."
-    python3 -m venv --system-site-packages .venv
-    source .venv/bin/activate
-    pip install -r requirements_linux.txt
+# ─── 1. 아이콘 자산 확인 및 필요 시 생성 ───────────────────────────────
+if [[ ! -f "assets/generated/icon-512.png" ]]; then
+    echo "▶ 아이콘 자산 생성 중..."
+    "$SCRIPT_DIR/generate_icons.sh"
 fi
 
-# 의존성 + PyInstaller 설치 (이미 있으면 빠르게 skip)
-echo "[1/3] Installing build deps ..."
-pip install -r requirements_linux.txt -q
-echo "[2/3] Installing PyInstaller ..."
-pip install pyinstaller -q
+# ─── 2. venv 활성화 ────────────────────────────────────────────────────
+if [[ -d ".venv" ]]; then
+    # shellcheck disable=SC1091
+    source .venv/bin/activate
+else
+    echo "▶ venv 생성 (--system-site-packages: gi/AppIndicator 접근)"
+    python3 -m venv --system-site-packages .venv
+    # shellcheck disable=SC1091
+    source .venv/bin/activate
+    pip install -q -r requirements_linux.txt
+fi
 
-# spec 기반 빌드 — build_win.bat / build_mac.sh 와 동일 패턴 (함정 #16)
-echo "[3/3] Building (spec-based) ..."
-pyinstaller --clean --noconfirm build/infinite-clipboard.spec
+# ─── 3. PyInstaller 설치 ───────────────────────────────────────────────
+pip install -q pyinstaller
 
-echo ""
-echo "========================================"
-echo "  Build complete."
-echo "========================================"
-echo "Output: dist/Infinite Clipboard/"
-echo "Run:    './dist/Infinite Clipboard/Infinite Clipboard'"
+# ─── 4. 버전 확인 및 PKGBUILD 동기화 ───────────────────────────────────
+VERSION="$(python -c 'from version import __version__; print(__version__)')"
+PKGBUILD="$SCRIPT_DIR/PKGBUILD"
+PKG_FILE="$SCRIPT_DIR/infinite-clipboard-${VERSION}-1-x86_64.pkg.tar.zst"
+
+if [[ ! -f "$PKGBUILD" ]]; then
+    echo "❌ PKGBUILD 없음: $PKGBUILD"
+    exit 1
+fi
+
+echo "▶ 패키지 버전: $VERSION"
+python - "$PKGBUILD" "$VERSION" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+version = sys.argv[2]
+text = path.read_text(encoding="utf-8")
+text = re.sub(r"^pkgver=.*$", f"pkgver={version}", text, flags=re.MULTILINE)
+text = re.sub(
+    r"infinite-clipboard-[0-9][^-]*-1-x86_64\.pkg\.tar\.zst",
+    f"infinite-clipboard-{version}-1-x86_64.pkg.tar.zst",
+    text,
+)
+path.write_text(text, encoding="utf-8")
+PY
+
+# ─── 5. PyInstaller 빌드 ───────────────────────────────────────────────
+echo "▶ PyInstaller 실행"
+pyinstaller build/infinite-clipboard.spec --noconfirm --clean
+
+# ─── 6. Arch/CachyOS 패키지 생성 ──────────────────────────────────────
+if ! command -v makepkg >/dev/null 2>&1; then
+    echo "❌ makepkg 없음. CachyOS/Arch의 pacman 패키지를 만들려면 pacman 패키지 도구가 필요합니다."
+    exit 1
+fi
+
+echo "▶ pacman 패키지 생성"
+(cd "$SCRIPT_DIR" && makepkg -f)
+
+if [[ ! -f "$PKG_FILE" ]]; then
+    echo "❌ 패키지 생성 실패: $PKG_FILE"
+    exit 1
+fi
+
+echo
+echo "✅ 빌드 완료"
+echo "   실행: ./dist/InfiniteClipboard/InfiniteClipboard"
+echo "   설치 패키지: $PKG_FILE"
+echo "   설치: sudo pacman -U \"$PKG_FILE\""

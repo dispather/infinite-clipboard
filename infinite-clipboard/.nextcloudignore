@@ -1,8 +1,21 @@
+# Python
 __pycache__/
 *.pyc
 .venv/
 .venv-build/
-dist/
-build/infinite-clipboard/
 .pytest_cache/
 .cache/
+
+# 빌드 최종 산출물 (PyInstaller dist) — IC_BUILD_DIR 로 외부 출력 권장이지만
+# default 위치 (dist/) 도 안전망으로 sync 차단
+dist/
+
+# 빌드 중간 산출물 — `build/` 폴더 자체는 source SSOT (spec/PKGBUILD/scripts/runtime_hooks)
+# 라 sync ON 유지. 산출물/작업 폴더만 개별 차단 (.gitignore 와 거울).
+build/InfiniteClipboard/
+build/infinite-clipboard/
+build/Output/
+build/pkg/
+build/src/
+build/*.pkg.tar.zst
+build/*.log
