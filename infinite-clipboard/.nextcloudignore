@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+.venv-build/
+dist/
+build/infinite-clipboard/
+.pytest_cache/
+.cache/

@@ -1,0 +1,24 @@
+# Git directory — primary git PC 가 한 곳이라 .git/ 동기화는 충돌 위험.
+# 한 PC 에서만 git 작업, 다른 PC 들은 source 만 NextCloud 로 받음.
+.git/
+
+# 빌드 산출물 (루트에 떨어지는 패키지 파일들)
+# 하위 infinite-clipboard/.nextcloudignore 는 dist/, build/infinite-clipboard/ 를 차단하지만
+# 루트의 .pkg.tar.zst / .dmg / .exe 등은 별개로 막아야 함
+
+# Linux
+*.pkg.tar.zst
+*.AppImage
+*.deb
+*.rpm
+
+# macOS
+*.dmg
+
+# Windows
+*.exe
+*.msi
+
+# 공통
+*.tar.gz
+*.tar.xz

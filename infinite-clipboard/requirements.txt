@@ -1,0 +1,6 @@
+# 공통 의존성
+pillow>=10.0.0
+pystray>=0.19.0
+customtkinter>=5.2.0
+plyer>=2.1.0
+xxhash>=3.0.0

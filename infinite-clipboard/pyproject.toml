@@ -1,0 +1,45 @@
+[project]
+name = "infinite-clipboard"
+version = "2.2.1"
+description = "Tailscale VPN으로 연결된 PC 간 클립보드/파일 실시간 공유"
+requires-python = ">=3.10"
+
+dependencies = [
+    "pillow>=10.0.0",
+    "pystray>=0.19.0",
+    "customtkinter>=5.2.0",
+    "plyer>=2.1.0",
+    "xxhash>=3.0.0",
+    # OS별 자동 설치
+    "pywin32>=306; sys_platform == 'win32'",
+    "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
+]
+
+[project.optional-dependencies]
+# Windows 전용 (클립보드 접근)
+win = ["pywin32>=306"]
+# macOS 전용 (이미지 클립보드)
+mac = [
+    "pyobjc-framework-Cocoa>=10.0",
+    "pyobjc-framework-Quartz>=10.0",
+]
+# 빌드용
+build = ["pyinstaller>=6.0"]
+
+[project.scripts]
+infinite-clipboard = "main:main"
+
+[tool.uv]
+# uv run 시 OS별 의존성 자동 설치
+environments = ["sys_platform == 'win32'", "sys_platform == 'darwin'", "sys_platform == 'linux'"]
+# Linux에서 PyGObject(시스템 패키지)를 사용하기 위해 시스템 사이트 패키지 접근 허용
+python-preference = "system"
+
+[dependency-groups]
+dev = ["pyinstaller>=6.0", "pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"

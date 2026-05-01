@@ -1,0 +1,9 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Name=Infinite Clipboard
+Comment=Clipboard sharing across devices
+Exec=bash -c 'cd "$(dirname "$(readlink -f "%k")")" && PYSTRAY_BACKEND=appindicator python3 start.py'
+Terminal=false
+Type=Application
+Categories=Utility;Network;
+StartupNotify=false
