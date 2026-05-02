@@ -1,0 +1,41 @@
+# 라인 엔딩 정책 — Windows/macOS/Linux 혼합 환경 + NextCloud sync 안전망
+#
+# 배경: 다른 PC (Windows) 의 git core.autocrlf=true 설정이 checkout 시 CRLF 로
+# 변환 → NextCloud 가 working tree 매개로 우리 Linux 까지 CRLF 전파 →
+# git status 가 모든 .py 를 "수정함" 으로 잘못 보고 (실제 내용은 동일).
+# 이 정책이 commit blob 을 LF 로 정규화하고, .bat/.cmd 만 CRLF 예외.
+#
+# 효과:
+# - text=auto: git 이 텍스트/바이너리 자동 감지
+# - eol=lf:    텍스트 파일은 working tree 도 LF (모든 OS, autocrlf 무관)
+# - .bat/.cmd: Windows cmd 가 LF 못 읽음 (CLAUDE.md 함정 #21) → CRLF 강제
+
+* text=auto eol=lf
+
+# Windows 전용 — CRLF 필수
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# 명시적 LF (혹시 OS 별 다르게 해석될 위험 차단)
+*.sh    text eol=lf
+*.py    text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.toml  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.spec  text eol=lf
+*.iss   text eol=lf
+PKGBUILD text eol=lf
+
+# 바이너리 (git 자동 감지로도 충분하지만 명시 — diff/merge 안 함)
+*.png   binary
+*.ico   binary
+*.icns  binary
+*.dmg   binary
+*.exe   binary
+*.zst   binary
+*.tar.zst binary
+*.pkg.tar.zst binary
+*.pdf   binary
