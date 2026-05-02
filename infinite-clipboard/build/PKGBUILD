@@ -34,12 +34,15 @@ source=()
 #       build_linux.sh 가 실행되어 dist/InfiniteClipboard/ 가 존재해야 함.
 
 package() {
-    # $startdir = PKGBUILD 위치 (즉 infinite-clipboard/build/)
-    # 프로젝트 루트 기준으로 경로 계산
-    local project_root="$startdir/.."
-    local repo_root="$project_root/.."
+    # $startdir = PKGBUILD 위치 (즉 makepkg 실행 위치).
+    # 기본은 build_linux.sh 가 sync 폴더 밖 IC_BUILD_DIR 로 PKGBUILD 를 복사한 뒤
+    # 그곳에서 makepkg 를 호출 → IC_PROJECT_ROOT/IC_DIST_DIR 환경변수로 실제
+    # 프로젝트 위치를 명시. env 미설정 시 (직접 build/ 에서 makepkg 호출 등)
+    # 기존 동작 ($startdir/..) 으로 폴백.
+    local project_root="${IC_PROJECT_ROOT:-$startdir/..}"
+    local repo_root="${IC_REPO_ROOT:-$project_root/..}"
 
-    local dist="$project_root/dist/InfiniteClipboard"
+    local dist="${IC_DIST_DIR:-$project_root/dist/InfiniteClipboard}"
     if [[ ! -d "$dist" ]]; then
         echo "❌ $dist 없음. 먼저 build/build_linux.sh 실행."
         return 1

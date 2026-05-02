@@ -14,11 +14,19 @@
 
 set -euo pipefail
 
+cd "$(dirname "$0")/.." || exit 1
+
+# ── IC_BUILD_DIR — sync 폴더 밖 빌드 출력 (3 OS 공통 인터페이스) ──────
+# default: ~/Library/Caches/InfiniteClipboard-Build (macOS 표준 캐시 위치)
+IC_BUILD_DIR="${IC_BUILD_DIR:-$HOME/Library/Caches/InfiniteClipboard-Build}"
+mkdir -p "$IC_BUILD_DIR"
+
 echo "========================================"
 echo "  Infinite Clipboard v2 — macOS 빌드"
 echo "========================================"
-
-cd "$(dirname "$0")/.." || exit 1
+echo "출력 위치: $IC_BUILD_DIR"
+echo "프로젝트:   $PWD"
+echo
 
 # ── 도구 확인 ─────────────────────────────────────────────────────────
 for tool in uv pyenv brew; do
@@ -99,11 +107,15 @@ if [ ! -d "assets/generated" ] || [ ! -d "ui/assets/icons/png" ]; then
     exit 1
 fi
 
-# ── 빌드 ──────────────────────────────────────────────────────────────
+# ── 빌드 (출력은 IC_BUILD_DIR 안 — sync 폴더 밖) ──────────────────────
 # uv run 대신 venv 내 pyinstaller 를 직접 호출 — 프로젝트 기본 venv(.venv)
 # 로 전환되는 것을 방지
-"$BUILD_VENV/bin/pyinstaller" --clean --noconfirm build/infinite-clipboard.spec
+"$BUILD_VENV/bin/pyinstaller" --clean --noconfirm build/infinite-clipboard.spec \
+    --distpath "$IC_BUILD_DIR/dist" \
+    --workpath "$IC_BUILD_DIR/build"
 
 echo ""
-echo "빌드 완료: dist/Infinite Clipboard.app"
-echo "실행: open 'dist/Infinite Clipboard.app'"
+echo "빌드 완료 (산출물 sync 폴더 밖):"
+echo "  .app:  $IC_BUILD_DIR/dist/Infinite Clipboard.app"
+echo "  실행:  open '$IC_BUILD_DIR/dist/Infinite Clipboard.app'"
+echo "  DMG:   build/make_dmg.sh (.app 빌드 후 별도 호출)"

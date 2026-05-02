@@ -8,17 +8,21 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
 
+# IC_BUILD_DIR — build_mac.sh 와 동일 default (sync 폴더 밖)
+IC_BUILD_DIR="${IC_BUILD_DIR:-$HOME/Library/Caches/InfiniteClipboard-Build}"
+
 # version.py 에서 버전 읽기 (spec 과 동일 소스)
 VERSION=$(python3 -c "import sys; sys.path.insert(0, '.'); from version import __version__; print(__version__)")
 APP_NAME="Infinite Clipboard"
-APP_PATH="dist/${APP_NAME}.app"
+APP_PATH="$IC_BUILD_DIR/dist/${APP_NAME}.app"
 DMG_NAME="${APP_NAME} ${VERSION}"
-DMG_PATH="dist/${DMG_NAME}.dmg"
-STAGING="dist/.dmg-staging"
+DMG_PATH="$IC_BUILD_DIR/dist/${DMG_NAME}.dmg"
+STAGING="$IC_BUILD_DIR/dist/.dmg-staging"
 
 echo "========================================"
 echo "  DMG 패키징 — ${DMG_NAME}"
 echo "========================================"
+echo "출력 위치: $IC_BUILD_DIR/dist/"
 
 # ── 사전 조건 확인 ────────────────────────────────────────────────────
 if [ ! -d "$APP_PATH" ]; then

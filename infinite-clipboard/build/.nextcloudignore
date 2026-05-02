@@ -1,0 +1,18 @@
+# build/ 산출물 및 임시 작업 폴더 (.gitignore 와 거울 관계)
+# 참조: ../CLAUDE.md "build/ 의 두 ignore (.gitignore <-> .nextcloudignore) 거울 관계"
+# 함정 #18/#19: 변경 후 NextCloud 클라이언트 재시작 + 서버 잔존 파일은 웹 UI 에서 직접 삭제
+
+# PyInstaller 산출물 (build_linux.sh / build_mac.sh / build_win.bat)
+InfiniteClipboard/
+infinite-clipboard/
+
+# Inno Setup 산출물 (installer.iss)
+Output/
+
+# Arch makepkg 작업/산출물 (PKGBUILD)
+pkg/
+src/
+*.pkg.tar.zst
+
+# 빌드 로그 (build_win.bat self-redirect, 함정 #21)
+*.log
