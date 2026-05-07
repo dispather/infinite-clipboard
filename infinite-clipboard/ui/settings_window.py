@@ -79,6 +79,16 @@ class SettingsWindow(customtkinter.CTkToplevel):
     # v2.2 R2: bind_address 매핑 (config 값 ↔ UI 라벨)
     _BIND_TO_KR = {"": "Tailscale 자동", "0.0.0.0": "모든 인터페이스"}
     _BIND_TO_EN = {"Tailscale 자동": "", "모든 인터페이스": "0.0.0.0"}
+    # v2.3 audit #10: 충돌 정책 매핑. 한국어 라벨은 사용자가 직관적으로 선택.
+    # 영어 키는 config.py 의 VALID_FILE_CONFLICT_POLICIES 와 동일.
+    _POLICY_TO_KR = {
+        "overwrite": "덮어쓰기",
+        "skip": "건너뛰기",
+        "rename_with_timestamp": "시점 추가",
+        "rename_with_counter": "번호 추가",
+    }
+    _POLICY_TO_EN = {v: k for k, v in _POLICY_TO_KR.items()}
+    _POLICY_ORDER = ["덮어쓰기", "건너뛰기", "시점 추가", "번호 추가"]
 
     def __init__(self, config: AppConfig, on_save_callback=None):
         super().__init__()
@@ -90,7 +100,8 @@ class SettingsWindow(customtkinter.CTkToplevel):
         self.title("Infinite Clipboard · 설정")
         # 4섹션 + 헤더 + 버튼 바가 한 화면에 모두 들어가는 높이.
         # 일반 CTkFrame 을 쓰므로 스크롤바가 뜨지 않는다.
-        self.geometry("500x800")
+        # v2.3 기기 섹션에 충돌 정책 + TTL 행 2개 추가 → 800 → 950.
+        self.geometry("500x950")
         self.resizable(False, False)
         self.attributes("-topmost", True)
         self.configure(fg_color=t.tray_bg)
@@ -286,7 +297,45 @@ class SettingsWindow(customtkinter.CTkToplevel):
             row_path, icon_name="folder-open",
             command=self._browse_directory,
         ).pack(side="left")
-        row_path.pack(fill="x")
+        row_path.pack(fill="x", pady=(0, t.SP[2]))
+
+        # v2.3 audit #10: 충돌 처리 정책 — 동일 파일명 재수신 시 동작.
+        # SHA-256 dedup 이 우선 적용되어 같은 파일은 정책 무관 자동 skip.
+        initial_policy = self._POLICY_TO_KR.get(config.file_conflict_policy, "번호 추가")
+        self._policy_var = customtkinter.StringVar(value=initial_policy)
+        row_policy = FormRow(inner, "충돌 처리")
+        self._policy_seg = customtkinter.CTkSegmentedButton(
+            row_policy,
+            values=self._POLICY_ORDER,
+            variable=self._policy_var,
+            height=30,
+            selected_color=t.signal_ok,
+            selected_hover_color=t.signal_ok_hi,
+            unselected_color=t.relay_raised,
+            unselected_hover_color=t.whisper_line_hi,
+            text_color=t.terminal_text,
+            text_color_disabled=t.spool_mute,
+            font=(t.FAMILY, 11, "bold"),
+        )
+        self._policy_seg.pack(side="left", fill="x", expand=True)
+        row_policy.pack(fill="x", pady=(0, t.SP[2]))
+
+        # v2.3 audit P2: staging TTL + 즉시 정리 버튼.
+        row_ttl = FormRow(inner, "임시 정리")
+        self._ttl_entry = self._make_entry(row_ttl, font=t.FONT_MONO)
+        self._ttl_entry.configure(width=70)
+        self._ttl_entry.pack(side="left", padx=(0, t.SP[1]))
+        self._ttl_entry.insert(0, str(config.staging_ttl_hours))
+        customtkinter.CTkLabel(
+            row_ttl, text="시간 후",
+            font=t.FONT_LABEL,
+            text_color=t.spool_label,
+        ).pack(side="left", padx=(0, t.SP[3]))
+        SecondaryButton(
+            row_ttl, text="지금 정리",
+            command=self._cleanup_staging_now,
+        ).pack(side="right")
+        row_ttl.pack(fill="x")
 
     def _build_section_autostart(self, parent):
         from core.autostart import (
@@ -317,6 +366,37 @@ class SettingsWindow(customtkinter.CTkToplevel):
         row.pack(fill="x")
 
     # ─── 헬퍼 ──────────────────────────────────────────────────
+
+    def _cleanup_staging_now(self) -> None:
+        """v2.3 audit P2: "지금 정리" 버튼 콜백.
+
+        settings 창은 별도 프로세스이므로 main 프로세스 상태와 무관하게 직접
+        cleanup_staging_dir 호출. 사용자가 막 입력한 TTL 값을 즉시 반영
+        (저장 안 했어도 dry-run 처럼 동작). 잘못된 값은 24 폴백.
+        """
+        from tkinter import messagebox
+        try:
+            from core.file_transfer import cleanup_staging_dir, format_size
+            import tempfile
+            from pathlib import Path
+            ttl_text = self._ttl_entry.get().strip()
+            if ttl_text.isdigit() and 1 <= int(ttl_text) <= 720:
+                ttl = int(ttl_text)
+            else:
+                ttl = 24
+            staging = Path(tempfile.gettempdir()) / "ic_clipboard"
+            deleted, freed = cleanup_staging_dir(staging, ttl)
+            if deleted == 0:
+                messagebox.showinfo("임시 파일 정리", "정리할 항목이 없습니다.")
+            else:
+                messagebox.showinfo(
+                    "임시 파일 정리",
+                    f"{deleted}개 항목 삭제\n{format_size(freed)} 회수",
+                )
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"cleanup 실패: {e}")
+            messagebox.showerror("임시 파일 정리", f"정리 실패: {e}")
 
     def _section_inner(self, card):
         """SectionCard 내부에 여백 있는 프레임을 만들고 반환."""
@@ -406,6 +486,14 @@ class SettingsWindow(customtkinter.CTkToplevel):
         # v2.2 R2: bind 주소 (Server 모드 전용 — client 모드면 사용자 의도 보존)
         if self._config.mode == "server":
             self._config.bind_address = self._BIND_TO_EN.get(self._bind_var.get(), "")
+        # v2.3 audit #10: 충돌 정책. 잘못된 라벨이면 default 유지.
+        self._config.file_conflict_policy = self._POLICY_TO_EN.get(
+            self._policy_var.get(), "rename_with_counter",
+        )
+        # v2.3 audit P2: staging TTL. 잘못된 입력이면 _validate_and_clamp 가 보정.
+        ttl_text = self._ttl_entry.get().strip()
+        if ttl_text.isdigit():
+            self._config.staging_ttl_hours = int(ttl_text)
 
         save_config(self._config)
 
