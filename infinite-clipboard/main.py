@@ -37,7 +37,9 @@ from core.protocol import (
     MSG_CLIPBOARD, MSG_PING, MSG_PONG,
     MSG_FILE_READY, MSG_FILE_REQUEST, MSG_FILE_START,
     MSG_FILE_CHUNK, MSG_FILE_END, MSG_FILE_ACK,
-    MSG_FILE_RESUME, MSG_FILE_CANCEL, MSG_FILE_ERROR,
+    MSG_FILE_RESUME, MSG_FILE_CANCEL, MSG_FILE_CANCEL_ACK, MSG_FILE_ERROR,
+    CANCEL_ACK_ROLE_SENDER, CANCEL_ACK_ROLE_RECEIVER, CANCEL_ACK_ROLE_NONE,
+    CANCEL_ACK_STATUS_OK, CANCEL_ACK_STATUS_UNKNOWN,
     MSG_TRANSFER_COMPLETE,
 )
 from core.network import NetworkServer, NetworkClient
@@ -280,6 +282,11 @@ class InfiniteClipboard:
             self._handle_file_cancel(data)
             self.server.broadcast(msg_type, data, exclude_sock=sock)
 
+        elif msg_type == MSG_FILE_CANCEL_ACK:
+            # v2.3.1: cancel ack — 자체 처리 (originator 가 서버일 수 있음) + broadcast
+            self._handle_file_cancel_ack(data)
+            self.server.broadcast(msg_type, data, exclude_sock=sock)
+
         elif msg_type in (MSG_FILE_START, MSG_FILE_ACK, MSG_FILE_RESUME):
             self.server.broadcast(msg_type, data, exclude_sock=sock)
 
@@ -343,6 +350,9 @@ class InfiniteClipboard:
 
         elif msg_type == MSG_FILE_CANCEL:
             self._handle_file_cancel(data)
+
+        elif msg_type == MSG_FILE_CANCEL_ACK:
+            self._handle_file_cancel_ack(data)
 
         elif msg_type == MSG_PING:
             self.client.send(MSG_PONG)
@@ -486,6 +496,10 @@ class InfiniteClipboard:
 
         검증 실패 (잘못된 transfer_id 형식 / unknown reason) 시 silent ignore.
         매칭되는 active transfer 가 없어도 silent ignore (이미 정리됨).
+
+        v2.3.1: cleanup 끝나면 MSG_FILE_CANCEL_ACK 송출 — originator UI 가
+        "취소 중..." 상태를 정확한 시점에 정리할 수 있게 함. broadcast 라
+        originator 가 받으면 의미 있고, 자기 자신이 받으면 silent ignore.
         """
         parsed = Protocol.parse_file_cancel(data)
         if parsed is None:
@@ -510,6 +524,35 @@ class InfiniteClipboard:
             with self._transfers_lock:
                 self.pending_transfers.pop(transfer_id, None)
             self._cancel_transfer_tracking(transfer_id)
+
+        # v2.3.1 ack — 어떤 role 로 cleanup 했는지 originator 에게 통지.
+        if cancelled_out is not None:
+            role, status = CANCEL_ACK_ROLE_SENDER, CANCEL_ACK_STATUS_OK
+        elif cancelled_in is not None:
+            role, status = CANCEL_ACK_ROLE_RECEIVER, CANCEL_ACK_STATUS_OK
+        else:
+            role, status = CANCEL_ACK_ROLE_NONE, CANCEL_ACK_STATUS_UNKNOWN
+        try:
+            ack_wire = self.protocol.create_file_cancel_ack(transfer_id, role, status)
+            self._send_raw_msg(ack_wire)
+        except ValueError as e:
+            # transfer_id 형식 검증은 parse_file_cancel 에서 통과했으므로 여기 도달 안 함
+            logger.warning(f"[파일] cancel_ack 송출 실패: {e}")
+
+    def _handle_file_cancel_ack(self, data):
+        """MSG_FILE_CANCEL_ACK 수신 — peer 의 cleanup 완료 신호 (v2.3.1).
+
+        UI 는 transfer_state.json 폴링으로 transfer 가 사라지면 행을 자동 제거하므로
+        여기서는 logger 만. 향후 timeout/retry 정책 도입 시 확장 지점.
+        검증 실패 / 자기 자신이 보낸 ack / unknown transfer_id 모두 silent.
+        """
+        parsed = Protocol.parse_file_cancel_ack(data)
+        if parsed is None:
+            return
+        logger.info(
+            f"[파일] CANCEL_ACK 수신: {parsed['transfer_id']} "
+            f"(peer role={parsed['role']} status={parsed['status']})"
+        )
 
     def _send_msg(self, msg_type, data=None):
         """메시지 전송 헬퍼"""

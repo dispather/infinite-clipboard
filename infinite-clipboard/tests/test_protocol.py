@@ -6,7 +6,10 @@ import pytest
 
 from core.protocol import (
     Protocol, MSG_CLIPBOARD, MSG_FILE_CHUNK, MSG_HANDSHAKE, MSG_FILE_CANCEL,
+    MSG_FILE_CANCEL_ACK,
     CANCEL_REASON_SUPERSEDED, CANCEL_REASON_USER, CANCEL_REASON_ERROR,
+    CANCEL_ACK_ROLE_SENDER, CANCEL_ACK_ROLE_RECEIVER, CANCEL_ACK_ROLE_NONE,
+    CANCEL_ACK_STATUS_OK, CANCEL_ACK_STATUS_UNKNOWN,
     is_valid_transfer_id,
 )
 
@@ -183,3 +186,76 @@ def test_parse_file_cancel_rejects_garbage():
     assert Protocol.parse_file_cancel({"reason": "user"}) is None
     # 빈 dict
     assert Protocol.parse_file_cancel({}) is None
+
+
+# ── v2.3.1: cancel ack 회귀 ─────────────────────────────────────────────
+
+
+def test_file_cancel_ack_roundtrip():
+    """ack 송수신 — 모든 role/status 조합 wire 통과."""
+    p = Protocol()
+    for role in (CANCEL_ACK_ROLE_SENDER, CANCEL_ACK_ROLE_RECEIVER, CANCEL_ACK_ROLE_NONE):
+        for status in (CANCEL_ACK_STATUS_OK, CANCEL_ACK_STATUS_UNKNOWN):
+            wire = p.create_file_cancel_ack(_VALID_TID, role, status)
+            parsed = p.parse_message(wire[4:])
+            assert parsed["type"] == MSG_FILE_CANCEL_ACK
+            payload = Protocol.parse_file_cancel_ack(parsed["data"])
+            assert payload == {
+                "transfer_id": _VALID_TID, "role": role, "status": status,
+            }
+
+
+def test_file_cancel_ack_default_status_ok():
+    p = Protocol()
+    wire = p.create_file_cancel_ack(_VALID_TID, CANCEL_ACK_ROLE_SENDER)
+    parsed = p.parse_message(wire[4:])
+    payload = Protocol.parse_file_cancel_ack(parsed["data"])
+    assert payload["status"] == CANCEL_ACK_STATUS_OK
+
+
+def test_file_cancel_ack_rejects_invalid_transfer_id():
+    p = Protocol()
+    for bad in ("../escape", "not-a-uuid", "", "12345678-1234-1234-1234-123456789012"):
+        with pytest.raises(ValueError):
+            p.create_file_cancel_ack(bad, CANCEL_ACK_ROLE_SENDER)
+
+
+def test_file_cancel_ack_rejects_invalid_role():
+    p = Protocol()
+    with pytest.raises(ValueError):
+        p.create_file_cancel_ack(_VALID_TID, "malicious")
+    with pytest.raises(ValueError):
+        p.create_file_cancel_ack(_VALID_TID, "")
+
+
+def test_file_cancel_ack_rejects_invalid_status():
+    p = Protocol()
+    with pytest.raises(ValueError):
+        p.create_file_cancel_ack(
+            _VALID_TID, CANCEL_ACK_ROLE_SENDER, status="garbage",
+        )
+
+
+def test_parse_file_cancel_ack_rejects_garbage():
+    """비-dict, 누락 필드, 화이트리스트 위반 모두 silent ignore (None)."""
+    assert Protocol.parse_file_cancel_ack(None) is None
+    assert Protocol.parse_file_cancel_ack("not a dict") is None
+    assert Protocol.parse_file_cancel_ack([1, 2, 3]) is None
+    assert Protocol.parse_file_cancel_ack({}) is None
+    # 누락 필드
+    assert Protocol.parse_file_cancel_ack(
+        {"transfer_id": _VALID_TID, "role": CANCEL_ACK_ROLE_SENDER}
+    ) is None  # status 누락
+    assert Protocol.parse_file_cancel_ack(
+        {"transfer_id": _VALID_TID, "status": CANCEL_ACK_STATUS_OK}
+    ) is None  # role 누락
+    # 형식/화이트리스트 위반
+    assert Protocol.parse_file_cancel_ack(
+        {"transfer_id": "../bad", "role": CANCEL_ACK_ROLE_SENDER, "status": "ok"}
+    ) is None
+    assert Protocol.parse_file_cancel_ack(
+        {"transfer_id": _VALID_TID, "role": "X", "status": "ok"}
+    ) is None
+    assert Protocol.parse_file_cancel_ack(
+        {"transfer_id": _VALID_TID, "role": CANCEL_ACK_ROLE_SENDER, "status": "Y"}
+    ) is None

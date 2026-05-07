@@ -44,6 +44,7 @@ MSG_FILE_END = "file_end"            # 파일 전송 완료
 MSG_FILE_ACK = "file_ack"            # 파일/청크 수신 확인
 MSG_FILE_RESUME = "file_resume"      # 이어받기 요청
 MSG_FILE_CANCEL = "file_cancel"      # 파일 전송 취소
+MSG_FILE_CANCEL_ACK = "file_cancel_ack"  # v2.3.1: 취소 ack (peer cleanup 확인)
 MSG_FILE_ERROR = "file_error"        # 파일 전송 오류
 MSG_TRANSFER_COMPLETE = "transfer_complete"  # 전체 전송 완료
 
@@ -63,6 +64,28 @@ _CANCEL_REASONS_VALID = frozenset({
     CANCEL_REASON_SUPERSEDED,
     CANCEL_REASON_USER,
     CANCEL_REASON_ERROR,
+})
+
+# ── v2.3.1: Cancel ACK 상수 ─────────────────────────────────────────────
+# peer 가 MSG_FILE_CANCEL 을 받고 cleanup 한 뒤 ack 송출. originator UI 가
+# 실제 처리 여부를 알 수 있어 "취소 중..." 상태 즉시 정리 가능.
+
+CANCEL_ACK_ROLE_SENDER = "sender"      # ack 보낸 peer 가 송신 측이었음
+CANCEL_ACK_ROLE_RECEIVER = "receiver"  # ack 보낸 peer 가 수신 측이었음
+CANCEL_ACK_ROLE_NONE = "none"          # 매칭되는 active transfer 없음 (idempotent)
+
+_CANCEL_ACK_ROLES_VALID = frozenset({
+    CANCEL_ACK_ROLE_SENDER,
+    CANCEL_ACK_ROLE_RECEIVER,
+    CANCEL_ACK_ROLE_NONE,
+})
+
+CANCEL_ACK_STATUS_OK = "ok"
+CANCEL_ACK_STATUS_UNKNOWN = "unknown"  # transfer_id 미매칭 (이미 정리됨 등)
+
+_CANCEL_ACK_STATUS_VALID = frozenset({
+    CANCEL_ACK_STATUS_OK,
+    CANCEL_ACK_STATUS_UNKNOWN,
 })
 
 # ── transfer_id 형식 (UUID v4) 검증 ─────────────────────────────────────
@@ -225,6 +248,53 @@ class Protocol:
         if reason not in _CANCEL_REASONS_VALID:
             return None
         return {"transfer_id": transfer_id, "reason": reason}
+
+    def create_file_cancel_ack(
+        self,
+        transfer_id: str,
+        role: str,
+        status: str = CANCEL_ACK_STATUS_OK,
+    ) -> bytes:
+        """v2.3.1: cancel 메시지를 받고 cleanup 한 peer 가 originator 에게 ack.
+
+        UI 가 "취소 중..." 상태를 정확한 시점에 정리할 수 있게 한다. v2.3 이하 peer
+        는 이 메시지 핸들러가 없어 silent ignore — soft compat (호환성 영향 없음).
+
+        Args:
+            transfer_id: 취소된 transfer ID (UUID v4 형식 검증).
+            role: ack 보낸 peer 의 active transfer 역할
+                (CANCEL_ACK_ROLE_SENDER / RECEIVER / NONE).
+            status: cleanup 결과 — ok 또는 unknown (matching transfer 없음).
+
+        Raises:
+            ValueError: 형식/화이트리스트 위반.
+        """
+        if not is_valid_transfer_id(transfer_id):
+            raise ValueError(f"Invalid transfer_id for cancel_ack: {transfer_id!r}")
+        if role not in _CANCEL_ACK_ROLES_VALID:
+            raise ValueError(f"Invalid cancel_ack role: {role!r}")
+        if status not in _CANCEL_ACK_STATUS_VALID:
+            raise ValueError(f"Invalid cancel_ack status: {status!r}")
+        return self.create_message(
+            MSG_FILE_CANCEL_ACK,
+            {"transfer_id": transfer_id, "role": role, "status": status},
+        )
+
+    @staticmethod
+    def parse_file_cancel_ack(data: object) -> Optional[Dict[str, str]]:
+        """수신된 cancel_ack 페이로드 검증 — silent ignore 시 None 반환."""
+        if not isinstance(data, dict):
+            return None
+        transfer_id = data.get("transfer_id")
+        role = data.get("role")
+        status = data.get("status")
+        if not is_valid_transfer_id(transfer_id):
+            return None
+        if role not in _CANCEL_ACK_ROLES_VALID:
+            return None
+        if status not in _CANCEL_ACK_STATUS_VALID:
+            return None
+        return {"transfer_id": transfer_id, "role": role, "status": status}
 
     # ── v2.2 R3: 3-step mutual HMAC handshake ──────────────────────────
     #
