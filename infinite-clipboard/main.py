@@ -12,6 +12,8 @@ import logging
 import threading
 import platform
 import base64
+import tempfile
+from pathlib import Path
 
 # Linux(특히 KDE Plasma Wayland)에서 pystray가 Xorg 백엔드를 선택하면
 # StatusNotifierItem과 통합되지 않아 메뉴가 동작하지 않는다.
@@ -127,10 +129,19 @@ class InfiniteClipboard:
 
         # 상태 변경 콜백 (UI 갱신용, TrayApp에서 설정)
         self.on_state_changed = None
+        # 트레이 핸들 (main() 에서 TrayApp 생성 후 주입). v2.3 audit P2 cleanup
+        # 알림 송출에 사용. headless / 테스트 환경에선 None 이므로 가드 필요.
+        self.tray = None
 
     def start(self):
         """앱 시작"""
         self.running = True
+
+        # v2.3 audit P2: staging TTL cleanup (시작 시 1회).
+        # 진행 중 transfer 는 temp_dir 에 있고 staging 에는 완료 파일만 들어가므로
+        # 시작 시 1회로 충분 — 주기 스레드 불필요. 사용자가 즉시 정리하려면
+        # 트레이 메뉴 "Cleanup Staging" 사용.
+        self._cleanup_staging(notify=False)
 
         if self.config.mode == "server":
             self._start_server()
@@ -146,6 +157,40 @@ class InfiniteClipboard:
         cancel_thread.start()
 
         logger.info("Infinite Clipboard 동작 시작")
+
+    def _staging_dir(self) -> Path:
+        """OS 임시 디렉토리 안의 staging 폴더 경로 (paste 가능 임시 저장소).
+
+        0o700: 다중 사용자 시스템에서 다른 사용자 읽기 차단.
+        호출처는 _handle_transfer_complete + _cleanup_staging 두 곳.
+        """
+        staging = Path(tempfile.gettempdir()) / "ic_clipboard"
+        staging.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return staging
+
+    def _cleanup_staging(self, notify: bool = False) -> None:
+        """v2.3 audit P2: staging 디렉토리 mtime TTL 만료 항목 삭제.
+
+        Args:
+            notify: True 면 트레이 OS 알림 표시 (사용자 액션). False 면 silent
+                (앱 시작 시 자동 호출).
+        """
+        from core.file_transfer import cleanup_staging_dir, format_size
+        try:
+            staging = self._staging_dir()
+            deleted, freed = cleanup_staging_dir(
+                staging, self.config.staging_ttl_hours,
+            )
+            if notify and self.tray:
+                if deleted == 0:
+                    self.tray.notify("임시 파일 정리", "정리할 항목이 없습니다.")
+                else:
+                    self.tray.notify(
+                        "임시 파일 정리",
+                        f"{deleted}개 삭제 · {format_size(freed)} 회수",
+                    )
+        except Exception as e:
+            logger.warning(f"staging cleanup 실패: {e}")
 
     def stop(self):
         """앱 종료"""
@@ -762,6 +807,16 @@ class InfiniteClipboard:
             checkpoint.completed_files.append(file_path)
             checkpoint.completed_hashes[file_path] = sha256
             self.checkpoint_manager.save(checkpoint)
+            # v2.3 audit #10: metadata 의 file_entry 에 SHA-256 주입.
+            # restore_folder 시점에 dedup short-circuit 비교용으로 사용.
+            # 송신측 metadata 는 빈 hash 로 오므로 수신측이 FILE_END 시점에 채움.
+            with self._transfers_lock:
+                md = self.pending_transfers.get(transfer_id)
+                if md:
+                    for entry in md.files:
+                        if entry.get("path") == file_path:
+                            entry["hash"] = sha256
+                            break
         else:
             logger.error(f"[파일] 조립 실패 → 전송 중단: {file_path}")
             self._cancel_transfer_tracking(transfer_id)
@@ -781,15 +836,13 @@ class InfiniteClipboard:
             return
 
         try:
-            # 임시 디렉토리에 복원 (사용자가 붙여넣기할 때 파일 관리자가 복사/이동)
-            from pathlib import Path
-            import tempfile
-            staging_dir = Path(tempfile.gettempdir()) / "ic_clipboard"
-            # 0o700: 다중 사용자 시스템에서 다른 사용자 읽기 차단
-            staging_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-
+            # 임시 디렉토리에 복원 (사용자가 붙여넣기할 때 파일 관리자가 복사/이동).
+            # v2.3 audit #10: conflict_policy 전달 — 동일 파일명 재수신 시
+            # SHA-256 dedup short-circuit + 4 정책 분기. 사용자 사고 (numbering 누적) 차단.
+            staging_dir = self._staging_dir()
             restored_paths = self.file_manager.restore_folder(
                 transfer_id, metadata, dest_dir=staging_dir,
+                conflict_policy=self.config.file_conflict_policy,
             )
             self._finish_transfer(transfer_id)
             logger.info(f"[파일] 전체 완료, 임시 저장: {len(restored_paths)}개 파일")
@@ -1243,6 +1296,8 @@ def main():
         # 트레이 모드 — 시스템 트레이에서 실행 (블로킹)
         from ui.tray import TrayApp
         tray = TrayApp(app)
+        # v2.3 audit P2: 양방향 link — app._cleanup_staging 이 tray.notify 호출.
+        app.tray = tray
 
         # 설정 변경 감시 시작
         threading.Thread(

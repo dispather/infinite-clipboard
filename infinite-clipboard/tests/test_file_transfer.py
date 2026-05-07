@@ -13,6 +13,7 @@ from core.file_transfer import (
     FileTransferManager, get_temp_dir, CheckpointManager, Checkpoint,
     FileMetadata, ActiveOutgoing, ActiveIncoming,
     _is_safe_rel_path, _resolve_within,
+    cleanup_staging_dir,
 )
 
 
@@ -313,3 +314,186 @@ def test_active_transfer_locks_are_independent(manager):
     # outgoing cancel 이 incoming 에 영향 안 줌
     manager.cancel_outgoing(md_out.transfer_id, reason="user")
     assert not inn.stop_event.is_set()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 8. v2.3 audit #10 — 충돌 정책 + dedup short-circuit
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _hash(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def test_compute_file_hash_streaming(tmp_path):
+    """streaming SHA-256 이 hashlib 기본 결과와 일치."""
+    p = tmp_path / "x.bin"
+    data = b"hello world" * 1000  # 11 KB
+    p.write_bytes(data)
+    assert FileTransferManager._compute_file_hash(p) == _hash(data)
+
+
+def test_resolve_conflict_no_destination(manager, tmp_path):
+    """destination 없으면 final_path 그대로 반환."""
+    target = manager._resolve_conflict(
+        tmp_path / "new.txt", 100, _hash(b"x"),
+        "rename_with_counter", "tx-1",
+    )
+    assert target == tmp_path / "new.txt"
+
+
+def test_resolve_conflict_dedup_short_circuit(manager, tmp_path):
+    """size + SHA-256 일치 → None (정책 무관 자동 skip).
+
+    사용자 사고 (numbering 누적) 의 직접 차단. 모든 정책에 우선 적용.
+    """
+    p = tmp_path / "same.txt"
+    p.write_bytes(b"identical")
+    h = _hash(b"identical")
+    for policy in ("rename_with_counter", "overwrite", "skip", "rename_with_timestamp"):
+        target = manager._resolve_conflict(p, 9, h, policy, "tx-1")
+        assert target is None, f"dedup must skip under policy={policy}"
+    # 파일은 그대로 (overwrite 도 unlink 안 함 — dedup 가 먼저 가로챔)
+    assert p.exists()
+    assert p.read_bytes() == b"identical"
+
+
+def test_resolve_conflict_size_diff_falls_through(manager, tmp_path):
+    """size 다르면 dedup 안 탐 → 정책 적용."""
+    p = tmp_path / "x.txt"
+    p.write_bytes(b"local")
+    target = manager._resolve_conflict(
+        p, expected_size=999, expected_hash=_hash(b"local"),
+        policy="rename_with_counter", transfer_id="tx-1",
+    )
+    assert target == tmp_path / "x (1).txt"
+
+
+def test_resolve_conflict_hash_diff_falls_through(manager, tmp_path):
+    """size 같고 hash 다르면 dedup 안 탐 (다른 콘텐츠) → 정책 적용."""
+    p = tmp_path / "x.txt"
+    p.write_bytes(b"localx")
+    target = manager._resolve_conflict(
+        p, expected_size=6, expected_hash="deadbeef" * 8,
+        policy="rename_with_counter", transfer_id="tx-1",
+    )
+    assert target == tmp_path / "x (1).txt"
+
+
+def test_resolve_conflict_overwrite_unlinks_existing(manager, tmp_path):
+    """overwrite 정책: 기존 파일 unlink 후 final_path 반환."""
+    p = tmp_path / "x.txt"
+    p.write_bytes(b"old")
+    target = manager._resolve_conflict(p, 999, None, "overwrite", "tx-1")
+    assert target == p
+    assert not p.exists()
+
+
+def test_resolve_conflict_skip_returns_none(manager, tmp_path):
+    """skip 정책: None + 기존 파일 보존."""
+    p = tmp_path / "x.txt"
+    p.write_bytes(b"keep")
+    target = manager._resolve_conflict(p, 999, None, "skip", "tx-1")
+    assert target is None
+    assert p.exists()
+    assert p.read_bytes() == b"keep"
+
+
+def test_resolve_conflict_timestamp_format(manager, tmp_path):
+    """rename_with_timestamp: name.YYYYMMDD-HHMMSS.ext 형식."""
+    p = tmp_path / "x.txt"
+    p.write_bytes(b"old")
+    target = manager._resolve_conflict(p, 999, None, "rename_with_timestamp", "tx-1")
+    assert target is not None
+    assert target.parent == p.parent
+    assert target.suffix == ".txt"
+    # stem = "x.YYYYMMDD-HHMMSS"
+    parts = target.stem.split(".")
+    assert len(parts) == 2 and parts[0] == "x"
+    ts = parts[1]
+    assert len(ts) == 15 and ts[8] == "-"  # 8자 날짜 + "-" + 6자 시각
+
+
+def test_resolve_conflict_unknown_policy_falls_back(manager, tmp_path):
+    """모르는 정책 → counter 폴백 (config validation 외 직접 호출 대비)."""
+    p = tmp_path / "x.txt"
+    p.write_bytes(b"old")
+    target = manager._resolve_conflict(p, 999, None, "garbage_policy", "tx-1")
+    assert target == tmp_path / "x (1).txt"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 9. v2.3 audit P2 — staging cleanup TTL
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_cleanup_staging_removes_expired_files(tmp_path):
+    """mtime > TTL 인 파일 삭제, 신선 파일 보존."""
+    import os, time
+    staging = tmp_path / "ic_clipboard"
+    staging.mkdir()
+    old = staging / "old.txt"; old.write_bytes(b"A" * 100)
+    new = staging / "new.txt"; new.write_bytes(b"B" * 200)
+    past = time.time() - 30 * 3600  # 30 hours ago
+    os.utime(old, (past, past))
+    deleted, freed = cleanup_staging_dir(staging, ttl_hours=24)
+    assert deleted == 1
+    assert freed == 100
+    assert not old.exists()
+    assert new.exists()
+
+
+def test_cleanup_staging_removes_expired_directory(tmp_path):
+    """오래된 폴더 (재귀 size 합산) 삭제."""
+    import os, time
+    staging = tmp_path / "ic_clipboard"
+    staging.mkdir()
+    old_dir = staging / "myfolder"
+    old_dir.mkdir()
+    (old_dir / "a.txt").write_bytes(b"a" * 50)
+    (old_dir / "b.txt").write_bytes(b"b" * 50)
+    past = time.time() - 30 * 3600
+    for entry in [old_dir / "a.txt", old_dir / "b.txt", old_dir]:
+        os.utime(entry, (past, past))
+    deleted, freed = cleanup_staging_dir(staging, ttl_hours=24)
+    assert deleted == 1  # 폴더 1개
+    assert freed == 100  # 두 파일 합산
+    assert not old_dir.exists()
+
+
+def test_cleanup_staging_protects_active_paths(tmp_path):
+    """active_paths set 안에 있는 항목은 만료돼도 보존."""
+    import os, time
+    staging = tmp_path / "ic_clipboard"
+    staging.mkdir()
+    p = staging / "active.txt"
+    p.write_bytes(b"in-flight")
+    past = time.time() - 30 * 3600
+    os.utime(p, (past, past))
+    deleted, freed = cleanup_staging_dir(
+        staging, ttl_hours=24, active_paths={str(p)},
+    )
+    assert deleted == 0
+    assert p.exists()
+
+
+def test_cleanup_staging_missing_dir_is_noop(tmp_path):
+    """존재 안 하는 dir 는 (0, 0) — 예외 없음."""
+    deleted, freed = cleanup_staging_dir(tmp_path / "nonexistent", ttl_hours=24)
+    assert (deleted, freed) == (0, 0)
+
+
+def test_cleanup_staging_zero_or_negative_ttl_clamped(tmp_path):
+    """ttl_hours=0 또는 음수는 max(1, ...) 로 클램프 — 즉시 모두 삭제 위험 차단."""
+    import os, time
+    staging = tmp_path / "ic_clipboard"
+    staging.mkdir()
+    fresh = staging / "fresh.txt"
+    fresh.write_bytes(b"x")
+    # 신선 파일 (mtime=now). ttl 0/음수도 cutoff = now - 1h 가 되므로 보존돼야 함.
+    deleted, _ = cleanup_staging_dir(staging, ttl_hours=0)
+    assert deleted == 0
+    assert fresh.exists()
+    deleted, _ = cleanup_staging_dir(staging, ttl_hours=-100)
+    assert deleted == 0
+    assert fresh.exists()

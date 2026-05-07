@@ -14,6 +14,16 @@ from typing import Optional, List
 _logger = logging.getLogger(__name__)
 
 
+# v2.3: 파일 충돌 정책 화이트리스트 — file_transfer.py 가 import 해서 사용.
+# 사용자 사고 차단을 위해 SHA-256 dedup short-circuit 이 모든 정책에 우선 적용된다.
+VALID_FILE_CONFLICT_POLICIES = (
+    "overwrite",                # 기존 덮어쓰기
+    "skip",                     # 수신 안 함
+    "rename_with_timestamp",    # name.YYYYMMDD-HHMMSS.ext
+    "rename_with_counter",      # name (1).ext (v2.2 까지의 동작)
+)
+
+
 # OS 감지
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
@@ -73,6 +83,14 @@ class AppConfig:
     # 명시적 "0.0.0.0" = 모든 인터페이스 (물리 LAN 노출 — opt-in).
     # 명시적 IP (예 "100.99.126.25") = 그 인터페이스만.
     bind_address: str = ""
+    # v2.3: 파일 충돌 정책 — 동일 파일명 재수신 시 동작.
+    # SHA-256 dedup short-circuit (송신측 hash ↔ 수신측 hash 일치 시 자동 skip)
+    # 이 모든 정책에 우선 적용되어, 같은 파일 재수신 시 numbering 누적을 차단한다.
+    # 옵션은 VALID_FILE_CONFLICT_POLICIES 참조. 기본값은 v2.2 까지 동작 호환.
+    file_conflict_policy: str = "rename_with_counter"
+    # v2.3: staging 디렉토리 (/tmp/ic_clipboard 등) TTL — mtime 기반 만료 후 삭제.
+    # 1 ~ 720 시간 (1시간 ~ 30일). 0 또는 음수는 비허용 (의도치 않은 즉시 삭제 방지).
+    staging_ttl_hours: int = 24
 
     def __post_init__(self):
         if not self.device_name:
@@ -172,6 +190,25 @@ class AppConfig:
                     f"bind_address={self.bind_address!r} not a valid IP, reset to ''"
                 )
                 self.bind_address = ""
+
+        # v2.3: file_conflict_policy 화이트리스트 검증.
+        # 모르는 값이면 default 로 reset 해 사용자 사고를 차단.
+        if self.file_conflict_policy not in VALID_FILE_CONFLICT_POLICIES:
+            _logger.warning(
+                f"file_conflict_policy={self.file_conflict_policy!r} invalid, "
+                f"reset to 'rename_with_counter'"
+            )
+            self.file_conflict_policy = "rename_with_counter"
+
+        # v2.3: staging_ttl_hours 범위 검증 (1~720 시간).
+        # 0/음수는 의도치 않은 즉시 삭제 위험으로 거부.
+        if not isinstance(self.staging_ttl_hours, int) \
+                or not (1 <= self.staging_ttl_hours <= 720):
+            _logger.warning(
+                f"staging_ttl_hours={self.staging_ttl_hours!r} out of range [1,720], "
+                f"reset to 24"
+            )
+            self.staging_ttl_hours = 24
 
 
 CONFIG_FILE = _get_config_dir() / "settings.json"

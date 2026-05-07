@@ -307,6 +307,62 @@ def _resolve_within(base: Path, rel_path: str) -> Optional[Path]:
     return final
 
 
+def cleanup_staging_dir(
+    staging_dir: Path,
+    ttl_hours: int,
+    active_paths: Optional[set] = None,
+) -> Tuple[int, int]:
+    """v2.3 audit P2: staging 디렉토리의 mtime 만료 항목 자동 삭제.
+
+    `/tmp/ic_clipboard` 등 OS 클립보드에 등록된 임시 파일 저장소가 무한 증식하지
+    않도록 주기 정리. dedup short-circuit 과 결합해 사용자 사고 (numbering 누적 +
+    일괄 정리) 의 1차 원인 자체를 제거.
+
+    Args:
+        staging_dir: 정리 대상 디렉토리 (없으면 no-op).
+        ttl_hours: 이 시간보다 오래된 항목 (mtime 기준) 만 삭제. 1 이상.
+        active_paths: 진행 중 transfer 가 점유 중인 path 집합 (보호 대상).
+            현재는 항상 None — 진행 중 파일은 temp_dir 에 있고 staging 에는
+            transfer 완료 직후 들어가므로 cutoff 가 자동 보호. 미래 확장 여지로 둠.
+
+    Returns:
+        (삭제된 항목 수, 해제된 바이트 수).
+    """
+    if not staging_dir.exists() or not staging_dir.is_dir():
+        return (0, 0)
+
+    cutoff = time.time() - max(1, ttl_hours) * 3600
+    active = active_paths or set()
+    deleted = 0
+    freed = 0
+
+    for entry in staging_dir.iterdir():
+        try:
+            if str(entry) in active:
+                continue
+            stat = entry.stat()
+            if stat.st_mtime >= cutoff:
+                continue
+            if entry.is_dir():
+                size = sum(
+                    f.stat().st_size for f in entry.rglob("*") if f.is_file()
+                )
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                size = stat.st_size
+                entry.unlink(missing_ok=True)
+            deleted += 1
+            freed += size
+        except OSError as e:
+            logger.warning(f"staging cleanup 실패 ({entry}): {e}")
+
+    if deleted:
+        logger.info(
+            f"staging cleanup: {deleted}개 항목 삭제, {format_size(freed)} 회수"
+        )
+    return (deleted, freed)
+
+
 def _get_app_config_dir() -> Path:
     """OS별 앱 설정 디렉토리 반환 (config.py 위임)"""
     from config import _get_config_dir
@@ -807,7 +863,9 @@ class FileTransferManager:
     # ── 폴더 구조 복원 ──────────────────────────────────────────────
 
     def restore_folder(
-        self, transfer_id: str, metadata: FileMetadata, dest_dir: Optional[Path] = None,
+        self, transfer_id: str, metadata: FileMetadata,
+        dest_dir: Optional[Path] = None,
+        conflict_policy: str = "rename_with_counter",
     ) -> list[str]:
         """
         모든 파일 수신/조립 완료 후 목적지에 폴더 구조를 복원한다.
@@ -816,9 +874,14 @@ class FileTransferManager:
             transfer_id: 전송 ID
             metadata: 전송 메타데이터
             dest_dir: 저장 경로 (None이면 self.download_path 사용)
+            conflict_policy: 동일 파일명 충돌 시 동작 (audit #10).
+                "rename_with_counter" (default, v2.2 호환), "overwrite",
+                "skip", "rename_with_timestamp". SHA-256 dedup short-circuit 은
+                정책 무관 자동 skip 으로 우선 적용.
 
         Returns:
-            list[str]: 복원된 파일 절대경로 목록
+            list[str]: 복원된 파일 절대경로 목록. dedup/skip 으로 새로 쓰지 않은
+                경우에도 기존 final_path 가 그대로 들어감 (사용자가 paste 가능하도록).
         """
         # Task 2.5: transfer_id 형식 검증
         if not _is_valid_transfer_id(transfer_id):
@@ -832,6 +895,8 @@ class FileTransferManager:
 
         for file_entry in metadata.files:
             rel_path = file_entry["path"]
+            expected_size = file_entry.get("size")
+            expected_hash = file_entry.get("hash")
 
             # 경로 이탈 방어 — target 바깥으로 나가면 스킵
             final_path = _resolve_within(target, rel_path)
@@ -847,14 +912,23 @@ class FileTransferManager:
             # 상위 디렉토리 생성
             final_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # 동일 이름 파일이 있으면 번호 추가
-            final_path = self._unique_path(final_path)
+            # v2.3 audit #10: dedup short-circuit + 4 정책 분기.
+            # None 반환은 skip (dedup 일치 또는 skip policy) — 기존 final_path 를 그대로 사용.
+            target_path = self._resolve_conflict(
+                final_path, expected_size, expected_hash, conflict_policy, transfer_id,
+            )
+
+            if target_path is None:
+                # 쓰기 안 함 — 기존 파일이 있으면 클립보드 등록용으로 path 만 추가.
+                if final_path.exists():
+                    restored_paths.append(str(final_path))
+                continue
 
             # 조립된 파일 이동
             if assembled_path.exists():
-                shutil.move(str(assembled_path), str(final_path))
-                logger.info(f"[{transfer_id}] 파일 복원: {final_path}")
-                restored_paths.append(str(final_path))
+                shutil.move(str(assembled_path), str(target_path))
+                logger.info(f"[{transfer_id}] 파일 복원: {target_path}")
+                restored_paths.append(str(target_path))
             else:
                 logger.warning(
                     f"[{transfer_id}] 조립 파일 없음 (건너뜀): {assembled_path}"
@@ -910,6 +984,88 @@ class FileTransferManager:
             if not new_path.exists():
                 return new_path
             counter += 1
+
+    @staticmethod
+    def _compute_file_hash(path: Path, chunk_size: int = 65536) -> str:
+        """파일의 SHA-256 hex digest 를 streaming 으로 계산.
+
+        dedup short-circuit 용. 큰 파일도 메모리 폭발 없이 계산.
+        OSError 는 호출자가 처리 (빈 문자열 fallback 등).
+        """
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for block in iter(lambda: f.read(chunk_size), b""):
+                h.update(block)
+        return h.hexdigest()
+
+    def _resolve_conflict(
+        self,
+        final_path: Path,
+        expected_size: Optional[int],
+        expected_hash: Optional[str],
+        policy: str,
+        transfer_id: str,
+    ) -> Optional[Path]:
+        """동일 파일명 충돌을 dedup short-circuit + 4 정책으로 해결.
+
+        Returns:
+            Path: assemble 결과를 이동할 대상 경로 (final_path 또는 변형 경로).
+                  policy=="overwrite" 인 경우 기존 파일을 미리 unlink 후 final_path 반환.
+            None: 쓰기를 건너뛰어야 함 (dedup 일치 또는 policy=="skip").
+                  호출자는 기존 final_path 를 클립보드 등록 등에 사용.
+
+        dedup 우선순위: 정책 분기 전에 size+SHA-256 일치 확인 → 같은 콘텐츠면
+        정책 무관 자동 skip. audit #10 의 사용자 사고 (numbering 누적) 차단.
+        """
+        if not final_path.exists():
+            return final_path
+
+        # 1) dedup short-circuit — size 먼저 (큰 파일 hash 비용 회피).
+        if expected_hash and expected_size is not None:
+            try:
+                actual_size = final_path.stat().st_size
+            except OSError:
+                actual_size = -1
+            if actual_size == expected_size:
+                try:
+                    actual_hash = self._compute_file_hash(final_path)
+                except OSError as e:
+                    logger.warning(
+                        f"[{transfer_id}] dedup hash 계산 실패 ({final_path.name}): {e}"
+                    )
+                    actual_hash = ""
+                if actual_hash == expected_hash:
+                    logger.info(
+                        f"[{transfer_id}] dedup skip (동일 콘텐츠): {final_path.name}"
+                    )
+                    return None
+
+        # 2) 4 정책 분기.
+        if policy == "overwrite":
+            try:
+                final_path.unlink()
+                logger.info(f"[{transfer_id}] overwrite: {final_path.name}")
+                return final_path
+            except OSError as e:
+                logger.warning(
+                    f"[{transfer_id}] overwrite 실패 → skip ({final_path.name}): {e}"
+                )
+                return None
+
+        if policy == "skip":
+            logger.info(f"[{transfer_id}] skip (policy): {final_path.name}")
+            return None
+
+        if policy == "rename_with_timestamp":
+            ts = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+            renamed = final_path.parent / f"{final_path.stem}.{ts}{final_path.suffix}"
+            # 1초 내 중복 시 counter 폴백 (timestamp 충돌 방지).
+            if renamed.exists():
+                renamed = self._unique_path(renamed)
+            return renamed
+
+        # default — rename_with_counter (v2.2 호환).
+        return self._unique_path(final_path)
 
 
 # ═══════════════════════════════════════════════════════════════════════

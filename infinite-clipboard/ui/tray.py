@@ -109,6 +109,7 @@ class TrayApp:
             pystray.MenuItem("Transfers", self._show_transfers),
             pystray.MenuItem("Settings", self._show_settings),
             pystray.MenuItem("View Log", self._view_log),
+            pystray.MenuItem("Cleanup Staging", self._cleanup_staging),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("About", self._show_about),
             pystray.MenuItem("Quit", self._quit),
@@ -210,6 +211,16 @@ class TrayApp:
 
     def _show_settings(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
         self._launch_window("settings")
+
+    def _cleanup_staging(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
+        """v2.3 audit P2: 사용자가 즉시 staging 정리 트리거.
+
+        TTL 만료 항목만 삭제 (진행 중 transfer 보호). 결과는 OS 알림으로 통지.
+        """
+        try:
+            self.app._cleanup_staging(notify=True)
+        except Exception as e:
+            logger.warning(f"[트레이] cleanup 트리거 실패: {e}")
 
     def _show_about(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
         """About 모달 창 표시 — 별도 프로세스(--window about)로 띄움.
