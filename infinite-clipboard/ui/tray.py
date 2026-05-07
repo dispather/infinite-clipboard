@@ -212,19 +212,13 @@ class TrayApp:
         self._launch_window("settings")
 
     def _show_about(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
-        """About 정보를 OS 알림으로 표시 (트레이에서 모달 창은 복잡하니 알림으로)"""
-        try:
-            from version import __version__, __app_name__, __author__, __license__
-        except ImportError:
-            __version__ = "2.0.0"
-            __app_name__ = "Infinite Clipboard"
-            __author__ = "dispather"
-            __license__ = "MIT"
-        self.notify(
-            f"{__app_name__} v{__version__}",
-            f"© {__author__} · {__license__} License\n"
-            f"Tailscale LAN 클립보드/파일 공유",
-        )
+        """About 모달 창 표시 — 별도 프로세스(--window about)로 띄움.
+
+        v2.2.1 까지는 OS 알림(plyer.notification)으로 표시했으나
+        Windows Focus Assist / macOS 알림 권한 미부여 시 silent 처리되어
+        사용자가 버전 확인 불가. 3 OS 동일 표시 보장을 위해 모달로 전환.
+        """
+        self._launch_window("about")
 
     def _view_log(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
         """로그 파일을 OS 기본 텍스트 편집기로 열기"""

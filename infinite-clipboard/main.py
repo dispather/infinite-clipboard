@@ -1167,6 +1167,9 @@ def _run_window_only(window_type: str) -> None:
         from ui.transfer_window import TransferWindow
         state_file = str(_get_config_dir() / "transfer_state.json")
         win = TransferWindow(state_file)
+    elif window_type == "about":
+        from ui.about_window import AboutWindow
+        win = AboutWindow()
 
     if win is None:
         sys.exit(1)
@@ -1190,7 +1193,7 @@ def main():
     parser.add_argument("--no-tray", action="store_true", help="트레이 없이 콘솔 모드")
     parser.add_argument("--debug", action="store_true", help="디버그 모드 (상세 로그)")
     # 내부용: 트레이가 자기 자신을 재호출해 UI 창만 띄울 때 사용
-    parser.add_argument("--window", choices=["settings", "history", "transfers"],
+    parser.add_argument("--window", choices=["settings", "history", "transfers", "about"],
                         help=argparse.SUPPRESS)
     args = parser.parse_args()
 
