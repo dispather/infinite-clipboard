@@ -184,7 +184,7 @@ class TrayApp:
           번들에는 ui/*.py 원본이 없으므로 subprocess로 .py 를 가리킬 수 없다.
         - 개발 모드 (python3 main.py): 같은 해석기로 main.py 를 --window 인자와 함께 재호출.
         """
-        if window_type not in ("settings", "history", "transfers"):
+        if window_type not in ("settings", "history", "transfers", "about"):
             return
 
         if getattr(sys, "frozen", False):
