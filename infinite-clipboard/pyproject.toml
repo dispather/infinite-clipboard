@@ -1,6 +1,6 @@
 [project]
 name = "infinite-clipboard"
-version = "2.3.0"
+version = "2.3.1"
 description = "Tailscale VPN으로 연결된 PC 간 클립보드/파일 실시간 공유"
 requires-python = ">=3.10"
 
