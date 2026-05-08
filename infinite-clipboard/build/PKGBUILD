@@ -4,12 +4,12 @@
 #
 # 빌드:  build_linux.sh 로 dist/InfiniteClipboard/ 생성 후
 #        cd build && makepkg -f
-# 설치:  sudo pacman -U infinite-clipboard-2.2.1-1-x86_64.pkg.tar.zst
+# 설치:  sudo pacman -U infinite-clipboard-2.3.1-1-x86_64.pkg.tar.zst
 # 삭제:  sudo pacman -R infinite-clipboard
 # ─────────────────────────────────────────────────────────────────────
 
 pkgname=infinite-clipboard
-pkgver=2.2.1
+pkgver=2.3.1
 pkgrel=1
 pkgdesc="Tailscale LAN 내 PC 간 클립보드·파일 실시간 공유 트레이 앱"
 arch=('x86_64')
