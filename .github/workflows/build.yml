@@ -108,10 +108,22 @@ jobs:
 
       - name: Install system dependencies
         # 미니멀 컨테이너 → pacman db sync + 런타임/빌드 deps 모두 설치.
-        # 함정 #7 대응으로 python-gobject + libayatana-appindicator 시스템 패키지 필수.
-        # tk: customtkinter 의 PIL._tkinter_finder 참조 (함정 #6).
-        # librsvg: generate_icons.sh 의 rsvg-convert.
-        # git: actions/checkout 이 git 바이너리 사용.
+        #
+        # 함정 #7 의 확장형 — PyInstaller 가 --system-site-packages venv 의
+        # GI/typelib 을 번들에 포함하려면 *빌드 시점* 시스템에 해당 라이브러리가
+        # 실제로 있어야 한다. base-devel 만으론 부족:
+        #   - gtk3:             Gtk-3.0.typelib + libgtk-3.so (AppIndicator 의존)
+        #   - gdk-pixbuf2:      이미지 로더 (트레이 PNG 아이콘 디코딩)
+        #   - libappindicator-gtk3 (provide name of libappindicator):
+        #                       AppIndicator3-0.1.typelib + libappindicator3.so.1
+        #                       — pystray 의 appindicator 백엔드가 import
+        #   - python-dbus:      _dbus_bindings.so (트레이 D-Bus 통신)
+        # 이걸 빼면 KDE Plasma Wayland 등 SNI 기반 DE 에서 트레이 silent fail
+        # (로컬 빌드 산출물은 KDE 호스트에서 빌드돼 자연스럽게 포함됐던 것).
+        #
+        # tk:        customtkinter 의 PIL._tkinter_finder 참조 (함정 #6).
+        # librsvg:   generate_icons.sh 의 rsvg-convert.
+        # git:       actions/checkout 이 git 바이너리 사용.
         run: |
           pacman -Syu --noconfirm
           pacman -S --noconfirm --needed \
@@ -119,6 +131,7 @@ jobs:
             python python-pip \
             wl-clipboard xclip \
             python-gobject libayatana-appindicator \
+            gtk3 gdk-pixbuf2 libappindicator-gtk3 python-dbus \
             librsvg \
             tk
 
