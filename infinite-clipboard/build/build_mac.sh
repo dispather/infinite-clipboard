@@ -91,14 +91,18 @@ if [ "$venv_tk" != "8.6" ]; then
     uv venv --python "$BUILD_PY" "$BUILD_VENV"
 fi
 
-# ── 의존성 동기화 + pyinstaller ───────────────────────────────────────
+# ── 의존성 설치 + pyinstaller ─────────────────────────────────────────
 # uv 는 기본적으로 .venv 를 참조 → --active 로 VIRTUAL_ENV 지정 사용 강제.
-# --no-extra win: pyproject.toml 의 [project.optional-dependencies].win 에
-#   마커 없는 pywin32 가 있어, [tool.uv].environments 에 win32 가 포함된
-#   상태로 universal resolution 한 lockfile 을 따라가면 macOS 에서 pywin32
-#   설치를 시도해 실패. macOS 에선 win extras 가 무의미하므로 명시 제외.
+#
+# `uv sync` 대신 `uv pip install -r requirements_mac.txt`:
+#   uv.lock 은 [tool.uv].environments = ["win32","darwin","linux"] universal
+#   resolution 으로 lock 됨 → [project.optional-dependencies].win 의
+#   마커 없는 pywin32 가 lock 에 포함되어 macOS sync 시 강제 만족 시도해
+#   "no macOS-compatible wheels" 로 실패. --no-extra win 도 lockfile 의
+#   이미 lock 된 항목은 못 빼므로 lockfile 자체를 우회.
+#   requirements_mac.txt 는 pip 호환 형식이라 lockfile 무관 + 마커 매끄러움.
 export VIRTUAL_ENV="$PWD/$BUILD_VENV"
-uv sync --active --no-extra win
+uv pip install -r requirements_mac.txt
 uv pip install --quiet pyinstaller
 
 # ── 필수 자원 존재 검증 ───────────────────────────────────────────────
