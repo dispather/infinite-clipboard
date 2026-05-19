@@ -92,9 +92,13 @@ if [ "$venv_tk" != "8.6" ]; then
 fi
 
 # ── 의존성 동기화 + pyinstaller ───────────────────────────────────────
-# uv 는 기본적으로 .venv 를 참조 → --active 로 VIRTUAL_ENV 지정 사용 강제
+# uv 는 기본적으로 .venv 를 참조 → --active 로 VIRTUAL_ENV 지정 사용 강제.
+# --no-extra win: pyproject.toml 의 [project.optional-dependencies].win 에
+#   마커 없는 pywin32 가 있어, [tool.uv].environments 에 win32 가 포함된
+#   상태로 universal resolution 한 lockfile 을 따라가면 macOS 에서 pywin32
+#   설치를 시도해 실패. macOS 에선 win extras 가 무의미하므로 명시 제외.
 export VIRTUAL_ENV="$PWD/$BUILD_VENV"
-uv sync --active
+uv sync --active --no-extra win
 uv pip install --quiet pyinstaller
 
 # ── 필수 자원 존재 검증 ───────────────────────────────────────────────
