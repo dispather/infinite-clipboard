@@ -11,18 +11,30 @@ Tailscale VPN으로 연결된 Windows/macOS/Linux PC 간 클립보드(텍스트/
 
 ## 사용자 설치 (배포판)
 
-각 OS 패키지를 받아서 설치한다. 모든 PC의 `auth_key`는 **반드시 동일해야** 한다 (아래 "최초 1회 키 공유" 참조).
+GitHub Releases 페이지에서 OS 별 패키지를 받아 설치한다. 모든 PC의 `auth_key`는 **반드시 동일해야** 한다 (아래 "최초 1회 키 공유" 참조).
 
-| OS | 파일 | 설치 방법 |
-|----|------|-----------|
-| Linux (Arch/CachyOS) | `infinite-clipboard-2.0.0-1-x86_64.pkg.tar.zst` | `sudo pacman -U <파일>` |
-| macOS | `InfiniteClipboard-2.0.0.dmg` | DMG 열기 → `/Applications`로 드래그 |
-| Windows | `InfiniteClipboard-Setup-2.0.0.exe` | 설치 프로그램 실행 → 안내 따르기 |
+| OS | 파일 (X.Y.Z = 버전) | 설치 방법 |
+|----|---------------------|-----------|
+| Linux (Arch/CachyOS) | `infinite-clipboard-X.Y.Z-1-x86_64.pkg.tar.zst` | `sudo pacman -U <파일>` |
+| macOS (Apple Silicon) | `Infinite Clipboard X.Y.Z.dmg` | DMG 열기 → `/Applications`로 드래그 → **아래 Gatekeeper 우회 필수** |
+| Windows | `infinite-clipboard-setup-X.Y.Z.exe` | 설치 프로그램 실행 → 안내 따르기 (per-user, 관리자 권한 불필요) |
 
 설치 후:
 - Linux: 애플리케이션 메뉴 → Infinite Clipboard
-- macOS: 런치패드 또는 `open /Applications/InfiniteClipboard.app`. 첫 실행 시 Gatekeeper 경고가 나오면 Finder에서 우클릭 → 열기로 1회 통과
+- macOS: 런치패드 또는 `open "/Applications/Infinite Clipboard.app"`. 아래 Gatekeeper 우회를 먼저 수행해야 정상 실행됨
 - Windows: 시작 메뉴 → Infinite Clipboard (설치 시 "자동 시작" 체크 가능)
+
+### macOS Gatekeeper 우회 (1회 필수)
+
+DMG 가 코드 서명되어 있지 않아 macOS 가 quarantine 속성을 붙여 차단한다 ("Apple은 ... 악성 코드가 없음을 확인할 수 없습니다"). 다음 명령으로 1회 해제한다:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/Infinite Clipboard.app"
+```
+
+해제 후엔 일반 앱처럼 실행 + 자동 시작 가능. 새 버전을 받아 덮어쓸 때마다 같은 명령을 1회 다시 실행해야 한다.
+
+> 우클릭 → 열기 방식은 unsigned ARM64 빌드에서 차단 다이얼로그가 그대로 떠 작동하지 않을 수 있다. `xattr` 명령이 가장 확실하다.
 
 ### 최초 1회 키 공유
 
