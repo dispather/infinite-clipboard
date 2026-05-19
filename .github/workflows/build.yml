@@ -1,0 +1,212 @@
+name: Build (Windows + Linux)
+
+# 트리거:
+#   - tag push `v*` (예: v2.3.2)        → 빌드 + GitHub Releases draft 생성/attach
+#   - workflow_dispatch (수동 실행)      → 빌드만 (artifact 만 남김)
+#
+# Phase 1: Windows + Linux. macOS 는 Phase 2 에서 추가.
+# 빌드 산출물은 GitHub Actions artifact 로 항상 업로드, tag 빌드일 때만 Release 에 첨부.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# 동일 ref 의 중복 실행 자동 취소
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────
+  # Windows: windows-latest + Python 3.12 + Inno Setup
+  # build_win.bat 를 그대로 호출. IC_BUILD_DIR override 하지 않는다 —
+  # installer.iss 가 GetEnv("LOCALAPPDATA") 로 SourceDir/OutputDir 를
+  # 결정하는데 build_win.bat 는 ISCC 에 /DSourceDir 를 안 넘기므로
+  # PyInstaller 와 Inno Setup 의 작업 폴더가 같은 LOCALAPPDATA 트리에
+  # 있어야 한다. 빌드 후 산출물만 workspace 로 복사해 upload.
+  # ─────────────────────────────────────────────────────────────────────
+  windows:
+    name: Windows build
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: cmd
+        working-directory: infinite-clipboard
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        # .gitattributes 의 *.bat eol=crlf 강제 → 함정 #21(a) CRLF 보장.
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: infinite-clipboard/requirements_win.txt
+
+      - name: Install Inno Setup
+        # chocolatey 가 windows-latest 에 사전 설치되어 있음.
+        # ISCC.exe → "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" 로 떨어짐 →
+        # build_win.bat 의 ISCC 자동 탐색 [3순위] 가 hit.
+        run: choco install innosetup -y --no-progress
+        shell: pwsh
+
+      - name: Show env
+        run: |
+          python --version
+          pip --version
+          echo LOCALAPPDATA=%LOCALAPPDATA%
+
+      - name: Run build_win.bat
+        # IC_BUILD_DIR 미지정 → default `%LOCALAPPDATA%\InfiniteClipboard-Build\`.
+        # 마지막 `pause` 는 stdin 이 non-interactive 라 즉시 통과.
+        run: build\build_win.bat
+
+      - name: Stage installer to workspace
+        # %LOCALAPPDATA% 가 user 이름 (`runneradmin`) 에 묶여 있어 upload-artifact
+        # path 에 직접 박지 않는다. workspace 로 명시 복사 후 업로드.
+        run: |
+          mkdir "%GITHUB_WORKSPACE%\artifacts"
+          copy "%LOCALAPPDATA%\InfiniteClipboard-Build\installer\infinite-clipboard-setup-*.exe" "%GITHUB_WORKSPACE%\artifacts\"
+          dir "%GITHUB_WORKSPACE%\artifacts\"
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: ${{ github.workspace }}\artifacts\infinite-clipboard-setup-*.exe
+          if-no-files-found: error
+          retention-days: 30
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Linux: archlinux container 안에서 build_linux.sh 호출
+  # ubuntu-latest 는 makepkg/pacman 없음 → archlinux base-devel 필수.
+  # makepkg 는 root 거부 → 비-root user `builder` 생성.
+  # ─────────────────────────────────────────────────────────────────────
+  linux:
+    name: Linux build (Arch)
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+
+    steps:
+      # ── Cache restore (이 step 들은 매번 실행되지만 cache 가 비어있으면
+      #    no-op. save 는 job 종료 시 post-hook 으로 자동 수행) ─────────
+      - name: Restore pacman package cache
+        # /var/cache/pacman/pkg/ 에 다운로드된 .pkg.tar.zst 가 남아있으면
+        # `pacman -S` 가 mirror 다운로드 skip. db cache (/var/lib/pacman/sync)
+        # 는 Arch partial upgrade 함정 위험으로 일부러 제외 — DB 는 매번 sync.
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/pacman/pkg
+          key: pacman-pkg-${{ hashFiles('.github/workflows/build.yml') }}
+          restore-keys: |
+            pacman-pkg-
+
+      - name: Install system dependencies
+        # 미니멀 컨테이너 → pacman db sync + 런타임/빌드 deps 모두 설치.
+        # 함정 #7 대응으로 python-gobject + libayatana-appindicator 시스템 패키지 필수.
+        # tk: customtkinter 의 PIL._tkinter_finder 참조 (함정 #6).
+        # librsvg: generate_icons.sh 의 rsvg-convert.
+        # git: actions/checkout 이 git 바이너리 사용.
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed \
+            git sudo \
+            python python-pip \
+            wl-clipboard xclip \
+            python-gobject libayatana-appindicator \
+            librsvg \
+            tk
+
+      - name: Create non-root build user
+        # makepkg 는 EUID=0 거부. NOPASSWD + env_keep 으로 GITHUB_* / IC_BUILD_DIR
+        # 전달 가능하게 설정 (sudo 의 기본 동작은 env reset).
+        run: |
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+          echo 'Defaults env_keep += "IC_BUILD_DIR GITHUB_WORKSPACE HOME PATH"' >> /etc/sudoers.d/builder
+
+      - name: Restore pip cache
+        # builder 가 pip 을 호출하므로 cache 는 /home/builder/.cache/pip 로 떨어진다.
+        # 다음 step 에서 chown 해줘야 builder 가 실제로 쓸 수 있음 (cache 복원은 root 권한).
+        uses: actions/cache@v4
+        with:
+          path: /home/builder/.cache/pip
+          key: pip-linux-${{ hashFiles('infinite-clipboard/requirements.txt', 'infinite-clipboard/requirements_linux.txt') }}
+          restore-keys: |
+            pip-linux-
+
+      - name: Fix pip cache ownership
+        run: |
+          mkdir -p /home/builder/.cache/pip
+          chown -R builder:builder /home/builder/.cache
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fix workspace ownership
+        run: chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      - name: Run build_linux.sh as builder
+        # IC_BUILD_DIR 을 workspace 안으로 둬서 upload-artifact 가 잡을 수 있게 함.
+        # build_linux.sh 는 IC_BUILD_DIR 을 spec/makepkg 양쪽에 일관 적용.
+        env:
+          IC_BUILD_DIR: ${{ github.workspace }}/ic-build
+        run: |
+          sudo -u builder --preserve-env=IC_BUILD_DIR,GITHUB_WORKSPACE bash -c '
+            cd "$GITHUB_WORKSPACE/infinite-clipboard"
+            bash build/build_linux.sh
+          '
+
+      - name: List build outputs
+        run: ls -la "$GITHUB_WORKSPACE/ic-build/"
+        continue-on-error: true
+
+      - name: Upload pacman package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-arch-package
+          path: ${{ github.workspace }}/ic-build/infinite-clipboard-*-x86_64.pkg.tar.zst
+          if-no-files-found: error
+          retention-days: 30
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Release: tag push 일 때만 실행. draft 로 둬서 사용자가 changelog 검토 후
+  # 직접 publish 하도록 한다 (자동 publish 시 실수 복구 어려움).
+  # ─────────────────────────────────────────────────────────────────────
+  release:
+    name: Create GitHub Release (draft)
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: artifacts/
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-arch-package
+          path: artifacts/
+
+      - name: List artifacts
+        run: ls -la artifacts/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            artifacts/infinite-clipboard-setup-*.exe
+            artifacts/infinite-clipboard-*-x86_64.pkg.tar.zst

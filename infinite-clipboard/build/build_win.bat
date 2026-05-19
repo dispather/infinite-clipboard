@@ -26,7 +26,10 @@ if %RC% neq 0 (
     echo   BUILD OK
 )
 echo ========================================
-pause
+REM Skip pause in CI (GitHub Actions sets CI=true). Local double-click
+REM still hits pause because CI is undefined there. Trap #21 mandates
+REM ASCII-only in .bat to avoid cmd console mojibake.
+if not defined CI pause
 exit /b %RC%
 
 :main

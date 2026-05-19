@@ -104,6 +104,40 @@ Tailscale VPN으로 연결된 Windows/macOS/Linux PC 간 클립보드(텍스트/
 
 ---
 
+### 0. 자동 빌드 (GitHub Actions) — 권장
+
+로컬 PC 를 거치지 않고 클라우드 러너에서 Windows + Linux 패키지를 동시에 빌드한다.
+`.github/workflows/build.yml` 이 정의돼 있다.
+
+**트리거**
+
+| 방법 | 동작 |
+|------|------|
+| `git tag vX.Y.Z && git push origin vX.Y.Z` | 빌드 + GitHub Releases **draft** 생성 + installer/.pkg 자동 첨부 |
+| GitHub Actions 웹 UI → "Run workflow" | 빌드만 수행 (artifact 에 남음, Release 미생성) |
+
+**산출물**
+
+- Windows: `infinite-clipboard-setup-X.Y.Z.exe` (Inno Setup per-user installer)
+- Linux: `infinite-clipboard-X.Y.Z-1-x86_64.pkg.tar.zst` (Arch/CachyOS pacman 패키지)
+
+**Release 절차**
+
+1. `version.py` 와 `pyproject.toml` 의 버전 동기화 후 commit
+2. `git tag v2.3.2 && git push origin v2.3.2`
+3. Actions 탭에서 두 OS 빌드 완료 확인 (대략 10-15분)
+4. Releases 페이지에서 draft 의 changelog 검토 → **Publish**
+5. macOS 는 아직 자동화 안 됨 — 별도 Mac PC 에서 `build/build_mac.sh` 로 빌드
+
+**제약**
+
+- Private repo: GitHub Free 월 2,000분 / Pro 월 3,000분 (1회 빌드 ≈ 15-20분 → 월 100-200회 가능)
+- macOS 코드 서명 없음 → DMG 다운로드 시 Gatekeeper 차단. 우회: `xattr -dr com.apple.quarantine /Applications/Infinite\ Clipboard.app`. 정식 해결은 Apple Developer Program ($99/년) 등록 후 워크플로우에 서명 step 추가 필요
+
+이하 "1. 아이콘 자산 생성" ~ "4. Windows 빌드" 는 **로컬 빌드 시** 참조한다.
+
+---
+
 ### 1. 아이콘 자산 생성 (최초 1회, 또는 `assets/icon.svg` 수정 시)
 
 아이콘 SVG를 4가지 상태색(green/amber/red/gray) PNG와 `.ico` (Windows), `.icns` (macOS), `icon-512.png` (Linux)로 일괄 변환한다.
