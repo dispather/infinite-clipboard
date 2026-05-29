@@ -16,6 +16,7 @@ import os
 import sys
 import time
 import base64
+import ctypes
 import threading
 import subprocess
 
@@ -34,7 +35,9 @@ except Exception as e:  # pywin32 부재/비-Windows = 인프라 실패 (빨강)
     print(f"[infra] pywin32 import 실패 (Windows 전용): {e}", file=sys.stderr)
     sys.exit(2)
 
-FORMAT = win32con.CF_UNICODETEXT
+# 커스텀 등록 포맷 — pywin32 의 CF_UNICODETEXT 텍스트 특수처리 회피, raw 바이트 처리.
+# RegisterClipboardFormat 은 같은 이름이면 프로세스 간 동일 ID 반환 (paster 와 공유).
+FORMAT = win32clipboard.RegisterClipboardFormat("ICSpikeLazy")
 PASTER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "windows_paster.py")
 
 
@@ -52,9 +55,9 @@ def run_phase(payload: bytes, phase: str) -> dict:
             if msg in (win32con.WM_RENDERFORMAT, win32con.WM_RENDERALLFORMATS):
                 try:
                     data = origin.fetch()  # ← paste 시점에 origin 으로부터 lazy fetch
-                    text = base64.b64encode(data).decode("ascii")
-                    # WM_RENDERFORMAT 중엔 클립보드가 이미 system 에 의해 열려 있음 → Open/Close 금지
-                    win32clipboard.SetClipboardData(FORMAT, text)
+                    # WM_RENDERFORMAT 중엔 클립보드가 이미 system 에 의해 열려 있음 → Open/Close 금지.
+                    # 커스텀 포맷이라 raw 바이트 그대로 제공.
+                    win32clipboard.SetClipboardData(FORMAT, data)
                     rendered["done"] = True
                 except Exception as e:  # noqa: BLE001
                     rendered["err"] = repr(e)
@@ -78,8 +81,11 @@ def run_phase(payload: bytes, phase: str) -> dict:
 
             win32clipboard.OpenClipboard(hwnd)
             win32clipboard.EmptyClipboard()
-            win32clipboard.SetClipboardData(FORMAT, None)  # None = 지연 렌더 등록
+            # 지연 렌더 등록 = NULL 핸들. pywin32 는 None 을 거부하므로 raw Win32 API 로 NULL 전달.
+            ok = ctypes.windll.user32.SetClipboardData(FORMAT, None)
             win32clipboard.CloseClipboard()
+            if not ok:
+                rendered["err"] = f"지연 등록(SetClipboardData NULL) 실패: {ctypes.get_last_error()}"
             ready.set()
 
             while not stop.is_set():

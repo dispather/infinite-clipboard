@@ -64,7 +64,8 @@ class X11SelectionOwner:
         self._done = threading.Event()
 
     def own(self):
-        self.dpy.set_selection_owner(self.CLIPBOARD, self.win, X.CurrentTime)
+        # python-xlib: set_selection_owner 는 Window(drawable) 메서드 (selection, time)
+        self.win.set_selection_owner(self.CLIPBOARD, X.CurrentTime)
         self.dpy.flush()
         return self.dpy.get_selection_owner(self.CLIPBOARD) == self.win
 

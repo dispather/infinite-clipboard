@@ -21,6 +21,11 @@ name: spike-lazy-clipboard
 on:
   workflow_dispatch: {}
 
+# 한글 notes 가 stdout 으로 나가므로 UTF-8 강제 (Windows cp1252 콘솔 UnicodeEncodeError 방지)
+env:
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: 'utf-8'
+
 defaults:
   run:
     working-directory: infinite-clipboard

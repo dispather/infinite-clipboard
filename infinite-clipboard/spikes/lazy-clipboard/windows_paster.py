@@ -5,25 +5,32 @@ GetClipboardData(CF_UNICODETEXT) 호출이 owner 프로세스의 WM_RENDERFORMAT
 부모(windows_spike.py)가 디코드해서 원본 페이로드와 비교한다.
 """
 import sys
+import base64
 
 try:
     import win32clipboard
-    import win32con
 except Exception as e:  # noqa: BLE001
     sys.stderr.write(f"pywin32 import 실패: {e}\n")
     sys.exit(2)
 
+# windows_spike.py 와 동일한 이름 → 동일 포맷 ID
+FORMAT = win32clipboard.RegisterClipboardFormat("ICSpikeLazy")
+
 
 def main() -> int:
-    win32clipboard.OpenClipboard()  # owner 가 아닌 별도 프로세스로 열기
+    win32clipboard.OpenClipboard()  # owner 가 아닌 별도 프로세스로 열기 (= paste)
     try:
-        data = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+        data = win32clipboard.GetClipboardData(FORMAT)  # owner 의 WM_RENDERFORMAT 유발 → raw 바이트
     except Exception as e:  # noqa: BLE001
         sys.stderr.write(f"GetClipboardData 실패: {e}\n")
         return 3
     finally:
         win32clipboard.CloseClipboard()
-    sys.stdout.write(data or "")  # base64 텍스트 (owner 가 render 한 값)
+    if data is None:
+        sys.stderr.write("GetClipboardData None\n")
+        return 3
+    raw = data if isinstance(data, (bytes, bytearray)) else bytes(data, "latin-1")
+    sys.stdout.write(base64.b64encode(raw).decode("ascii"))
     return 0
 
 

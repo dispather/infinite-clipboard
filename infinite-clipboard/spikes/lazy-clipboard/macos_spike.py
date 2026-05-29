@@ -43,9 +43,18 @@ except Exception as e:  # pyobjc 부재/비-macOS = 인프라 실패 (빨강)
 
 
 def _make_provider(origin):
-    """origin.fetch() 를 paste 시점에 호출하는 NSPasteboardItemDataProvider."""
+    """origin.fetch() 를 paste 시점에 호출하는 NSPasteboardItemDataProvider.
 
-    class _Provider(NSObject):
+    setDataProvider:forTypes: 는 provider 가 NSPasteboardItemDataProvider 프로토콜을
+    '공식' 으로 conform 해야 성공(YES) 한다 → pyobjc protocols= 로 명시 선언.
+    """
+    try:
+        _proto = objc.protocolNamed("NSPasteboardItemDataProvider")
+        _bases, _kw = (NSObject,), {"protocols": [_proto]}
+    except Exception:  # noqa: BLE001  (프로토콜 미발견 시 비공식 conform 으로 폴백)
+        _bases, _kw = (NSObject,), {}
+
+    class _Provider(*_bases, **_kw):
         def initWithState_(self, st):
             self = objc.super(_Provider, self).init()
             if self is None:
