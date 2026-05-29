@@ -15,6 +15,7 @@ paster 는 불변 규칙 1 에 따라 별도 프로세스(windows_paster.py)다.
 import os
 import sys
 import time
+import struct
 import base64
 import ctypes
 import threading
@@ -34,6 +35,43 @@ try:
 except Exception as e:  # pywin32 부재/비-Windows = 인프라 실패 (빨강)
     print(f"[infra] pywin32 import 실패 (Windows 전용): {e}", file=sys.stderr)
     sys.exit(2)
+
+# ── 64-bit 안전 HGLOBAL ctypes 설정 (대용량 read 수정) ──────────────────
+# 이전 iteration 의 대용량 FAIL(GetClipboardData rc=3)은 pywin32 의 대용량 등록 포맷
+# 처리 문제로 추정. set/get 양쪽을 수동 ctypes HGLOBAL + 4바이트 LE 길이 프리픽스로
+# 바꿔 정확한 바이트 round-trip 을 보장한다 (GlobalSize 라운딩 모호성 제거).
+# 핸들은 64-bit 라 restype/argtypes 명시 필수 — 미설정 시 c_int 로 truncate 되어 깨진다.
+_k32 = ctypes.windll.kernel32
+_u32 = ctypes.windll.user32
+GMEM_MOVEABLE = 0x0002
+_k32.GlobalAlloc.restype = ctypes.c_void_p
+_k32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+_k32.GlobalLock.restype = ctypes.c_void_p
+_k32.GlobalLock.argtypes = [ctypes.c_void_p]
+_k32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+_k32.GlobalSize.restype = ctypes.c_size_t
+_k32.GlobalSize.argtypes = [ctypes.c_void_p]
+_u32.SetClipboardData.restype = ctypes.c_void_p
+_u32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+
+
+def _hglobal_from_bytes(data: bytes) -> int:
+    """4바이트 LE 길이 프리픽스 + data 를 GMEM_MOVEABLE HGLOBAL 로 복사해 핸들 반환.
+
+    paster 가 프리픽스를 읽어 정확히 len(data) 바이트만 취하므로 GlobalSize 라운딩 무관.
+    SetClipboardData 성공 시 소유권이 시스템으로 넘어가므로 호출자는 free 하지 않는다.
+    """
+    framed = struct.pack("<I", len(data)) + data
+    size = len(framed)
+    h = _k32.GlobalAlloc(GMEM_MOVEABLE, size)
+    if not h:
+        raise OSError(f"GlobalAlloc 실패 (size={size})")
+    p = _k32.GlobalLock(h)
+    if not p:
+        raise OSError("GlobalLock 실패")
+    ctypes.memmove(p, framed, size)
+    _k32.GlobalUnlock(h)
+    return h
 
 # 커스텀 등록 포맷 — pywin32 의 CF_UNICODETEXT 텍스트 특수처리 회피, raw 바이트 처리.
 # RegisterClipboardFormat 은 같은 이름이면 프로세스 간 동일 ID 반환 (paster 와 공유).
@@ -60,9 +98,12 @@ def run_phase(payload: bytes, phase: str, fmt=FORMAT, paster_arg: str = "text") 
                 try:
                     data = origin.fetch()  # ← paste 시점에 origin 으로부터 lazy fetch
                     # WM_RENDERFORMAT 중엔 클립보드가 이미 system 에 의해 열려 있음 → Open/Close 금지.
-                    # 커스텀/등록 포맷이라 raw 바이트 그대로 제공.
-                    win32clipboard.SetClipboardData(fmt, data)
-                    rendered["done"] = True
+                    # 수동 HGLOBAL(길이 프리픽스) 제공 — pywin32 대용량 처리 회피, 정확 round-trip.
+                    h = _hglobal_from_bytes(data)
+                    if not _u32.SetClipboardData(fmt, h):
+                        rendered["err"] = f"SetClipboardData 실패: {_k32.GetLastError()}"
+                    else:
+                        rendered["done"] = True
                 except Exception as e:  # noqa: BLE001
                     rendered["err"] = repr(e)
                 return 0
@@ -85,11 +126,10 @@ def run_phase(payload: bytes, phase: str, fmt=FORMAT, paster_arg: str = "text") 
 
             win32clipboard.OpenClipboard(hwnd)
             win32clipboard.EmptyClipboard()
-            # 지연 렌더 등록 = NULL 핸들. pywin32 는 None 을 거부하므로 raw Win32 API 로 NULL 전달.
-            ok = ctypes.windll.user32.SetClipboardData(fmt, None)
+            # 지연 렌더 등록 = NULL 핸들 (SetClipboardData(fmt, NULL)). NULL 반환은 지연 렌더의
+            # 정상 성공 신호이므로 반환값으로 실패 판정하지 않는다 (예전 false-positive 제거).
+            _u32.SetClipboardData(fmt, None)
             win32clipboard.CloseClipboard()
-            if not ok:
-                rendered["err"] = f"지연 등록(SetClipboardData NULL) 실패: {ctypes.get_last_error()}"
             ready.set()
 
             while not stop.is_set():

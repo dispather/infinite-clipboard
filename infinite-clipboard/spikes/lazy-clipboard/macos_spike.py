@@ -19,8 +19,8 @@ paster 는 불변 규칙 1 에 따라 별도 프로세스(macos_paster.py)다.
 import os
 import sys
 import time
-import base64
 import subprocess
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import verdict as V  # noqa: E402
@@ -107,8 +107,11 @@ def run_phase(payload: bytes, phase: str, uti: str = UTI) -> dict:
         result["t_copy"] = time.monotonic()
 
         # 자식 paster spawn (= paste). owner 는 run loop 를 펌핑해 콜백 처리.
-        # 이미지(public.png) 면 paster 에 "image" argv 전달, 텍스트면 기본 UTI.
-        paster_argv = [sys.executable, PASTER]
+        # 대용량(이미지/512KB) stdout 파이프 데드락 회피: paster 가 raw 바이트를 temp 파일로 씀
+        # (예전 base64 stdout 방식은 부모가 펌핑 중 파이프 미드레인 → got=49152 데드락).
+        out_fd, out_path = tempfile.mkstemp(prefix="ic_spike_mac_")
+        os.close(out_fd)
+        paster_argv = [sys.executable, PASTER, out_path]
         if uti == PNG_UTI:
             paster_argv.append("image")
         result["t_paste"] = time.monotonic()
@@ -127,12 +130,18 @@ def run_phase(payload: bytes, phase: str, uti: str = UTI) -> dict:
         if proc.poll() is None:
             proc.kill()
             result["reason"] = "paster timeout (provideDataForType 미발화 가능)"
-            out, err = proc.communicate()
-        else:
-            out, err = proc.communicate()
+        _out, err = proc.communicate()
 
-        b64 = (out or b"").decode("ascii", "replace").strip()
-        got = base64.b64decode(b64) if b64 else b""
+        try:
+            with open(out_path, "rb") as f:
+                got = f.read()  # paster 가 쓴 raw 바이트
+        except OSError:
+            got = b""
+        finally:
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
         if proc.returncode not in (0, None) and not result["reason"]:
             result["reason"] = f"paster rc={proc.returncode}: {(err or b'').decode('utf-8','replace')[:200]}"
 
