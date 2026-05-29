@@ -167,8 +167,8 @@ def get_lazy_provider() -> Optional[LazyClipboardProvider]:
             from core.lazy_win import WindowsLazyProvider
             return WindowsLazyProvider()
         if backend == BACKEND_MACOS:
-            logger.debug("lazy provider: macOS 백엔드 미구현 (후속) — fallback")
-            return None
+            from core.lazy_mac import MacLazyProvider
+            return MacLazyProvider()
     except Exception as e:
         # 의존성 부재/초기화 실패 — lazy 불가, fallback (크래시 금지)
         logger.warning(f"lazy provider({backend}) 생성 실패 — fallback: {e}")

@@ -97,6 +97,8 @@ elif IS_MAC:
         "plyer.platforms.macosx.notification",
         # PyObjC 프레임워크 심볼
         "AppKit", "Foundation", "Quartz", "objc",
+        # v3.0 lazy clipboard 백엔드 (팩토리가 함수 안에서 lazy import → 명시, 함정 #6 류)
+        "core.lazy_mac",
     ]
 elif IS_LINUX:
     from PyInstaller.utils.hooks import collect_submodules  # noqa: E402

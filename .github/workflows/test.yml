@@ -110,3 +110,22 @@ jobs:
         # 해소되는지 검증하는 핵심 잡 — 특히 test_win_large_payload(~1MB CF/PNG delayed render).
         working-directory: infinite-clipboard
         run: python -m pytest tests/test_lazy_win.py -v
+
+  macos:
+    name: macOS (NSPasteboard data provider)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install Python deps
+        # test_lazy_mac 은 core.lazy_mac(+stdlib) + pyobjc-framework-Cocoa 만 필요
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest pyobjc-framework-Cocoa
+      - name: Run macOS lazy tests (NSPasteboard data provider round-trip)
+        # 백그라운드 런루프 스레드에서 provideDataForType 콜백이 발화하는지(프로덕션 스레딩
+        # 모델) + data-lazy(이미지 public.png / 파일 public.file-url) round-trip 검증.
+        working-directory: infinite-clipboard
+        run: python -m pytest tests/test_lazy_mac.py -v
