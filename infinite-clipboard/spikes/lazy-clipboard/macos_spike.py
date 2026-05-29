@@ -25,10 +25,11 @@ import subprocess
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import verdict as V  # noqa: E402
 from origin import TestOrigin  # noqa: E402
-from payload import TEXT_PAYLOAD, BIG_PAYLOAD  # noqa: E402
+from payload import TEXT_PAYLOAD, BIG_PAYLOAD, IMAGE_PAYLOAD  # noqa: E402
 
 OS_NAME = "macos"
 UTI = "com.infiniteclipboard.spike"  # macos_paster.py 와 동일해야 함
+PNG_UTI = "public.png"  # Phase C 이미지 lazy 검증용 (실제 이미지 UTI)
 PASTER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "macos_paster.py")
 
 try:
@@ -42,51 +43,57 @@ except Exception as e:  # pyobjc 부재/비-macOS = 인프라 실패 (빨강)
     sys.exit(2)
 
 
-def _make_provider(origin):
+# ─── Provider 클래스는 모듈 레벨에서 단 1회 정의 (하니스 버그 수정) ───
+# ObjC 클래스는 이름으로 전역 등록되므로, run_phase 마다 재정의하면 두 번째 등록이
+# 실패하거나 stale closure(Phase A 의 origin 을 캡처) 를 유발 → Phase B/C 가 깨진다.
+# 해결: 클래스는 1회만 정의하고, origin 은 closure 가 아니라 인스턴스 상태로 주입한다.
+# objc.protocolNamed 도 모듈 레벨에서 1회 해결 (실패 시 비공식 conform 으로 폴백).
+try:
+    _PROTO = objc.protocolNamed("NSPasteboardItemDataProvider")
+    _BASES, _KW = (NSObject,), {"protocols": [_PROTO]}
+except Exception:  # noqa: BLE001  (프로토콜 미발견 시 비공식 conform 으로 폴백)
+    _BASES, _KW = (NSObject,), {}
+
+
+class _Provider(*_BASES, **_KW):
     """origin.fetch() 를 paste 시점에 호출하는 NSPasteboardItemDataProvider.
 
     setDataProvider:forTypes: 는 provider 가 NSPasteboardItemDataProvider 프로토콜을
     '공식' 으로 conform 해야 성공(YES) 한다 → pyobjc protocols= 로 명시 선언.
+    origin/state 는 closure 가 아니라 인스턴스 속성으로 주입 (모듈 레벨 1회 정의이므로).
     """
-    try:
-        _proto = objc.protocolNamed("NSPasteboardItemDataProvider")
-        _bases, _kw = (NSObject,), {"protocols": [_proto]}
-    except Exception:  # noqa: BLE001  (프로토콜 미발견 시 비공식 conform 으로 폴백)
-        _bases, _kw = (NSObject,), {}
 
-    class _Provider(*_bases, **_kw):
-        def initWithState_(self, st):
-            self = objc.super(_Provider, self).init()
-            if self is None:
-                return None
-            self._st = st
-            return self
+    def initWithOrigin_state_(self, origin, st):
+        self = objc.super(_Provider, self).init()
+        if self is None:
+            return None
+        self._origin = origin
+        self._st = st
+        return self
 
-        # 셀렉터: pasteboard:item:provideDataForType:
-        def pasteboard_item_provideDataForType_(self, pasteboard, item, type_):
-            try:
-                data = origin.fetch()  # ← paste 시점 lazy fetch
-                ns = NSData.dataWithBytes_length_(data, len(data))
-                item.setData_forType_(ns, type_)
-                self._st["fired"] = True
-            except Exception as e:  # noqa: BLE001
-                self._st["err"] = repr(e)
-
-    return _Provider
+    # 셀렉터: pasteboard:item:provideDataForType:
+    def pasteboard_item_provideDataForType_(self, pasteboard, item, type_):
+        try:
+            data = self._origin.fetch()  # ← paste 시점 lazy fetch
+            ns = NSData.dataWithBytes_length_(data, len(data))
+            item.setData_forType_(ns, type_)
+            self._st["fired"] = True
+        except Exception as e:  # noqa: BLE001
+            self._st["err"] = repr(e)
 
 
-def run_phase(payload: bytes, phase: str) -> dict:
+def run_phase(payload: bytes, phase: str, uti: str = UTI) -> dict:
     result = {"phase": phase, "ok": False, "got_len": 0, "want_len": len(payload),
               "conn_times": [], "t_copy": 0.0, "t_paste": 0.0, "reason": ""}
 
     NSApplicationLoad()
     with TestOrigin(payload) as origin:
         st = {"fired": False, "err": None}
-        Provider = _make_provider(origin)
-        provider = Provider.alloc().initWithState_(st)
+        # 모듈 레벨 1회 정의된 _Provider 사용 — origin 은 인스턴스 상태로 주입
+        provider = _Provider.alloc().initWithOrigin_state_(origin, st)
 
         item = NSPasteboardItem.alloc().init()
-        ok = item.setDataProvider_forTypes_(provider, [UTI])
+        ok = item.setDataProvider_forTypes_(provider, [uti])
         if not ok:
             result["reason"] = "setDataProvider_forTypes_ 실패"
             return result
@@ -100,9 +107,13 @@ def run_phase(payload: bytes, phase: str) -> dict:
         result["t_copy"] = time.monotonic()
 
         # 자식 paster spawn (= paste). owner 는 run loop 를 펌핑해 콜백 처리.
+        # 이미지(public.png) 면 paster 에 "image" argv 전달, 텍스트면 기본 UTI.
+        paster_argv = [sys.executable, PASTER]
+        if uti == PNG_UTI:
+            paster_argv.append("image")
         result["t_paste"] = time.monotonic()
         proc = subprocess.Popen(
-            [sys.executable, PASTER],
+            paster_argv,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
 
@@ -145,7 +156,12 @@ def _probe_file_promise() -> str:
         return "NSFilePromiseProvider import 불가(이 pyobjc 버전) — 파일 경로 별도 검토"
 
 
-def main() -> int:
+def _text_verdict() -> int:
+    """텍스트 data-provider 종합 판정 (custom UTI).
+
+    data lazy 메커니즘은 PASS 근거지만, 우리 목표는 파일이라 file promise 가 CI 자동화
+    불가 → 보수적으로 NEEDS-MANUAL 로 유지. file promise probe + Phase A/B 펌핑 그대로.
+    """
     fp_note = _probe_file_promise()
     try:
         a = run_phase(TEXT_PAYLOAD, "A-small")
@@ -177,6 +193,44 @@ def main() -> int:
                   t_copy_done=a["t_copy"], t_paste_issued=a["t_paste"],
                   bytes_match=True,
                   notes=f"data lazy provide PASS (메커니즘 OK). {b_note}. 파일은 미검증 — {fp_note}")
+
+
+def _image_verdict() -> int:
+    """이미지 lazy 종합 판정 (Phase C, public.png).
+
+    public.png 는 실제 이미지 UTI 라 같은 provideDataForType 메커니즘이 동작하면
+    이미지 lazy 는 진짜 PASS — file promise 와 달리 보수적 강등 불필요.
+    """
+    try:
+        c = run_phase(IMAGE_PAYLOAD, "C-image", uti=PNG_UTI)
+    except Exception as e:  # noqa: BLE001
+        print(f"[infra] macOS Phase C 실행 실패: {e}", file=sys.stderr)
+        return 2
+
+    if not c["ok"]:
+        return V.emit("macos-image", V.FAIL, conn_times=c["conn_times"],
+                      t_copy_done=c["t_copy"], t_paste_issued=c["t_paste"],
+                      bytes_match=False,
+                      notes=f"Phase C(public.png) 실패: {c['reason']} got={c['got_len']}")
+
+    lazy_c = V.compute_lazy_proven(c["conn_times"], c["t_copy"], c["t_paste"])
+    if not lazy_c:
+        return V.emit("macos-image", V.NEEDS_MANUAL, conn_times=c["conn_times"],
+                      t_copy_done=c["t_copy"], t_paste_issued=c["t_paste"],
+                      bytes_match=True,
+                      notes="이미지 data 일치하나 laziness 미증명(eager 의심)")
+
+    # public.png 가 실제 이미지 타입이라 이미지 lazy 는 보수적 강등 없이 PASS
+    return V.emit("macos-image", V.PASS, conn_times=c["conn_times"],
+                  t_copy_done=c["t_copy"], t_paste_issued=c["t_paste"],
+                  bytes_match=True,
+                  notes="이미지 lazy provide PASS (public.png 실제 이미지 UTI 로 라운드트립)")
+
+
+def main() -> int:
+    rc1 = _text_verdict()
+    rc2 = _image_verdict()
+    return 2 if 2 in (rc1, rc2) else 0
 
 
 if __name__ == "__main__":

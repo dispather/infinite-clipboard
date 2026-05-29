@@ -28,7 +28,7 @@ import subprocess
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import verdict as V  # noqa: E402
 from origin import TestOrigin  # noqa: E402
-from payload import TEXT_PAYLOAD, BIG_PAYLOAD  # noqa: E402
+from payload import TEXT_PAYLOAD, BIG_PAYLOAD, IMAGE_PAYLOAD  # noqa: E402
 
 OS_NAME = "linux-wayland"
 MIME = "application/x-ic-spike"
@@ -44,8 +44,12 @@ except Exception as e:  # pywayland / 바인딩 부재 = 인프라 실패 (빨�
     sys.exit(2)
 
 
-def run_phase(payload: bytes, phase: str) -> dict:
-    """한 페이로드: source 등록(copy) → wl-paste(별도 프로세스, paste) → 검증."""
+def run_phase(payload: bytes, phase: str, mime: str = MIME) -> dict:
+    """한 페이로드: source 등록(copy) → wl-paste(별도 프로세스, paste) → 검증.
+
+    mime 으로 파라미터화 — source.offer(mime) 와 wl-paste -t <mime> 둘 다 이 mime 사용.
+    on_send 핸들러는 mime 무관(fetch 한 바이트를 그대로 fd 에 write)이라 변경 없음.
+    """
     result = {"phase": phase, "ok": False, "got_len": 0, "want_len": len(payload),
               "conn_times": [], "t_copy": 0.0, "t_paste": 0.0, "reason": "",
               "infra_missing": False}
@@ -104,7 +108,7 @@ def run_phase(payload: bytes, phase: str) -> dict:
         source = state["manager"].create_data_source()
         source.dispatcher["send"] = on_send
         source.dispatcher["cancelled"] = on_cancelled
-        source.offer(MIME)
+        source.offer(mime)
 
         device = state["manager"].get_data_device(state["seat"])
         device.set_selection(source)
@@ -132,7 +136,7 @@ def run_phase(payload: bytes, phase: str) -> dict:
         result["t_paste"] = time.monotonic()
         try:
             out = subprocess.run(
-                ["wl-paste", "-t", MIME],
+                ["wl-paste", "-t", mime],
                 capture_output=True, timeout=10.0,
             )
             got = out.stdout
@@ -159,7 +163,7 @@ def run_phase(payload: bytes, phase: str) -> dict:
     return result
 
 
-def main() -> int:
+def _text_verdict() -> int:
     try:
         a = run_phase(TEXT_PAYLOAD, "A-small")
     except Exception as e:  # noqa: BLE001
@@ -200,6 +204,53 @@ def main() -> int:
     return V.emit(OS_NAME, verdict, conn_times=a["conn_times"],
                   t_copy_done=a["t_copy"], t_paste_issued=a["t_paste"],
                   bytes_match=True, notes=note)
+
+
+def _image_verdict() -> int:
+    """Phase C — image/png MIME 으로 같은 ext-data-control source 메커니즘 검증.
+
+    텍스트와 동일한 emit 패턴: infra_missing 이면 NEEDS_MANUAL(환경 차이), ok+lazy 면 PASS,
+    데이터 일치하나 laziness 미증명이면 NEEDS_MANUAL, ok=False 면 FAIL.
+    """
+    try:
+        c = run_phase(IMAGE_PAYLOAD, "C-image", mime="image/png")
+    except Exception as e:  # noqa: BLE001
+        print(f"[infra] Wayland Phase C 실행 실패: {e}", file=sys.stderr)
+        return 2
+
+    os_image = OS_NAME + "-image"
+
+    if c.get("infra_missing"):
+        # ext-data-control 미지원 컴포지터 → false FAIL 회피 (텍스트와 동일 처리)
+        return V.emit(os_image, V.NEEDS_MANUAL, conn_times=c["conn_times"],
+                      t_copy_done=c["t_copy"], t_paste_issued=c["t_paste"],
+                      bytes_match=False,
+                      notes=f"{c['reason']} — 메커니즘 실패 아님, 환경 차이")
+
+    if not c["ok"]:
+        return V.emit(os_image, V.FAIL, conn_times=c["conn_times"],
+                      t_copy_done=c["t_copy"], t_paste_issued=c["t_paste"],
+                      bytes_match=False,
+                      notes=f"Phase C(image/png) 실패: {c['reason']} got={c['got_len']} want={c['want_len']}")
+
+    lazy_c = V.compute_lazy_proven(c["conn_times"], c["t_copy"], c["t_paste"])
+    if not lazy_c:
+        return V.emit(os_image, V.NEEDS_MANUAL, conn_times=c["conn_times"],
+                      t_copy_done=c["t_copy"], t_paste_issued=c["t_paste"],
+                      bytes_match=True,
+                      notes="Phase C(image/png) 데이터 일치하나 laziness 미증명(eager 의심)")
+
+    return V.emit(os_image, V.PASS, conn_times=c["conn_times"],
+                  t_copy_done=c["t_copy"], t_paste_issued=c["t_paste"],
+                  bytes_match=True,
+                  notes=f"Phase C(image/png ~{c['want_len']}B) PASS — 이미지 lazy 메커니즘 OK")
+
+
+def main() -> int:
+    rc1 = _text_verdict()
+    rc2 = _image_verdict()
+    # 둘 중 하나라도 인프라 예외(2)면 빨강, 아니면 정상(FAIL/NEEDS-MANUAL 포함 0)
+    return 2 if 2 in (rc1, rc2) else 0
 
 
 if __name__ == "__main__":

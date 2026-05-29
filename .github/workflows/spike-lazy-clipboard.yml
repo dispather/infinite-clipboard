@@ -8,6 +8,9 @@
 # ⚠️ release 용 build.yml 과 완전히 별개 — 이 워크플로우는 수동 실행만 하며 빌드/릴리스에 영향 없음.
 #
 # 포함 잡: linux-x11, linux-wayland, windows, macos.
+#   - v3.0 S0 (2026-05-29): 각 잡이 텍스트 판정(<os>) + **이미지 lazy 판정(<os>-image)** 2줄을 emit.
+#     이미지 Phase C 는 같은 lazy 메커니즘을 실제 이미지 포맷(Win 등록 "PNG" / mac public.png /
+#     X11·Wayland image/png) + 유효 PNG(~1.1MB)로 재검증 — 신규 deps/잡 불필요(기존 스파이크에 흡수).
 #   - linux-x11 이 CI 의 핵심 신규 신호 (Xvfb 에서 selection owner + INCR 검증).
 #   - linux-wayland 의 권위 결과는 이미 실제 kwin(KDE Plasma) 로컬 PASS. CI 는 best-effort —
 #     ubuntu-latest 의 wayland-protocols 버전이 낮아 ext-data-control-v1.xml 이 없거나 sway 가

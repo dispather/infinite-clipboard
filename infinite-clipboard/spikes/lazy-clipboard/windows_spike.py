@@ -23,7 +23,7 @@ import subprocess
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import verdict as V  # noqa: E402
 from origin import TestOrigin  # noqa: E402
-from payload import TEXT_PAYLOAD, BIG_PAYLOAD  # noqa: E402
+from payload import TEXT_PAYLOAD, BIG_PAYLOAD, IMAGE_PAYLOAD  # noqa: E402
 
 OS_NAME = "windows"
 
@@ -38,10 +38,14 @@ except Exception as e:  # pywin32 부재/비-Windows = 인프라 실패 (빨강)
 # 커스텀 등록 포맷 — pywin32 의 CF_UNICODETEXT 텍스트 특수처리 회피, raw 바이트 처리.
 # RegisterClipboardFormat 은 같은 이름이면 프로세스 간 동일 ID 반환 (paster 와 공유).
 FORMAT = win32clipboard.RegisterClipboardFormat("ICSpikeLazy")
+# Phase C 이미지용 등록 포맷 "PNG" — 현대 앱이 클립보드 PNG 공유에 쓰는 opaque 포맷.
+# CF_DIB 는 bitmap 구조라 OS 가 synthesize 하므로 메커니즘 질문엔 부적합. 등록 "PNG" 는
+# opaque HGLOBAL 이라 정확히 round-trip → delayed-render 메커니즘 검증에 적합.
+FORMAT_PNG = win32clipboard.RegisterClipboardFormat("PNG")
 PASTER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "windows_paster.py")
 
 
-def run_phase(payload: bytes, phase: str) -> dict:
+def run_phase(payload: bytes, phase: str, fmt=FORMAT, paster_arg: str = "text") -> dict:
     result = {"phase": phase, "ok": False, "got_len": 0, "want_len": len(payload),
               "conn_times": [], "t_copy": 0.0, "t_paste": 0.0, "reason": ""}
 
@@ -56,8 +60,8 @@ def run_phase(payload: bytes, phase: str) -> dict:
                 try:
                     data = origin.fetch()  # ← paste 시점에 origin 으로부터 lazy fetch
                     # WM_RENDERFORMAT 중엔 클립보드가 이미 system 에 의해 열려 있음 → Open/Close 금지.
-                    # 커스텀 포맷이라 raw 바이트 그대로 제공.
-                    win32clipboard.SetClipboardData(FORMAT, data)
+                    # 커스텀/등록 포맷이라 raw 바이트 그대로 제공.
+                    win32clipboard.SetClipboardData(fmt, data)
                     rendered["done"] = True
                 except Exception as e:  # noqa: BLE001
                     rendered["err"] = repr(e)
@@ -82,7 +86,7 @@ def run_phase(payload: bytes, phase: str) -> dict:
             win32clipboard.OpenClipboard(hwnd)
             win32clipboard.EmptyClipboard()
             # 지연 렌더 등록 = NULL 핸들. pywin32 는 None 을 거부하므로 raw Win32 API 로 NULL 전달.
-            ok = ctypes.windll.user32.SetClipboardData(FORMAT, None)
+            ok = ctypes.windll.user32.SetClipboardData(fmt, None)
             win32clipboard.CloseClipboard()
             if not ok:
                 rendered["err"] = f"지연 등록(SetClipboardData NULL) 실패: {ctypes.get_last_error()}"
@@ -103,8 +107,12 @@ def run_phase(payload: bytes, phase: str) -> dict:
         time.sleep(0.05)
         result["t_paste"] = time.monotonic()
         try:
+            # paster 에 포맷 종류 전달: 텍스트는 인자 없음, 이미지는 "image".
+            cmd = [sys.executable, PASTER]
+            if paster_arg == "image":
+                cmd.append("image")
             out = subprocess.run(
-                [sys.executable, PASTER],
+                cmd,
                 capture_output=True, timeout=15.0, text=True,
             )
             b64 = (out.stdout or "").strip()
@@ -127,7 +135,8 @@ def run_phase(payload: bytes, phase: str) -> dict:
     return result
 
 
-def main() -> int:
+def _text_verdict() -> int:
+    """텍스트 Phase A/B — 등록 포맷 "ICSpikeLazy" delayed render. emit os "windows"."""
     try:
         a = run_phase(TEXT_PAYLOAD, "A-small")
     except Exception as e:  # noqa: BLE001
@@ -160,6 +169,45 @@ def main() -> int:
     return V.emit(OS_NAME, verdict, conn_times=a["conn_times"],
                   t_copy_done=a["t_copy"], t_paste_issued=a["t_paste"],
                   bytes_match=True, notes=note)
+
+
+def _image_verdict() -> int:
+    """이미지 Phase C — 등록 포맷 "PNG" delayed render. emit os "windows-image".
+
+    IMAGE_PAYLOAD 는 ~1.1MB 유효 PNG 라 자체적으로 HGLOBAL 대용량 경로를 탄다
+    (별도 small phase 불필요). 같은 WM_RENDERFORMAT 메커니즘이 opaque 등록 "PNG"
+    포맷에서도 동작하는지 검증.
+    """
+    try:
+        c = run_phase(IMAGE_PAYLOAD, "C-image", fmt=FORMAT_PNG, paster_arg="image")
+    except Exception as e:  # noqa: BLE001
+        print(f"[infra] Windows Phase C 실행 실패: {e}", file=sys.stderr)
+        return 2
+
+    if not c["ok"]:
+        return V.emit("windows-image", V.FAIL, conn_times=c["conn_times"],
+                      t_copy_done=c["t_copy"], t_paste_issued=c["t_paste"],
+                      bytes_match=False,
+                      notes=f"Phase C 실패: {c['reason']} got={c['got_len']} want={c['want_len']}")
+
+    lazy_c = V.compute_lazy_proven(c["conn_times"], c["t_copy"], c["t_paste"])
+    if not lazy_c:
+        return V.emit("windows-image", V.NEEDS_MANUAL, conn_times=c["conn_times"],
+                      t_copy_done=c["t_copy"], t_paste_issued=c["t_paste"],
+                      bytes_match=True,
+                      notes="Phase C 데이터 일치하나 laziness 미증명(eager 의심)")
+
+    return V.emit("windows-image", V.PASS, conn_times=c["conn_times"],
+                  t_copy_done=c["t_copy"], t_paste_issued=c["t_paste"],
+                  bytes_match=True,
+                  notes=("Phase C PASS (등록 \"PNG\" 포맷 delayed render, ~1.1MB). "
+                         "이미지도 같은 WM_RENDERFORMAT 메커니즘으로 lazy round-trip 확인."))
+
+
+def main() -> int:
+    rc1 = _text_verdict()
+    rc2 = _image_verdict()
+    return 2 if 2 in (rc1, rc2) else 0
 
 
 if __name__ == "__main__":

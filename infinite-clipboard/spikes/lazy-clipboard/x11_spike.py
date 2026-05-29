@@ -23,7 +23,7 @@ import threading
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import verdict as V  # noqa: E402
 from origin import TestOrigin  # noqa: E402
-from payload import TEXT_PAYLOAD, BIG_PAYLOAD  # noqa: E402
+from payload import TEXT_PAYLOAD, BIG_PAYLOAD, IMAGE_PAYLOAD  # noqa: E402
 
 OS_NAME = "linux-x11"
 
@@ -45,7 +45,7 @@ class X11SelectionOwner:
     # 한 번에 보낼 청크 크기 (서버 max-request-size 보다 충분히 작게)
     INCR_CHUNK = 64 * 1024
 
-    def __init__(self, dpy, fetch_cb):
+    def __init__(self, dpy, fetch_cb, serve_target_name="UTF8_STRING"):
         self.dpy = dpy
         self.fetch_cb = fetch_cb  # () -> bytes, 첫 요청 시 1회 호출
         self.screen = dpy.screen()
@@ -57,6 +57,9 @@ class X11SelectionOwner:
         self.TARGETS = dpy.intern_atom("TARGETS")
         self.INCR = dpy.intern_atom("INCR")
         self.UTF8 = dpy.intern_atom("UTF8_STRING")
+        # serve 대상 target (Phase A/B 는 UTF8_STRING, Phase C 는 image/png).
+        # 텍스트 기본값이면 self.SERVE == self.UTF8 이라 기존 동작과 동일.
+        self.SERVE = dpy.intern_atom(serve_target_name)
         self._data: bytes = b""    # fetch 된 데이터 (첫 요청 후 캐시)
         self._fetched = False
         # 진행 중 INCR 전송: {(requestor_id, property): (data, offset)}
@@ -89,22 +92,23 @@ class X11SelectionOwner:
         prop = req.property if req.property != X.NONE else req.target
 
         if target == self.TARGETS:
+            # serve target 도 함께 광고 (텍스트면 UTF8 와 동일 atom 이라 중복 무해)
             requestor.change_property(
-                prop, Xatom.ATOM, 32, [self.TARGETS, self.UTF8],
+                prop, Xatom.ATOM, 32, [self.TARGETS, self.UTF8, self.SERVE],
             )
             self._send_notify(req, prop)
             return
 
-        if target == self.UTF8 or target == Xatom.STRING:
+        if target == self.UTF8 or target == Xatom.STRING or target == self.SERVE:
             data = self._ensure_data()
             max_len = self.dpy.display.info.max_request_length * 4
             if len(data) <= max_len - 1024:
-                # Phase A: 단발 전송
-                requestor.change_property(prop, self.UTF8, 8, data)
+                # Phase A/C(소): 단발 전송 — change_property type 은 serve target 사용
+                requestor.change_property(prop, self.SERVE, 8, data)
                 self._send_notify(req, prop)
                 self._done.set()
             else:
-                # Phase B: INCR 시작 — 총 길이(하한)를 INCR property 로 먼저 보냄
+                # Phase B/C(대): INCR 시작 — 총 길이(하한)를 INCR property 로 먼저 보냄
                 requestor.change_attributes(event_mask=X.PropertyChangeMask)
                 requestor.change_property(prop, self.INCR, 32, [len(data)])
                 self._incr[(requestor.id, prop)] = (data, 0)
@@ -123,7 +127,8 @@ class X11SelectionOwner:
             return
         data, off = self._incr[key]
         chunk = data[off:off + self.INCR_CHUNK]
-        ev.window.change_property(ev.atom, self.UTF8, 8, chunk)
+        # INCR 청크 type 도 serve target 사용 (텍스트면 UTF8 와 동일)
+        ev.window.change_property(ev.atom, self.SERVE, 8, chunk)
         self.dpy.flush()
         if not chunk:
             # 0바이트 청크 = INCR 종료
@@ -133,20 +138,23 @@ class X11SelectionOwner:
             self._incr[key] = (data, off + len(chunk))
 
 
-def _paste_via_xclip(timeout: float) -> bytes:
+def _paste_via_xclip(timeout: float, target: str = "UTF8_STRING") -> bytes:
     """불변 규칙 1: paster 는 별도 프로세스. xclip 으로 CLIPBOARD 읽기(=paste)."""
     out = subprocess.run(
-        ["xclip", "-selection", "clipboard", "-o", "-t", "UTF8_STRING"],
+        ["xclip", "-selection", "clipboard", "-o", "-t", target],
         capture_output=True, timeout=timeout,
     )
     return out.stdout
 
 
-def run_phase(payload: bytes, phase: str) -> dict:
-    """한 페이로드에 대해 own → paste(xclip 별도 프로세스) → 검증. 결과 dict 반환."""
+def run_phase(payload: bytes, phase: str, target: str = "UTF8_STRING") -> dict:
+    """한 페이로드에 대해 own → paste(xclip 별도 프로세스) → 검증. 결과 dict 반환.
+
+    target 으로 serve/paste 대상 atom 을 지정 (텍스트=UTF8_STRING, 이미지=image/png).
+    """
     dpy = display.Display()
     with TestOrigin(payload) as origin:
-        owner = X11SelectionOwner(dpy, fetch_cb=origin.fetch)
+        owner = X11SelectionOwner(dpy, fetch_cb=origin.fetch, serve_target_name=target)
         if not owner.own():
             dpy.close()
             return {"phase": phase, "ok": False, "reason": "selection 소유 실패",
@@ -173,7 +181,7 @@ def run_phase(payload: bytes, phase: str) -> dict:
         time.sleep(0.05)  # owner 안정화
         t_paste = time.monotonic()
         try:
-            got = _paste_via_xclip(timeout=10.0)
+            got = _paste_via_xclip(timeout=10.0, target=target)
         except subprocess.TimeoutExpired:
             got = b""
         stop.set()
@@ -190,7 +198,8 @@ def run_phase(payload: bytes, phase: str) -> dict:
     return result
 
 
-def main() -> int:
+def _text_verdict() -> int:
+    """텍스트 Phase A(단발) + B(INCR) 검증 → "linux-x11" 판정 1줄 emit."""
     try:
         a = run_phase(TEXT_PAYLOAD, "A-small")
     except Exception as e:
@@ -228,6 +237,48 @@ def main() -> int:
     return V.emit(OS_NAME, V.NEEDS_MANUAL, conn_times=a["conn_times"],
                   t_copy_done=a["t_copy"], t_paste_issued=a["t_paste"],
                   bytes_match=True, notes=f"Phase A PASS, {b_note}")
+
+
+def _image_verdict() -> int:
+    """이미지 Phase C 검증 → "linux-x11-image" 판정 1줄 emit.
+
+    image/png target 으로 같은 selection-owner lazy 메커니즘이 동작하는지 확인.
+    텍스트 _text_verdict 와 동일한 emit 패턴: ok+lazy → PASS, lazy 미증명 → NEEDS-MANUAL,
+    ok=False → FAIL. 디스플레이 부재 등 인프라 예외는 return 2.
+    """
+    img_os = OS_NAME + "-image"
+    try:
+        c = run_phase(IMAGE_PAYLOAD, "C-image", target="image/png")
+    except Exception as e:
+        # 디스플레이 없음 등 = 인프라 실패
+        print(f"[infra] X11 Phase C(image) 실행 실패: {e}", file=sys.stderr)
+        return 2
+
+    if not c["ok"]:
+        return V.emit(img_os, V.FAIL, conn_times=c["conn_times"],
+                      t_copy_done=c["t_copy"], t_paste_issued=c["t_paste"],
+                      bytes_match=False,
+                      notes=f"Phase C 실패(image/png 메커니즘 미동작): got={c['got_len']} want={c['want_len']}")
+
+    # Phase C PASS → laziness 확인
+    lazy_c = V.compute_lazy_proven(c["conn_times"], c["t_copy"], c["t_paste"])
+    if not lazy_c:
+        return V.emit(img_os, V.NEEDS_MANUAL, conn_times=c["conn_times"],
+                      t_copy_done=c["t_copy"], t_paste_issued=c["t_paste"],
+                      bytes_match=True,
+                      notes="Phase C(image/png) 데이터 일치하나 laziness 미증명(eager 의심)")
+
+    return V.emit(img_os, V.PASS, conn_times=c["conn_times"],
+                  t_copy_done=c["t_copy"], t_paste_issued=c["t_paste"],
+                  bytes_match=True,
+                  notes=f"Phase C(image/png ~1MB INCR) PASS. got={c['got_len']}")
+
+
+def main() -> int:
+    rc1 = _text_verdict()
+    rc2 = _image_verdict()
+    # 둘 중 하나라도 인프라 실패(2)면 2, 아니면 0 (FAIL/NEEDS-MANUAL 은 0)
+    return 2 if 2 in (rc1, rc2) else 0
 
 
 if __name__ == "__main__":

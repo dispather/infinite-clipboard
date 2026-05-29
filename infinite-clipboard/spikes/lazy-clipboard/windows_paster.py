@@ -15,12 +15,16 @@ except Exception as e:  # noqa: BLE001
 
 # windows_spike.py 와 동일한 이름 → 동일 포맷 ID
 FORMAT = win32clipboard.RegisterClipboardFormat("ICSpikeLazy")
+# 이미지 Phase C 용 등록 포맷 "PNG" (spike 의 FORMAT_PNG 와 동일 ID)
+FORMAT_PNG = win32clipboard.RegisterClipboardFormat("PNG")
 
 
 def main() -> int:
+    # argv 가 ["image"] 면 등록 "PNG" 포맷, 아니면 기존 "ICSpikeLazy" 텍스트 포맷.
+    fmt = FORMAT_PNG if sys.argv[1:] == ["image"] else FORMAT
     win32clipboard.OpenClipboard()  # owner 가 아닌 별도 프로세스로 열기 (= paste)
     try:
-        data = win32clipboard.GetClipboardData(FORMAT)  # owner 의 WM_RENDERFORMAT 유발 → raw 바이트
+        data = win32clipboard.GetClipboardData(fmt)  # owner 의 WM_RENDERFORMAT 유발 → raw 바이트
     except Exception as e:  # noqa: BLE001
         sys.stderr.write(f"GetClipboardData 실패: {e}\n")
         return 3

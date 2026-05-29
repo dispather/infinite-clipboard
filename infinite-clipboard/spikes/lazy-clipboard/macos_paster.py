@@ -8,6 +8,7 @@ import sys
 import base64
 
 UTI = "com.infiniteclipboard.spike"  # macos_spike.py 와 동일해야 함
+PNG_UTI = "public.png"  # Phase C 이미지 lazy 검증용 (실제 이미지 UTI)
 
 try:
     from AppKit import NSPasteboard, NSApplicationLoad
@@ -17,9 +18,11 @@ except Exception as e:  # noqa: BLE001
 
 
 def main() -> int:
+    # argv 가 ["image"] 면 이미지(public.png), 아니면 기존 텍스트 custom UTI
+    uti = PNG_UTI if sys.argv[1:] == ["image"] else UTI
     NSApplicationLoad()
     pb = NSPasteboard.generalPasteboard()
-    data = pb.dataForType_(UTI)  # owner 의 provideDataForType 를 유발
+    data = pb.dataForType_(uti)  # owner 의 provideDataForType 를 유발
     if data is None:
         sys.stderr.write("dataForType_ None (제공자 미응답)\n")
         return 3
