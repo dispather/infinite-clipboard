@@ -37,6 +37,7 @@ WM_RENDERFORMAT 안에서 fetch_callback 을 동기 호출 → 그동안 메시�
 """
 
 import ctypes
+import itertools
 import logging
 import struct
 import threading
@@ -74,6 +75,12 @@ _DROPEFFECT_COPY = 1  # DROPEFFECT_COPY
 
 _WM_APP_DRAIN = win32con.WM_APP + 1  # register_offer 커맨드 드레인 트리거
 
+# 윈도우 클래스명 고유화 카운터 — RegisterClass 는 프로세스 전역이라 같은 이름을 재사용하면
+# 첫 인스턴스의 WndProc 에 묶인다. provider 재생성/다중 인스턴스 시 새 창이 옛(죽은) WndProc
+# 로 메시지를 보내 WM_APP 드레인이 안 돼 register_offer 가 타임아웃(=False). 인스턴스별 고유
+# 이름으로 회피.
+_CLASS_COUNTER = itertools.count()
+
 
 def build_dropfiles(paths) -> bytes:
     """절대경로 목록 → CF_HDROP 의 DROPFILES 바이트 (UTF-16LE 더블널 종료).
@@ -110,9 +117,10 @@ def _hglobal(data: bytes) -> int:
 class WindowsLazyProvider(LazyClipboardProvider):
     """delayed render 로 클립보드를 지연 소유하고 paste(WM_RENDERFORMAT)에 lazy 응답."""
 
-    _CLASS_NAME = "InfiniteClipboardLazyWnd"
-
     def __init__(self):
+        # 인스턴스별 고유 클래스명 (위 _CLASS_COUNTER 주석 참조)
+        self._class_name = f"InfiniteClipboardLazyWnd_{next(_CLASS_COUNTER)}"
+        self._atom = None
         self._lock = threading.Lock()
         self._offer: Optional[dict] = None
         self._fetch_cb: Optional[FetchCallback] = None
@@ -165,6 +173,12 @@ class WindowsLazyProvider(LazyClipboardProvider):
         t = self._thread
         if t is not None:
             t.join(timeout=1.5)
+        # 고유 클래스 등록 해제 (인스턴스별 누수 방지). 창 파괴 후라야 성공.
+        if self._atom is not None:
+            try:
+                win32gui.UnregisterClass(self._class_name, None)
+            except Exception:
+                pass  # 규칙 #9 (창 잔존/이미 해제 — 무해)
 
     # ── 메시지 스레드 (창 + 클립보드 소유 + 블로킹 루프) ────────────────
 
@@ -195,13 +209,14 @@ class WindowsLazyProvider(LazyClipboardProvider):
 
     def _create_window(self) -> None:
         wc = win32gui.WNDCLASS()
-        wc.lpszClassName = self._CLASS_NAME
+        wc.lpszClassName = self._class_name
         self._wndproc_ref = self._wndproc  # 참조 유지 (GC 방지)
         wc.lpfnWndProc = self._wndproc_ref
         try:
-            atom = win32gui.RegisterClass(wc)
+            self._atom = win32gui.RegisterClass(wc)
+            atom = self._atom
         except Exception:
-            atom = self._CLASS_NAME  # 이미 등록됨
+            atom = self._class_name  # 이미 등록됨(고유명이라 정상 경로선 미발생)
         self._hwnd = win32gui.CreateWindowEx(
             0, atom, "infinite-clipboard-lazy", 0, 0, 0, 0, 0,
             win32con.HWND_MESSAGE, 0, 0, None,
