@@ -90,11 +90,17 @@ def test_weak_auth_key_replaced():
 
 
 def test_invalid_download_path_fallback(tmp_path, monkeypatch):
-    """존재 불가 경로는 default 로 fallback."""
-    # 쓰기 불가능한 가상 경로 (Windows 에서 잘못된 드라이브)
-    bad = "Z:\\nonexistent\\path\\that\\cannot\\be\\made\\for\\sure"
+    """생성 불가 경로는 default 로 fallback (cross-platform).
+
+    이전엔 Windows 전용 `Z:\\...` 를 썼으나 Linux 에선 `\\` 가 유효 파일명이라
+    mkdir 이 성공해 false-fail 했다. 대신 **일반 파일 아래의 하위 디렉토리**를
+    요청 — POSIX/Windows 모두 mkdir 이 NotADirectoryError(OSError)로 실패한다.
+    """
+    blocker = tmp_path / "iam_a_file"
+    blocker.write_text("x")
+    bad = str(blocker / "cannot" / "be" / "made")  # 파일 아래엔 디렉토리 생성 불가
     c = AppConfig(download_path=bad, auth_key="x" * 16)
-    # 빈 문자열이 아니거나 default 디렉토리로 보정됨
+    # default 디렉토리로 보정됨
     assert c.download_path != bad
     assert c.download_path  # 빈 문자열 아님
 

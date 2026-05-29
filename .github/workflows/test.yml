@@ -1,0 +1,49 @@
+# 단위/통합 테스트 CI — pytest 회귀 게이트.
+#
+# build.yml(빌드 전용)·spike-lazy-clipboard.yml(스파이크)과 별개.
+# main push / PR / 수동 실행 시 전체 pytest 스위트를 검증한다.
+#
+# v3.0 lazy clipboard 검증 안전망: Linux 잡은 Xvfb(가상 X11) + python-xlib 로
+# 돌려, X11 lazy 백엔드의 selection-owner round-trip 테스트가 추가되면 자동으로
+# 함께 검증된다 (이 환경의 헤드리스 한계를 CI 가 보완 — 함정 메모리 참조).
+# Wayland 백엔드 round-trip 은 후속 잡(headless sway + pywayland)으로 추가 예정.
+
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+# 한글 로그/assert 메시지가 stdout 으로 나가므로 UTF-8 강제
+env:
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: 'utf-8'
+
+defaults:
+  run:
+    working-directory: infinite-clipboard
+
+jobs:
+  linux:
+    name: Linux pytest (Xvfb)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install system deps (X11 가상 디스플레이)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xclip x11-utils
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          # 런타임 공통 deps + 테스트 + X11 lazy 백엔드용 python-xlib
+          python -m pip install -r requirements.txt
+          python -m pip install pytest python-xlib
+      - name: Run pytest (Xvfb)
+        # xvfb-run 으로 가상 X11 제공 — 디스플레이 필요한 X11 백엔드 테스트도 동작
+        run: xvfb-run -a python -m pytest tests/ -v
