@@ -1,0 +1,124 @@
+# v3.0 Pure Lazy Clipboard 기술 검증 스파이크 — CI (workflow_dispatch 전용)
+#
+# 목적: "OS 가 paste 시점에 우리 lazy provide 콜백을 부르고, 그 안에서 loopback fetch 한
+#        바이트를 내줄 수 있는가" 를 OS 별로 PASS/NEEDS-MANUAL/FAIL 판정.
+# 설계: docs/plans/2026-05-29-v3-lazy-clipboard-spike-design.md
+# 코드: infinite-clipboard/spikes/lazy-clipboard/ (throwaway PoC, 프로덕션 무수정)
+#
+# ⚠️ release 용 build.yml 과 완전히 별개 — 이 워크플로우는 수동 실행만 하며 빌드/릴리스에 영향 없음.
+#
+# 포함 잡: linux-x11, linux-wayland, windows, macos.
+#   - linux-x11 이 CI 의 핵심 신규 신호 (Xvfb 에서 selection owner + INCR 검증).
+#   - linux-wayland 의 권위 결과는 이미 실제 kwin(KDE Plasma) 로컬 PASS. CI 는 best-effort —
+#     ubuntu-latest 의 wayland-protocols 버전이 낮아 ext-data-control-v1.xml 이 없거나 sway 가
+#     zwlr 전용이면 graceful 하게 NEEDS-MANUAL 로 skip (false FAIL 회피).
+#   - windows: CF_UNICODETEXT delayed render (WM_RENDERFORMAT). 로컬 미검증 → 이 CI 가 최초 검증.
+#   - macos: NSPasteboard lazy data provider (data PASS 가능) + file promise probe (Finder 필요 → NEEDS-MANUAL).
+#     로컬 미검증 → 이 CI 가 최초 검증.
+
+name: spike-lazy-clipboard
+
+on:
+  workflow_dispatch: {}
+
+defaults:
+  run:
+    working-directory: infinite-clipboard
+
+jobs:
+  linux-x11:
+    name: Linux X11 (Xvfb)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xclip x11-utils
+          python -m pip install --upgrade pip
+          python -m pip install python-xlib
+      - name: Run X11 spike
+        run: xvfb-run -a python spikes/lazy-clipboard/x11_spike.py
+
+  linux-wayland:
+    name: Linux Wayland (headless sway, best-effort)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          # libwayland-dev + libwayland-bin: pip 가 pywayland 를 소스 빌드해야 할 때 필요 (wayland-scanner/헤더)
+          sudo apt-get install -y sway wl-clipboard wayland-protocols libwayland-dev libwayland-bin
+          python -m pip install --upgrade pip
+          python -m pip install pywayland
+      - name: Generate ext-data-control bindings (skip if XML absent)
+        id: gen
+        run: |
+          XML=$(find /usr/share/wayland-protocols -iname 'ext-data-control-v1.xml' 2>/dev/null | head -1)
+          if [ -z "$XML" ]; then
+            echo "ext-data-control-v1.xml 부재 (CI ubuntu wayland-protocols 버전 낮음) — Wayland CI skip"
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+            echo "- **linux-wayland**: \`NEEDS-MANUAL\` — ext-data-control XML 부재(CI 환경). 실제 kwin 로컬 PASS 가 권위 결과." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          WL=$(find /usr/share/wayland -name 'wayland.xml' | head -1)
+          python -m pywayland.scanner -i "$WL" "$XML" -o spikes/lazy-clipboard/_proto
+          touch spikes/lazy-clipboard/_proto/__init__.py
+      - name: Run Wayland spike (headless sway)
+        if: steps.gen.outputs.skip != '1'
+        run: |
+          export XDG_RUNTIME_DIR=$(mktemp -d)
+          export WLR_BACKENDS=headless
+          export WLR_LIBINPUT_NO_DEVICES=1
+          export WLR_RENDERER=pixman
+          export LIBSEAT_BACKEND=noop
+          sway > /tmp/sway.log 2>&1 &
+          for i in $(seq 1 40); do
+            sock=$(ls "$XDG_RUNTIME_DIR"/wayland-* 2>/dev/null | grep -v '\.lock' | head -1) && [ -n "$sock" ] && break
+            sleep 0.5
+          done
+          if [ -z "$sock" ]; then
+            echo "headless sway 미기동 (CI 환경 한계) — Wayland CI skip"
+            cat /tmp/sway.log || true
+            echo "- **linux-wayland**: \`NEEDS-MANUAL\` — headless sway 미기동(CI). 실제 kwin 로컬 PASS 가 권위 결과." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          export WAYLAND_DISPLAY=$(basename "$sock")
+          python spikes/lazy-clipboard/wayland_spike.py
+
+  windows:
+    name: Windows (CF_UNICODETEXT delayed render)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pywin32
+      - name: Run Windows spike
+        run: python spikes/lazy-clipboard/windows_spike.py
+
+  macos:
+    name: macOS (NSPasteboard provider + file promise probe)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyobjc-framework-Cocoa
+      - name: Run macOS spike
+        run: python spikes/lazy-clipboard/macos_spike.py

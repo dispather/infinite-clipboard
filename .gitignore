@@ -42,6 +42,9 @@ settings.json
 # Serena agent local state
 .serena/
 
+# v3.0 lazy-clipboard 스파이크 — pywayland-scanner 생성 바인딩 (CI/로컬이 재생성)
+infinite-clipboard/spikes/lazy-clipboard/_proto/
+
 # 코드 백업 폴더 (git history 가 그 역할)
 BK/
 

@@ -6,6 +6,9 @@ __pycache__/
 .pytest_cache/
 .cache/
 
+# throwaway PoC 스파이크 (검증 후 폐기 또는 production 흡수) — sync 오염 차단
+spikes/
+
 # 빌드 최종 산출물 (PyInstaller dist) — IC_BUILD_DIR 로 외부 출력 권장이지만
 # default 위치 (dist/) 도 안전망으로 sync 차단
 dist/
