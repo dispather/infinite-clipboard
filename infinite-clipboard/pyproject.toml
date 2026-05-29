@@ -14,6 +14,8 @@ dependencies = [
     "pywin32>=306; sys_platform == 'win32'",
     "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
     "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
+    # v3.0 lazy clipboard — X11 selection owner 백엔드 (부재 시 fallback)
+    "python-xlib>=0.33; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]

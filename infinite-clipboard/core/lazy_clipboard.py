@@ -158,8 +158,8 @@ def get_lazy_provider() -> Optional[LazyClipboardProvider]:
     # 후속 단계에서 각 분기에 구체 provider 생성 추가.
     try:
         if backend == BACKEND_X11:
-            logger.debug("lazy provider: X11 백엔드 미구현 (후속) — fallback")
-            return None
+            from core.lazy_x11 import X11LazyProvider
+            return X11LazyProvider()
         if backend == BACKEND_WAYLAND:
             logger.debug("lazy provider: Wayland 백엔드 미구현 (후속) — fallback")
             return None

@@ -1,2 +1,4 @@
 -r requirements.txt
+# v3.0 lazy clipboard — X11 selection owner 백엔드 (부재 시 fallback)
+python-xlib>=0.33
 # 시스템 패키지 필요: sudo apt install xclip (또는 xsel)
