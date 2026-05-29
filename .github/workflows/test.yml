@@ -4,9 +4,12 @@
 # main push / PR / 수동 실행 시 전체 pytest 스위트를 검증한다.
 #
 # v3.0 lazy clipboard 검증 안전망: Linux 잡은 Xvfb(가상 X11) + python-xlib 로
-# 돌려, X11 lazy 백엔드의 selection-owner round-trip 테스트가 추가되면 자동으로
-# 함께 검증된다 (이 환경의 헤드리스 한계를 CI 가 보완 — 함정 메모리 참조).
-# Wayland 백엔드 round-trip 은 후속 잡(headless sway + pywayland)으로 추가 예정.
+# 돌려, X11 lazy 백엔드의 selection-owner round-trip 테스트가 자동으로 함께 검증된다
+# (이 환경의 헤드리스 한계를 CI 가 보완 — 함정 메모리 참조).
+# Wayland 백엔드 round-trip 은 linux-wayland 잡(headless sway + pywayland)이 검증한다.
+# _proto 바인딩은 repo 에 vendoring(core/_wayland_proto/)되어 있어 scanner 생성 불필요 —
+# pywayland 런타임만 설치하면 됨. sway 가 ext-data-control 미광고면 테스트가 graceful skip
+# (실제 kwin 로컬 PASS 가 권위 결과 — best-effort 잡).
 
 name: tests
 
@@ -47,3 +50,44 @@ jobs:
       - name: Run pytest (Xvfb)
         # xvfb-run 으로 가상 X11 제공 — 디스플레이 필요한 X11 백엔드 테스트도 동작
         run: xvfb-run -a python -m pytest tests/ -v
+
+  linux-wayland:
+    name: Linux Wayland (headless sway, best-effort)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install system deps (headless sway + wl-clipboard)
+        run: |
+          sudo apt-get update
+          # libwayland-*: pip 가 pywayland 를 소스 빌드/런타임 바인딩(cffi)할 때 필요.
+          # _proto 바인딩은 repo 에 vendoring 되어 있어 wayland-protocols/scanner 불필요.
+          sudo apt-get install -y sway wl-clipboard libwayland-dev libwayland-bin
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest pywayland
+      - name: Run Wayland lazy tests under headless sway
+        run: |
+          export XDG_RUNTIME_DIR=$(mktemp -d)
+          export WLR_BACKENDS=headless
+          export WLR_LIBINPUT_NO_DEVICES=1
+          export WLR_RENDERER=pixman
+          export LIBSEAT_BACKEND=noop
+          sway > /tmp/sway.log 2>&1 &
+          for i in $(seq 1 40); do
+            sock=$(ls "$XDG_RUNTIME_DIR"/wayland-* 2>/dev/null | grep -v '\.lock' | head -1) && [ -n "$sock" ] && break
+            sleep 0.5
+          done
+          if [ -z "$sock" ]; then
+            echo "headless sway 미기동 (CI 환경 한계) — Wayland 테스트 skip"
+            cat /tmp/sway.log || true
+            echo "- **linux-wayland**: sway 미기동 — Wayland round-trip skip. 실 kwin 로컬 PASS 가 권위." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          export WAYLAND_DISPLAY=$(basename "$sock")
+          # sway 가 ext-data-control 미광고면 test_lazy_wayland 가 graceful skip (false FAIL 회피)
+          python -m pytest tests/test_lazy_wayland.py -v

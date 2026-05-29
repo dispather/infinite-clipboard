@@ -1,4 +1,7 @@
 -r requirements.txt
 # v3.0 lazy clipboard — X11 selection owner 백엔드 (부재 시 fallback)
 python-xlib>=0.33
-# 시스템 패키지 필요: sudo apt install xclip (또는 xsel)
+# v3.0 lazy clipboard — Wayland ext-data-control-v1 백엔드 (부재 시 fallback).
+# 바인딩(_proto)은 core/_wayland_proto/ 에 vendoring 됨 — pywayland 런타임만 필요.
+pywayland>=0.4.17
+# 시스템 패키지 필요: sudo apt install xclip (또는 xsel) / wl-clipboard (Wayland)

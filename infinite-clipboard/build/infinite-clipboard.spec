@@ -81,6 +81,8 @@ hiddenimports = [
     "PIL._tkinter_finder",
     "core.protocol", "core.network", "core.clipboard_manager",
     "core.file_transfer", "core.tailscale", "core.privacy", "core.autostart",
+    # v3.0 lazy clipboard 팩토리/ABC (크로스 OS). OS별 백엔드는 아래 분기에서 명시
+    "core.lazy_clipboard",
 ]
 
 if IS_WIN:
@@ -97,13 +99,26 @@ elif IS_MAC:
         "AppKit", "Foundation", "Quartz", "objc",
     ]
 elif IS_LINUX:
+    from PyInstaller.utils.hooks import collect_submodules  # noqa: E402
     hiddenimports += [
         # appindicator 우선, gtk 폴백
         "pystray._appindicator",
         "pystray._gtk",
         "plyer.platforms.linux.notification",
         # gi / gi.repository 는 시스템 site-packages 에서 로드 (runtime_hooks 참조)
+        # v3.0 lazy clipboard 백엔드 — 팩토리(get_lazy_provider)가 함수 안에서 lazy
+        # import 하므로 정적 분석이 놓칠 수 있어 명시 (누락 시 번들에서 lazy 가 조용히
+        # 비활성 → fallback. 함정 #6 류 silent 회귀 회피).
+        "core.lazy_x11",
+        "core.lazy_wayland",
+        # vendored pywayland 바인딩(core/_wayland_proto): 각 __init__ 이 하위 모듈을
+        # 전부 re-export → 패키지 루트만 명시해도 import graph 가 전부 수집.
+        "core._wayland_proto.wayland",
+        "core._wayland_proto.ext_data_control_v1",
     ]
+    # pywayland 런타임(cffi 확장 포함) 서브모듈 일괄 수집. 빌드 env 에 pywayland 가
+    # 설치돼 있어야 함(requirements_linux.txt). _proto 바인딩은 위 import graph 가 담당.
+    hiddenimports += collect_submodules("pywayland")
 
 # ── 제외 (바이너리 크기 절감) ──────────────────────────────────────────
 excludes = [
