@@ -93,6 +93,9 @@ class AppConfig:
     # v2.3: staging 디렉토리 (/tmp/ic_clipboard 등) TTL — mtime 기반 만료 후 삭제.
     # 1 ~ 720 시간 (1시간 ~ 30일). 0 또는 음수는 비허용 (의도치 않은 즉시 삭제 방지).
     staging_ttl_hours: int = 24
+    # v3.0: lazy offer TTL — copy 후 이 시간이 지나면 paste(fetch) 시 expired 거부.
+    # 1 ~ 720 시간. staging_ttl 과 동일 검증 패턴. 오래된 offer 의 stale fetch 차단.
+    offer_ttl_hours: int = 24
     # v3.0: 안정적 peer 식별자 (targeted relay 라우팅 전제). 빈 문자열이면
     # 자동 생성 후 영속. 같은 PC 는 재연결해도 같은 id. 32-char lowercase hex.
     # 형식 정의/검증은 core.protocol.is_valid_peer_id 가 SSOT.
@@ -217,6 +220,15 @@ class AppConfig:
                 f"reset to 24"
             )
             self.staging_ttl_hours = 24
+
+        # v3.0: offer_ttl_hours 범위 검증 (staging_ttl 과 동일 패턴, 1~720 시간).
+        if not isinstance(self.offer_ttl_hours, int) \
+                or not (1 <= self.offer_ttl_hours <= 720):
+            _logger.warning(
+                f"offer_ttl_hours={self.offer_ttl_hours!r} out of range [1,720], "
+                f"reset to 24"
+            )
+            self.offer_ttl_hours = 24
 
         # v3.0: peer_id 형식 검증 (32-char lowercase hex). settings.json 이
         # 손상된 값을 담고 있으면 재생성 — 라우팅이 깨진 id 로 동작하는 것 방지.

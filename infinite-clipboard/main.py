@@ -41,12 +41,19 @@ from core.protocol import (
     CANCEL_ACK_ROLE_SENDER, CANCEL_ACK_ROLE_RECEIVER, CANCEL_ACK_ROLE_NONE,
     CANCEL_ACK_STATUS_OK, CANCEL_ACK_STATUS_UNKNOWN,
     MSG_TRANSFER_COMPLETE,
+    # v3.0 lazy clipboard 메시지 + fetch 실패 사유
+    MSG_CLIP_OFFER, MSG_CLIP_FETCH, MSG_CLIP_FETCH_FAIL,
+    CLIP_OFFER_KIND_FILE,
+    FETCH_FAIL_SUPERSEDED, FETCH_FAIL_EXPIRED, FETCH_FAIL_MISSING,
+    FETCH_FAIL_OFFLINE, FETCH_FAIL_ERROR,
 )
 from core.network import NetworkServer, NetworkClient
 from core.protocol import Protocol
 from core.clipboard_manager import ClipboardManager
 from core.file_transfer import FileTransferManager, FileMetadata, CheckpointManager, Checkpoint, format_size
 from core.privacy import detect_sensitive_kind
+# v3.0 lazy provider (OS 별 백엔드 팩토리 — 헤드리스/미지원 시 None graceful)
+from core.lazy_clipboard import get_lazy_provider, FetchedContent, KIND_FILE
 
 # 로깅 설정 — 콘솔 + 파일 이중 출력
 from config import LOG_FILE
@@ -133,6 +140,27 @@ class InfiniteClipboard:
         # peer_id 는 self.client.server_peer_id 에 보관되므로 여기선 비워 둔다.
         self.peers = {}
 
+        # ── v3.0 S2c lazy 오케스트레이션 ────────────────────────────────
+        # [source 측] 현재 내가 제공 중인 offer (copy 시점 경로/메타만 보관, 데이터 X).
+        #   {offer_id, kind, metadata, file_paths, created_at}. 새 복사가 supersede.
+        self.current_offer = None
+        self._offer_lock = threading.Lock()
+        # [source 측] 동시 outgoing fetch 응답 직렬화 — invariant (A) 글로벌 큐.
+        # 함정 #1(paste-order race) 회귀 위험 0: 한 시점 1개 전송만.
+        self._outgoing_fetch_lock = threading.Lock()
+        # [receiver 측] 등록한 offer 들 {offer_id: offer dict}. paste 시 fetch 에 사용.
+        self.received_offers = {}
+        # [receiver 측] OS lazy provider (첫 offer 수신 시 lazy-init). 미지원/헤드리스 None.
+        self.lazy_provider = None
+        self._lazy_provider_inited = False
+        # [receiver 측] 진행 중 fetch 1개 (invariant A — 직렬화). _fetch_lock 으로 보호.
+        #   {offer_id, transfer_id, event: Event, paths: [..]|None, fail: reason|None}
+        self._active_fetch = None
+        self._fetch_lock = threading.Lock()  # fetch 동작 직렬화 (한 번에 1개)
+        # _active_fetch 필드 접근 가드 — 네트워크 스레드(시그널)와 fetch 스레드(대기)가
+        # 공유하므로 _fetch_lock(=fetch 가 점유 중) 과 별개 짧은 락으로 보호 (deadlock 회피).
+        self._active_fetch_lock = threading.Lock()
+
         # 상태 변경 콜백 (UI 갱신용, TrayApp에서 설정)
         self.on_state_changed = None
         # 트레이 핸들 (main() 에서 TrayApp 생성 후 주입). v2.3 audit P2 cleanup
@@ -203,6 +231,12 @@ class InfiniteClipboard:
         self.running = False
         if hasattr(self.clipboard, 'cleanup'):
             self.clipboard.cleanup()
+        # v3.0: lazy provider 백엔드 스레드 정리 (규칙 #9 silent)
+        if self.lazy_provider is not None:
+            try:
+                self.lazy_provider.stop()
+            except Exception:
+                pass
         if self.server:
             self.server.stop()
         if self.client:
@@ -251,6 +285,26 @@ class InfiniteClipboard:
         )
         self._notify_state_changed()
 
+    def _server_route(self, msg_type, data, sock, local_handler):
+        """v3.0 JSON 메시지 라우팅: receiver_peer 있으면 그 peer 1 소켓에만 중계.
+
+        - receiver_peer == 내 peer_id → 내가 최종 대상, 로컬 처리만 (중계 안 함)
+        - receiver_peer == 다른 peer → relay only (로컬 처리 안 함)
+        - receiver_peer 없음("") → 로컬 처리 + broadcast (eager 호환)
+        폴더 규칙 #3: 바이너리 chunk 는 별도(_raw) 경로, 이건 JSON 메시지용.
+        """
+        receiver = data.get("receiver_peer") if isinstance(data, dict) else None
+        if receiver:
+            if receiver == self.config.peer_id:
+                if local_handler:
+                    local_handler(data)
+            else:
+                self.server.send_to_peer(receiver, msg_type, data)
+        else:
+            if local_handler:
+                local_handler(data)
+            self.server.broadcast(msg_type, data, exclude_sock=sock)
+
     def _on_server_message(self, sock, message):
         """서버: 클라이언트로부터 메시지 수신"""
         msg_type = message.get("type")
@@ -261,9 +315,23 @@ class InfiniteClipboard:
             # 다른 클라이언트에 브로드캐스트
             self.server.broadcast(MSG_CLIPBOARD, data, exclude_sock=sock)
 
+        # ── v3.0 lazy clipboard ──
+        elif msg_type == MSG_CLIP_OFFER:
+            # copy 알림 — 로컬 처리(서버도 receiver 일 수 있음) + broadcast
+            self._handle_clip_offer(data)
+            self.server.broadcast(MSG_CLIP_OFFER, data, exclude_sock=sock)
+
+        elif msg_type == MSG_CLIP_FETCH:
+            # paste 요청 — receiver_peer(=source) 로 routed
+            self._server_route(MSG_CLIP_FETCH, data, sock, self._handle_clip_fetch)
+
+        elif msg_type == MSG_CLIP_FETCH_FAIL:
+            # fetch 실패 — receiver_peer(=requester) 로 routed
+            self._server_route(MSG_CLIP_FETCH_FAIL, data, sock, self._handle_clip_fetch_fail)
+
         elif msg_type == MSG_FILE_READY:
-            self._handle_file_ready(data)
-            self.server.broadcast(MSG_FILE_READY, data, exclude_sock=sock)
+            # v3.0: fetch 응답의 일부로 requester 에게만 targeted (receiver_peer 라우팅)
+            self._server_route(MSG_FILE_READY, data, sock, self._handle_file_ready)
 
         elif msg_type == MSG_FILE_REQUEST:
             self._handle_file_request(data)
@@ -293,16 +361,13 @@ class InfiniteClipboard:
                     self.server.broadcast(msg_type, data, exclude_sock=sock)
 
         elif msg_type == MSG_FILE_END:
-            self._handle_file_end(data)
-            self.server.broadcast(msg_type, data, exclude_sock=sock)
+            self._server_route(msg_type, data, sock, self._handle_file_end)
 
         elif msg_type == MSG_TRANSFER_COMPLETE:
-            self._handle_transfer_complete(data)
-            self.server.broadcast(msg_type, data, exclude_sock=sock)
+            self._server_route(msg_type, data, sock, self._handle_transfer_complete)
 
         elif msg_type == MSG_FILE_ERROR:
-            self._handle_file_error_received(data)
-            self.server.broadcast(msg_type, data, exclude_sock=sock)
+            self._server_route(msg_type, data, sock, self._handle_file_error_received)
 
         elif msg_type == MSG_FILE_CANCEL:
             # v2.1: 자체 처리 + broadcast (서버도 송수신 당사자일 수 있음)
@@ -314,7 +379,11 @@ class InfiniteClipboard:
             self._handle_file_cancel_ack(data)
             self.server.broadcast(msg_type, data, exclude_sock=sock)
 
-        elif msg_type in (MSG_FILE_START, MSG_FILE_ACK, MSG_FILE_RESUME):
+        elif msg_type == MSG_FILE_START:
+            # v3.0: receiver_peer 있으면 targeted (수신 측은 START 핸들러 없음 → local=None)
+            self._server_route(msg_type, data, sock, None)
+
+        elif msg_type in (MSG_FILE_ACK, MSG_FILE_RESUME):
             self.server.broadcast(msg_type, data, exclude_sock=sock)
 
         elif msg_type == MSG_PING:
@@ -362,6 +431,17 @@ class InfiniteClipboard:
         if msg_type == MSG_CLIPBOARD:
             self._handle_clipboard_received(data)
 
+        # ── v3.0 lazy clipboard (서버가 나에게 routed/broadcast) ──
+        elif msg_type == MSG_CLIP_OFFER:
+            self._handle_clip_offer(data)
+
+        elif msg_type == MSG_CLIP_FETCH:
+            # 내가 source — 서버가 fetch 를 나에게 중계
+            self._handle_clip_fetch(data)
+
+        elif msg_type == MSG_CLIP_FETCH_FAIL:
+            self._handle_clip_fetch_fail(data)
+
         elif msg_type == MSG_FILE_READY:
             self._handle_file_ready(data)
 
@@ -401,8 +481,10 @@ class InfiniteClipboard:
                     if changed and content is not None:
                         logger.info(f"[클립보드] 변경 감지: {content_type}")
                         if content_type == "files":
-                            self._send_file_ready(content)
+                            # v3.0 S2c: eager 전송 대신 offer broadcast (paste 시점 fetch).
+                            self._announce_offer(content)
                         else:
+                            # 텍스트는 그대로 inline 전송. 이미지 lazy 는 Task 7(S3)에서 이관.
                             self._send_clipboard(content_type, content)
                         self._add_to_history(content_type, content)
 
@@ -600,6 +682,223 @@ class InfiniteClipboard:
         elif self.config.mode == "client" and self.client:
             self.client.send_raw(raw_bytes)
 
+    # ── v3.0 S2c: targeted 전송 헬퍼 (한 peer 에게만) ──────────────────
+    # 서버 모드: peer 소켓에 직접. 클라이언트 모드: 서버로 보내면 서버가 data/meta 의
+    # receiver_peer 로 라우팅 (Task 3 의 _server_route). 폴더 규칙 #3 데이터 흐름.
+
+    def _send_msg_to(self, msg_type, data, receiver_peer):
+        """JSON 메시지를 receiver_peer 에게만 (data 에 receiver_peer 동봉돼 있어야 함)."""
+        if self.config.mode == "server" and self.server:
+            self.server.send_to_peer(receiver_peer, msg_type, data)
+        elif self.config.mode == "client" and self.client:
+            self.client.send(msg_type, data)
+
+    def _send_raw_to(self, raw_bytes, receiver_peer):
+        """직렬화된(raw) 메시지를 receiver_peer 에게만 (meta 에 receiver_peer 동봉)."""
+        if self.config.mode == "server" and self.server:
+            self.server.send_raw_to_peer(receiver_peer, raw_bytes)
+        elif self.config.mode == "client" and self.client:
+            self.client.send_raw(raw_bytes)
+
+    # ── v3.0 S2c: lazy offer/fetch 오케스트레이션 ──────────────────────
+
+    def _announce_offer(self, file_paths):
+        """[source] 파일 복사 감지 → 경로/메타만 보관 + MSG_CLIP_OFFER broadcast.
+
+        eager 전송 안 함. 데이터는 다른 PC 가 paste(fetch) 하는 시점에만 흐른다.
+        새 복사는 이전 offer 를 supersede (offer_id 불일치 → 옛 fetch 는 superseded 거부).
+        """
+        try:
+            metadata = self.file_manager.collect_metadata(file_paths)
+        except Exception as e:
+            logger.error(f"offer 메타데이터 수집 오류: {e}")
+            return
+        # offer_id == metadata.transfer_id (둘 다 UUID v4) → offer↔transfer 자연 연결
+        offer_id = metadata.transfer_id
+        items = [
+            {"name": os.path.basename(f["path"]) or f["path"],
+             "size": int(f.get("size", 0)), "hash": ""}
+            for f in metadata.files
+        ]
+        created_at = time.time()
+        with self._offer_lock:
+            self.current_offer = {
+                "offer_id": offer_id, "kind": CLIP_OFFER_KIND_FILE,
+                "metadata": metadata, "file_paths": file_paths,
+                "created_at": created_at,
+            }
+        try:
+            raw = self.protocol.create_clip_offer(
+                offer_id, self.config.peer_id, CLIP_OFFER_KIND_FILE,
+                items, int(metadata.total_size), created_at,
+            )
+        except Exception as e:
+            logger.error(f"offer 생성 오류: {e}")
+            return
+        self._send_raw_msg(raw)  # broadcast (receiver_peer 없음)
+        logger.info(
+            f"[offer] 알림: {metadata.file_count}개 "
+            f"({format_size(metadata.total_size)}) offer={offer_id[:8]}…"
+        )
+
+    def _ensure_lazy_provider(self):
+        """[receiver] 첫 offer 수신 시 OS lazy provider 1회 생성 (없으면 None=fallback)."""
+        if not self._lazy_provider_inited:
+            self._lazy_provider_inited = True
+            try:
+                self.lazy_provider = get_lazy_provider()
+            except Exception as e:
+                logger.warning(f"lazy provider 생성 실패 — fallback: {e}")
+                self.lazy_provider = None
+            if self.lazy_provider is None:
+                logger.info("[offer] lazy provider 없음 (헤드리스/미지원) — 받기 fallback 대상")
+        return self.lazy_provider
+
+    def _handle_clip_offer(self, data):
+        """[receiver] MSG_CLIP_OFFER 수신 → lazy provider 에 등록 (paste 시 fetch)."""
+        offer = self.protocol.parse_clip_offer(data)
+        if offer is None:
+            return
+        # 자기 자신의 offer 는 무시 (broadcast 가 되돌아온 경우)
+        if offer["source_peer"] == self.config.peer_id:
+            return
+        offer_id = offer["offer_id"]
+        with self._offer_lock:
+            # 새 offer 가 이전 것을 supersede — 최신만 유지
+            self.received_offers = {offer_id: offer}
+        provider = self._ensure_lazy_provider()
+        if provider is None or not provider.is_supported(offer["kind"]):
+            # 미지원/헤드리스 → 받기 fallback (Task 8). 지금은 무음 기록만.
+            logger.info(f"[offer] 수신(미등록, fallback 대상): offer={offer_id[:8]}…")
+            return
+        try:
+            provider.clear()  # 이전 등록 해제 (supersede)
+            ok = provider.register_offer(offer, self._fetch_offer)
+        except Exception as e:
+            logger.warning(f"offer 등록 실패 — fallback: {e}")
+            ok = False
+        logger.info(f"[offer] 수신·등록({'OK' if ok else 'fallback'}): offer={offer_id[:8]}…")
+
+    def _fetch_timeout(self, total_size: int) -> float:
+        """fetch 하드 타임아웃 (Rec 2). 크기 비례 + 하한/상한."""
+        return max(30.0, min(600.0, total_size / (256 * 1024)))
+
+    def _fetch_offer(self, offer_id):
+        """[receiver] lazy provider 콜백 — paste 시점 **동기** fetch.
+
+        FetchedContent(kind=file, paths=[스테이징 경로]) 반환, 실패 시 예외(→provider
+        가 빈 결과 처리 → 받기 fallback). invariant (A): 한 시점 1개 fetch (_fetch_lock).
+        """
+        with self._fetch_lock:
+            with self._offer_lock:
+                offer = self.received_offers.get(offer_id)
+            if offer is None:
+                raise RuntimeError(f"알 수 없는 offer: {offer_id}")
+            source_peer = offer["source_peer"]
+            total = int(offer.get("total_size", 0))
+            # Rec 3: requester 가 fetch 전에 저장 공간 검사 (실제 저장 위치 근사)
+            if not self.file_manager.check_disk_space(total):
+                raise RuntimeError("저장 공간 부족")
+            event = threading.Event()
+            with self._active_fetch_lock:
+                self._active_fetch = {
+                    "offer_id": offer_id, "transfer_id": offer_id,
+                    "event": event, "paths": None, "fail": None,
+                }
+            try:
+                raw = self.protocol.create_clip_fetch(
+                    offer_id, self.config.peer_id, receiver_peer=source_peer,
+                )
+                self._send_raw_to(raw, source_peer)
+                timeout = self._fetch_timeout(total)
+                if not event.wait(timeout=timeout):
+                    raise TimeoutError(f"fetch 타임아웃 ({timeout:.0f}s)")
+                with self._active_fetch_lock:
+                    af = self._active_fetch or {}
+                    fail = af.get("fail")
+                    paths = af.get("paths")
+                if fail:
+                    raise RuntimeError(f"fetch 실패: {fail}")
+                if not paths:
+                    raise RuntimeError("fetch 결과 없음")
+                return FetchedContent(kind=KIND_FILE, paths=list(paths))
+            finally:
+                with self._active_fetch_lock:
+                    self._active_fetch = None
+
+    def _signal_fetch(self, transfer_id, paths=None, fail=None) -> bool:
+        """[receiver] 진행 중 fetch 에 결과/실패 전달 + 대기 해제. 매칭 시 True."""
+        with self._active_fetch_lock:
+            af = self._active_fetch
+            if af is None or af.get("transfer_id") != transfer_id:
+                return False
+            if fail is not None:
+                af["fail"] = fail
+            else:
+                af["paths"] = paths
+            af["event"].set()
+            return True
+
+    def _handle_clip_fetch(self, data):
+        """[source] MSG_CLIP_FETCH 수신 → offer 검증 후 requester 에게만 전송 시작."""
+        parsed = self.protocol.parse_clip_fetch(data)
+        if parsed is None:
+            return
+        offer_id = parsed["offer_id"]
+        requester = parsed["requester_peer"]
+        with self._offer_lock:
+            offer = self.current_offer
+        if offer is None or offer.get("offer_id") != offer_id:
+            self._send_fetch_fail(offer_id, FETCH_FAIL_SUPERSEDED, requester)
+            return
+        if time.time() - offer["created_at"] > self.config.offer_ttl_hours * 3600:
+            self._send_fetch_fail(offer_id, FETCH_FAIL_EXPIRED, requester)
+            return
+        if not all(os.path.exists(p) for p in offer["file_paths"]):
+            self._send_fetch_fail(offer_id, FETCH_FAIL_MISSING, requester)
+            return
+        threading.Thread(
+            target=self._serve_fetch, args=(offer, requester), daemon=True,
+        ).start()
+
+    def _serve_fetch(self, offer, requester):
+        """[source] fetch 응답 — requester 에게만 FILE_READY + 파일 전송. (A) 직렬화."""
+        with self._outgoing_fetch_lock:  # invariant (A): 한 시점 1개 outgoing
+            offer_id = offer["offer_id"]
+            try:
+                metadata = offer["metadata"]
+                file_paths = offer["file_paths"]
+                # 수신측 pending 등록용 FILE_READY (targeted, receiver_peer 동봉)
+                ready = metadata.to_dict()
+                ready["receiver_peer"] = requester
+                self._send_msg_to(MSG_FILE_READY, ready, requester)
+                # active outgoing state (직렬화돼 supersede 발생 안 함)
+                self.file_manager.begin_outgoing(metadata, file_paths)
+                with self._transfers_lock:
+                    self.outgoing_files[offer_id] = (metadata, file_paths)
+                self._send_files(offer_id, metadata, file_paths, receiver_peer=requester)
+            except Exception as e:
+                logger.error(f"[fetch] 응답 오류: {e}")
+                self._send_fetch_fail(offer_id, FETCH_FAIL_ERROR, requester)
+
+    def _send_fetch_fail(self, offer_id, reason, requester):
+        """[source] requester 에게만 MSG_CLIP_FETCH_FAIL."""
+        try:
+            raw = self.protocol.create_clip_fetch_fail(
+                offer_id, reason, receiver_peer=requester,
+            )
+            self._send_raw_to(raw, requester)
+            logger.info(f"[fetch] 거부({reason}) → {requester[:8]}… offer={offer_id[:8]}…")
+        except Exception as e:
+            logger.warning(f"FETCH_FAIL 송출 실패: {e}")
+
+    def _handle_clip_fetch_fail(self, data):
+        """[receiver] MSG_CLIP_FETCH_FAIL 수신 → 진행 중 fetch 실패 처리."""
+        parsed = self.protocol.parse_clip_fetch_fail(data)
+        if parsed is None:
+            return
+        self._signal_fetch(parsed["offer_id"], fail=parsed["reason"])
+
     def _send_file_ready(self, file_paths):
         """파일 복사 감지 → 메타데이터 수집 → FILE_READY 전송
 
@@ -648,10 +947,12 @@ class InfiniteClipboard:
         )
 
     def _handle_file_ready(self, data):
-        """FILE_READY 수신 → 메타데이터 저장 → 자동 전송 요청 (체크포인트 있으면 resume)
+        """FILE_READY 수신 → 수신 pending 등록 (v3.0: 자동 전송 요청 없음).
 
-        v2.1: 단일 active incoming invariant 강제. 기존 incoming 이 있으면
-        임시 디렉토리·pending state 를 정리한 뒤 새 transfer 등록.
+        v3.0 S2c: FILE_READY 는 source 의 fetch 응답(_serve_fetch) 일부로 requester
+        에게만 온다. 여기선 pending_transfers 등록 + 디스크 검사만 하고, 전송은 곧
+        이어질 FILE_START/CHUNK 가 진행한다. eager 자동 REQUEST 는 제거됨.
+        v2.1: 단일 active incoming invariant 강제 (기존 incoming supersede + cleanup).
         """
         try:
             metadata = FileMetadata.from_dict(data)
@@ -673,32 +974,19 @@ class InfiniteClipboard:
 
             if not self.file_manager.check_disk_space(metadata.total_size):
                 logger.warning(f"[파일] 디스크 공간 부족: {metadata.transfer_id}")
+                # v3.0: 진행 중 fetch 가 있으면 실패 신호 → 받기 fallback (Task 8)
+                self._signal_fetch(metadata.transfer_id, fail=FETCH_FAIL_ERROR)
                 return
 
             # 전송 상태 추적 시작 (수신)
             display_name = metadata.root_name or f"{metadata.file_count}개 파일"
             self._track_transfer(metadata.transfer_id, display_name, metadata.total_size, "receive")
 
-            # 체크포인트 확인 → resume 정보 포함
-            request_data = {"transfer_id": metadata.transfer_id}
-            checkpoint = self.checkpoint_manager.load(metadata.transfer_id)
-            if checkpoint and checkpoint.completed_files:
-                request_data["completed_files"] = checkpoint.completed_files
-                request_data["completed_hashes"] = checkpoint.completed_hashes
-                # 이미 수신한 바이트 계산하여 진행률 보정
-                completed_bytes = sum(
-                    f["size"] for f in metadata.files
-                    if f["path"] in checkpoint.completed_files
-                )
-                self._update_transfer_bytes(metadata.transfer_id, completed_bytes)
-                logger.info(
-                    f"[파일] 이어받기 요청: {len(checkpoint.completed_files)}개 파일 완료, "
-                    f"{format_size(completed_bytes)} 건너뜀"
-                )
-
-            self._send_msg(MSG_FILE_REQUEST, request_data)
+            # v3.0 S2c: **eager 자동 MSG_FILE_REQUEST 송출 제거**. 전송은 source 의
+            # fetch 응답(_serve_fetch)이 구동한다. 여기선 수신 pending 등록만 (chunk 수신
+            # 준비). FILE_READY 는 이제 fetch 응답의 일부로 requester 에게만 targeted 온다.
             logger.info(
-                f"[파일] 수신 요청: {metadata.file_count}개, "
+                f"[파일] 수신 준비(lazy): {metadata.file_count}개, "
                 f"{format_size(metadata.total_size)}"
             )
         except Exception as e:
@@ -756,13 +1044,18 @@ class InfiniteClipboard:
                     logger.error(f"[파일] 경로 없음: {rel_path}")
                     continue
 
-                # FILE_START
-                self._send_msg(MSG_FILE_START, {
+                # FILE_START (v3.0: receiver_peer 있으면 targeted)
+                start_data = {
                     "transfer_id": transfer_id,
                     "file_path": rel_path,
                     "file_index": file_idx,
                     "file_size": file_entry["size"],
-                })
+                }
+                if receiver_peer:
+                    start_data["receiver_peer"] = receiver_peer
+                    self._send_msg_to(MSG_FILE_START, start_data, receiver_peer)
+                else:
+                    self._send_msg(MSG_FILE_START, start_data)
 
                 # FILE_CHUNK × N (바이너리 프레임 + 진행률 추적)
                 def chunk_callback(chunk_index, chunk_data, chunk_hash,
@@ -775,21 +1068,34 @@ class InfiniteClipboard:
                         _tid, _rel, chunk_index, chunk_data, chunk_hash,
                         receiver_peer=_rcv,
                     )
-                    self._send_raw_msg(raw)
+                    if _rcv:
+                        self._send_raw_to(raw, _rcv)
+                    else:
+                        self._send_raw_msg(raw)
                     bytes_sent += len(chunk_data)
                     self._update_transfer_bytes(_tid, bytes_sent)
 
                 sha256 = self.file_manager.send_file(abs_path, chunk_callback)
 
-                # FILE_END
-                self._send_msg(MSG_FILE_END, {
+                # FILE_END (v3.0: receiver_peer 있으면 targeted)
+                end_data = {
                     "transfer_id": transfer_id,
                     "file_path": rel_path,
                     "sha256": sha256,
-                })
+                }
+                if receiver_peer:
+                    end_data["receiver_peer"] = receiver_peer
+                    self._send_msg_to(MSG_FILE_END, end_data, receiver_peer)
+                else:
+                    self._send_msg(MSG_FILE_END, end_data)
             else:
                 # for 루프가 break 없이 완료된 경우만 TRANSFER_COMPLETE
-                self._send_msg(MSG_TRANSFER_COMPLETE, {"transfer_id": transfer_id})
+                complete_data = {"transfer_id": transfer_id}
+                if receiver_peer:
+                    complete_data["receiver_peer"] = receiver_peer
+                    self._send_msg_to(MSG_TRANSFER_COMPLETE, complete_data, receiver_peer)
+                else:
+                    self._send_msg(MSG_TRANSFER_COMPLETE, complete_data)
                 with self._transfers_lock:
                     self.outgoing_files.pop(transfer_id, None)
                 self._finish_transfer(transfer_id)
@@ -937,7 +1243,11 @@ class InfiniteClipboard:
                     clipboard_paths = [folder_path]
                 else:
                     clipboard_paths = restored_paths
-                self.clipboard.set_clipboard_content("files", clipboard_paths)
+                # v3.0 S2c: lazy fetch 가 진행 중이면 그 fetch 에 경로를 넘긴다 — OS
+                # 클립보드 set 은 provider 가 paste 시점에 수행하므로 여기서 직접 set 안 함.
+                # 매칭되는 fetch 가 없으면(방어적) 기존처럼 직접 set.
+                if not self._signal_fetch(transfer_id, paths=clipboard_paths):
+                    self.clipboard.set_clipboard_content("files", clipboard_paths)
         finally:
             # 예외 발생 시에도 반드시 정리
             self.checkpoint_manager.delete(transfer_id)
