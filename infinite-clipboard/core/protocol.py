@@ -50,6 +50,11 @@ MSG_FILE_CANCEL_ACK = "file_cancel_ack"  # v2.3.1: 취소 ack (peer cleanup 확�
 MSG_FILE_ERROR = "file_error"        # 파일 전송 오류
 MSG_TRANSFER_COMPLETE = "transfer_complete"  # 전체 전송 완료
 
+# v3.0 — lazy clipboard offer/fetch (targeted relay 사용)
+MSG_CLIP_OFFER = "clip_offer"            # copy 시점 경로 알림 (broadcast)
+MSG_CLIP_FETCH = "clip_fetch"            # paste 시점 fetch 요청 (source 로 routed)
+MSG_CLIP_FETCH_FAIL = "clip_fetch_fail"  # fetch 실패 응답 (requester 로 routed)
+
 # ── 파일 전송 설정 ───────────────────────────────────────────────────────
 
 FILE_CHUNK_SIZE = 1024 * 1024                # 1MB 청크
@@ -88,6 +93,23 @@ CANCEL_ACK_STATUS_UNKNOWN = "unknown"  # transfer_id 미매칭 (이미 정리됨
 _CANCEL_ACK_STATUS_VALID = frozenset({
     CANCEL_ACK_STATUS_OK,
     CANCEL_ACK_STATUS_UNKNOWN,
+})
+
+# ── v3.0: lazy clipboard offer/fetch 상수 ───────────────────────────────
+# offer 종류 — 텍스트는 즉시 전송이라 offer 대상 아님 (file/image 만 lazy).
+CLIP_OFFER_KIND_FILE = "file"
+CLIP_OFFER_KIND_IMAGE = "image"
+_CLIP_OFFER_KINDS = frozenset({CLIP_OFFER_KIND_FILE, CLIP_OFFER_KIND_IMAGE})
+
+# fetch 실패 사유 화이트리스트. 새 사유 추가 시 함께 갱신.
+FETCH_FAIL_SUPERSEDED = "superseded"   # 새 복사로 offer 폐기됨
+FETCH_FAIL_EXPIRED = "expired"         # TTL 초과
+FETCH_FAIL_MISSING = "missing"         # 원본 파일/경로 사라짐
+FETCH_FAIL_OFFLINE = "offline"         # source peer 연결 끊김
+FETCH_FAIL_ERROR = "error"             # 기타 오류
+_FETCH_FAIL_REASONS = frozenset({
+    FETCH_FAIL_SUPERSEDED, FETCH_FAIL_EXPIRED, FETCH_FAIL_MISSING,
+    FETCH_FAIL_OFFLINE, FETCH_FAIL_ERROR,
 })
 
 # ── transfer_id 형식 (UUID v4) 검증 ─────────────────────────────────────
@@ -551,6 +573,184 @@ class Protocol:
 
         meta_data["binary_data"] = binary_data
         return message
+
+    # ── v3.0: lazy clipboard offer/fetch 메시지 ────────────────────────
+    # offer: copy 시점 source 가 broadcast (경로 알림, 데이터 전송 X).
+    # fetch: paste 시점 requester 가 source 로 routed (receiver_peer=source).
+    # fetch_fail: source 가 requester 로 routed (offer 만료/없음 등).
+    # 실제 데이터는 fetch 응답으로 file_start/chunk/end (receiver_peer=requester).
+
+    @staticmethod
+    def _is_valid_offer_item(item: object) -> bool:
+        """offer item = {"name": str(비어있지 않음), "size": int>=0, "hash": str}.
+
+        lazy 모드라 copy 시점엔 hash="" 가능 (fetch 시 source 가 채움).
+        """
+        if not isinstance(item, dict):
+            return False
+        name = item.get("name")
+        size = item.get("size")
+        h = item.get("hash", "")
+        if not isinstance(name, str) or not name or len(name) > 1024:
+            return False
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            return False
+        if not isinstance(h, str) or len(h) > 128:
+            return False
+        return True
+
+    def create_clip_offer(
+        self, offer_id: str, source_peer: str, kind: str,
+        items: list, total_size: int, created_at: float,
+    ) -> bytes:
+        """copy 시점 lazy offer 생성 (broadcast 용).
+
+        Args:
+            offer_id: UUID v4 형식 (is_valid_transfer_id 재사용)
+            source_peer: 콘텐츠 보유 peer_id
+            kind: "file" 또는 "image"
+            items: [{"name", "size", "hash"}] preview 디스크립터
+            total_size: 전체 바이트 합
+            created_at: 생성 시각 (epoch 초) — TTL 판정용
+
+        Raises:
+            ValueError: 형식 위반 시
+        """
+        if not is_valid_transfer_id(offer_id):
+            raise ValueError(f"invalid offer_id: {offer_id!r}")
+        if not is_valid_peer_id(source_peer):
+            raise ValueError(f"invalid source_peer: {source_peer!r}")
+        if kind not in _CLIP_OFFER_KINDS:
+            raise ValueError(f"invalid offer kind: {kind!r}")
+        if not isinstance(items, list) or not items:
+            raise ValueError("offer items must be a non-empty list")
+        if not all(self._is_valid_offer_item(it) for it in items):
+            raise ValueError("offer items 형식 위반")
+        if not isinstance(total_size, int) or isinstance(total_size, bool) or total_size < 0:
+            raise ValueError(f"invalid total_size: {total_size!r}")
+        if not isinstance(created_at, (int, float)) or isinstance(created_at, bool) \
+                or created_at < 0:
+            raise ValueError(f"invalid created_at: {created_at!r}")
+        return self.create_message(MSG_CLIP_OFFER, {
+            "offer_id": offer_id,
+            "source_peer": source_peer,
+            "kind": kind,
+            "items": items,
+            "total_size": total_size,
+            "created_at": created_at,
+        })
+
+    @staticmethod
+    def parse_clip_offer(data: object) -> Optional[Dict[str, Any]]:
+        """검증 통과 시 offer dict, 실패 시 None (silent ignore 신호)."""
+        if not isinstance(data, dict):
+            return None
+        offer_id = data.get("offer_id")
+        source_peer = data.get("source_peer")
+        kind = data.get("kind")
+        items = data.get("items")
+        total_size = data.get("total_size")
+        created_at = data.get("created_at")
+        if not is_valid_transfer_id(offer_id):
+            return None
+        if not is_valid_peer_id(source_peer):
+            return None
+        if kind not in _CLIP_OFFER_KINDS:
+            return None
+        if not isinstance(items, list) or not items:
+            return None
+        if not all(Protocol._is_valid_offer_item(it) for it in items):
+            return None
+        if not isinstance(total_size, int) or isinstance(total_size, bool) or total_size < 0:
+            return None
+        if not isinstance(created_at, (int, float)) or isinstance(created_at, bool) \
+                or created_at < 0:
+            return None
+        return {
+            "offer_id": offer_id,
+            "source_peer": source_peer,
+            "kind": kind,
+            "items": items,
+            "total_size": total_size,
+            "created_at": created_at,
+        }
+
+    def create_clip_fetch(
+        self, offer_id: str, requester_peer: str, receiver_peer: str = "",
+    ) -> bytes:
+        """paste 시점 fetch 요청.
+
+        receiver_peer 는 라우팅 대상(=offer 의 source_peer)으로, main 이 offer 에서
+        조회해 채운다. 빈 문자열이면 broadcast (fallback).
+        """
+        if not is_valid_transfer_id(offer_id):
+            raise ValueError(f"invalid offer_id: {offer_id!r}")
+        if not is_valid_peer_id(requester_peer):
+            raise ValueError(f"invalid requester_peer: {requester_peer!r}")
+        if receiver_peer and not is_valid_peer_id(receiver_peer):
+            raise ValueError(f"invalid receiver_peer: {receiver_peer!r}")
+        return self.create_message(MSG_CLIP_FETCH, {
+            "offer_id": offer_id,
+            "requester_peer": requester_peer,
+            "receiver_peer": receiver_peer,
+        })
+
+    @staticmethod
+    def parse_clip_fetch(data: object) -> Optional[Dict[str, str]]:
+        if not isinstance(data, dict):
+            return None
+        offer_id = data.get("offer_id")
+        requester_peer = data.get("requester_peer")
+        receiver_peer = data.get("receiver_peer", "")
+        if not is_valid_transfer_id(offer_id):
+            return None
+        if not is_valid_peer_id(requester_peer):
+            return None
+        if receiver_peer != "" and not is_valid_peer_id(receiver_peer):
+            return None
+        return {
+            "offer_id": offer_id,
+            "requester_peer": requester_peer,
+            "receiver_peer": receiver_peer,
+        }
+
+    def create_clip_fetch_fail(
+        self, offer_id: str, reason: str, receiver_peer: str = "",
+    ) -> bytes:
+        """fetch 실패 응답 (source → requester 로 routed).
+
+        receiver_peer 는 라우팅 대상(=fetch 의 requester_peer).
+        """
+        if not is_valid_transfer_id(offer_id):
+            raise ValueError(f"invalid offer_id: {offer_id!r}")
+        if reason not in _FETCH_FAIL_REASONS:
+            raise ValueError(f"invalid fetch fail reason: {reason!r}")
+        if receiver_peer and not is_valid_peer_id(receiver_peer):
+            raise ValueError(f"invalid receiver_peer: {receiver_peer!r}")
+        return self.create_message(MSG_CLIP_FETCH_FAIL, {
+            "offer_id": offer_id,
+            "reason": reason,
+            "receiver_peer": receiver_peer,
+        })
+
+    @staticmethod
+    def parse_clip_fetch_fail(data: object) -> Optional[Dict[str, str]]:
+        if not isinstance(data, dict):
+            return None
+        offer_id = data.get("offer_id")
+        reason = data.get("reason")
+        receiver_peer = data.get("receiver_peer", "")
+        if not is_valid_transfer_id(offer_id):
+            return None
+        if reason not in _FETCH_FAIL_REASONS:
+            return None
+        if receiver_peer != "" and not is_valid_peer_id(receiver_peer):
+            return None
+        return {
+            "offer_id": offer_id,
+            "reason": reason,
+            "receiver_peer": receiver_peer,
+        }
 
     @staticmethod
     def read_header(header_data: bytes) -> int:
