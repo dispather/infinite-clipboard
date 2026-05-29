@@ -481,6 +481,79 @@ class NetworkServer:
         except Exception as e:
             logger.error(f"메시지 전송 오류: {e}")
 
+    # ── v3.0: targeted relay (peer_id → 특정 소켓) ─────────────────────
+    # 별-토폴로지에서 서버가 receiver_peer 가진 메시지를 broadcast 대신 해당
+    # peer 에게만 중계. lazy fetch 의 핵심 — "B 가 paste 하면 B 에게만 chunk".
+
+    def _socket_for_peer(self, peer_id: str) -> Optional[socket.socket]:
+        """peer_id 로 등록된 소켓을 역조회. lock 보호. 없으면 None."""
+        if not peer_id:
+            return None
+        with self.clients_lock:
+            for sock, info in self.clients.items():
+                if info.get("peer_id") == peer_id:
+                    return sock
+        return None
+
+    def _drop_socket(self, sock: socket.socket) -> None:
+        """전송 실패한 소켓을 정리 (broadcast 의 failed 처리와 동일)."""
+        with self.clients_lock:
+            self.clients.pop(sock, None)
+            self._write_locks.pop(sock, None)
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    def send_to_peer(self, peer_id: str, msg_type: str, data: Any = None) -> bool:
+        """특정 peer 에게 JSON 메시지를 전송. 대상 없으면 warning + drop (graceful).
+
+        Returns:
+            bool: 전송 시도 성공 여부 (대상 없음 / 전송 실패 시 False)
+        """
+        sock = self._socket_for_peer(peer_id)
+        if sock is None:
+            logger.warning(f"send_to_peer: peer {peer_id[:8]}… 없음 — drop")
+            return False
+        try:
+            message_bytes = self.protocol.create_message(msg_type, data)
+            wl = self._write_locks.get(sock)
+            if wl:
+                with wl:
+                    sock.sendall(message_bytes)
+            else:
+                sock.sendall(message_bytes)
+            return True
+        except Exception as e:
+            logger.error(f"send_to_peer 전송 오류 ({peer_id[:8]}…): {e}")
+            self._drop_socket(sock)
+            return False
+
+    def send_raw_to_peer(self, peer_id: str, raw_message: bytes) -> bool:
+        """특정 peer 에게 이미 직렬화된 바이트(바이너리 chunk 등)를 전송.
+
+        대상 없으면 warning + drop. 바이너리 chunk 의 targeted relay 경로.
+
+        Returns:
+            bool: 전송 시도 성공 여부.
+        """
+        sock = self._socket_for_peer(peer_id)
+        if sock is None:
+            logger.warning(f"send_raw_to_peer: peer {peer_id[:8]}… 없음 — drop")
+            return False
+        try:
+            wl = self._write_locks.get(sock)
+            if wl:
+                with wl:
+                    sock.sendall(raw_message)
+            else:
+                sock.sendall(raw_message)
+            return True
+        except Exception as e:
+            logger.error(f"send_raw_to_peer 전송 오류 ({peer_id[:8]}…): {e}")
+            self._drop_socket(sock)
+            return False
+
 
 # ── 클라이언트 ──────────────────────────────────────────────────────────
 

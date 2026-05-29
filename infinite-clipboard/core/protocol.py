@@ -444,11 +444,16 @@ class Protocol:
         chunk_index: int,
         chunk_data: bytes,
         chunk_hash: str,
+        receiver_peer: str = "",
     ) -> bytes:
         """
         바이너리 청크 메시지를 생성합니다 (base64 인코딩 없이 원시 바이너리 전송).
 
         형식: [4바이트 길이 헤더] + [0x00] + [4바이트 메타길이] + [메타 JSON] + [원시 바이너리]
+
+        Args:
+            receiver_peer: v3.0 targeted relay 대상 peer_id. 빈 문자열이면 서버가
+                broadcast (eager 호환). 값이 있으면 서버가 그 peer 에게만 중계.
 
         Returns:
             bytes: 헤더 포함 완성된 와이어 메시지
@@ -460,6 +465,7 @@ class Protocol:
                 "file_path": file_path,
                 "chunk_index": chunk_index,
                 "hash": chunk_hash,
+                "receiver_peer": receiver_peer,
             }
         }, ensure_ascii=False).encode("utf-8")
 
@@ -531,6 +537,14 @@ class Protocol:
             if not isinstance(ci, int) or ci < 0:
                 logger.error(
                     f"바이너리 프레임 거부 (invalid chunk_index): {ci!r}"
+                )
+                return None
+            # v3.0: receiver_peer 형식 검증 — "" (broadcast) 또는 valid peer_id.
+            # 위반 시 라우터가 잘못된 소켓으로 보내지 않도록 frame 자체 거부.
+            rp = meta_data.get("receiver_peer", "")
+            if rp != "" and not is_valid_peer_id(rp):
+                logger.error(
+                    f"바이너리 프레임 거부 (invalid receiver_peer): {rp!r}"
                 )
                 return None
             # file_path 는 file_transfer 에서 _is_safe_rel_path 로 검증됨 (중복 회피)

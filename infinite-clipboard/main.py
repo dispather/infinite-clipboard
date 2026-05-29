@@ -270,13 +270,27 @@ class InfiniteClipboard:
             self.server.broadcast(MSG_FILE_REQUEST, data, exclude_sock=sock)
 
         elif msg_type == MSG_FILE_CHUNK:
-            self._handle_file_chunk(data)
-            # 원본 와이어 바이트로 중계 (재직렬화 방지, 바이너리 프레임 유지)
+            # v3.0 targeted relay: receiver_peer 가 있으면 그 peer 1 소켓에만 중계.
+            #   - receiver_peer == 내 peer_id  → 내가 최종 수신자, 로컬 처리 (중계 안 함)
+            #   - receiver_peer == 다른 peer   → relay only (로컬 처리 안 함)
+            #   - receiver_peer 없음("")       → eager 호환: 로컬 처리 + broadcast
             raw = message.get("_raw")
-            if raw:
-                self.server.broadcast_raw(raw, exclude_sock=sock)
+            receiver_peer = data.get("receiver_peer") if isinstance(data, dict) else None
+            if receiver_peer:
+                if receiver_peer == self.config.peer_id:
+                    self._handle_file_chunk(data)
+                elif raw:
+                    self.server.send_raw_to_peer(receiver_peer, raw)
+                else:
+                    # raw 부재(드문 경로) — 재직렬화해서 targeted 전송
+                    self.server.send_to_peer(receiver_peer, msg_type, data)
             else:
-                self.server.broadcast(msg_type, data, exclude_sock=sock)
+                self._handle_file_chunk(data)
+                # 원본 와이어 바이트로 중계 (재직렬화 방지, 바이너리 프레임 유지)
+                if raw:
+                    self.server.broadcast_raw(raw, exclude_sock=sock)
+                else:
+                    self.server.broadcast(msg_type, data, exclude_sock=sock)
 
         elif msg_type == MSG_FILE_END:
             self._handle_file_end(data)
@@ -707,8 +721,14 @@ class InfiniteClipboard:
             daemon=True,
         ).start()
 
-    def _send_files(self, transfer_id, metadata, file_paths, completed_files=None):
-        """파일 전송 실행 (별도 스레드에서 호출)"""
+    def _send_files(self, transfer_id, metadata, file_paths, completed_files=None,
+                    receiver_peer=""):
+        """파일 전송 실행 (별도 스레드에서 호출)
+
+        v3.0: receiver_peer 가 있으면 chunk meta 에 동봉 → 서버가 그 peer 에게만
+        중계 (lazy fetch 응답). 빈 문자열이면 eager broadcast (현행 호환).
+        Task 6 의 fetch 핸들러가 requester peer_id 를 주입한다.
+        """
         completed_files = completed_files or set()
         bytes_sent = 0  # 전체 전송 바이트 누적
 
@@ -746,12 +766,14 @@ class InfiniteClipboard:
 
                 # FILE_CHUNK × N (바이너리 프레임 + 진행률 추적)
                 def chunk_callback(chunk_index, chunk_data, chunk_hash,
-                                   _tid=transfer_id, _rel=rel_path):
+                                   _tid=transfer_id, _rel=rel_path,
+                                   _rcv=receiver_peer):
                     nonlocal bytes_sent
                     if _tid in self._cancelled_transfers:
                         raise InterruptedError("전송 중단 요청")
                     raw = self.protocol.create_binary_chunk(
                         _tid, _rel, chunk_index, chunk_data, chunk_hash,
+                        receiver_peer=_rcv,
                     )
                     self._send_raw_msg(raw)
                     bytes_sent += len(chunk_data)
