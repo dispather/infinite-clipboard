@@ -38,11 +38,11 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         # .gitattributes 의 *.bat eol=crlf 강제 → 함정 #21(a) CRLF 보장.
 
       - name: Setup Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: pip
@@ -160,7 +160,7 @@ jobs:
           chown -R builder:builder /home/builder/.cache
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Fix workspace ownership
         run: chown -R builder:builder "$GITHUB_WORKSPACE"
@@ -206,7 +206,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install build tools (uv + pyenv + tcl-tk@8)
         # brew 는 macos-14 에 사전 설치. pyenv 와 uv 는 build_mac.sh 가 요구.
