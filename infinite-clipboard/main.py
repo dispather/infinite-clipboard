@@ -128,6 +128,10 @@ class InfiniteClipboard:
         # 상태
         self.connected = False
         self.connected_clients = 0
+        # v3.0: peer 레지스트리 (targeted relay 라우팅의 기반, Task 3 가 사용).
+        # 서버 모드: {peer_id: name} 연결된 클라이언트들. 클라이언트 모드: 서버
+        # peer_id 는 self.client.server_peer_id 에 보관되므로 여기선 비워 둔다.
+        self.peers = {}
 
         # 상태 변경 콜백 (UI 갱신용, TrayApp에서 설정)
         self.on_state_changed = None
@@ -214,6 +218,7 @@ class InfiniteClipboard:
             auth_key=self.config.auth_key,
             tailscale_trust=self.config.tailscale_trust,
             bind_address=self.config.bind_address,
+            peer_id=self.config.peer_id,
         )
 
         self.server.on_client_connected = self._on_server_client_connected
@@ -224,18 +229,26 @@ class InfiniteClipboard:
         self.connected = True
         # 실제 bind IP 는 NetworkServer.start() 가 로깅 (Tailscale 자동 / 0.0.0.0)
 
-    def _on_server_client_connected(self, sock, address, name):
-        """클라이언트 연결 이벤트"""
+    def _on_server_client_connected(self, sock, address, name, peer_id):
+        """클라이언트 연결 이벤트 (v3.0: peer_id 레지스트리 기록)"""
         with self.server.clients_lock:
             self.connected_clients = len(self.server.clients)
-        logger.info(f"[서버] 클라이언트 연결: {name} ({self.connected_clients}대)")
+        self.peers[peer_id] = name
+        logger.info(
+            f"[서버] 클라이언트 연결: {name} peer={peer_id[:8]}… "
+            f"({self.connected_clients}대)"
+        )
         self._notify_state_changed()
 
-    def _on_server_client_disconnected(self, sock, address, name):
-        """클라이언트 연결 해제 이벤트"""
+    def _on_server_client_disconnected(self, sock, address, name, peer_id):
+        """클라이언트 연결 해제 이벤트 (v3.0: 레지스트리에서 제거)"""
         with self.server.clients_lock:
             self.connected_clients = len(self.server.clients)
-        logger.info(f"[서버] 클라이언트 해제: {name} ({self.connected_clients}대)")
+        self.peers.pop(peer_id, None)
+        logger.info(
+            f"[서버] 클라이언트 해제: {name} peer={peer_id[:8]}… "
+            f"({self.connected_clients}대)"
+        )
         self._notify_state_changed()
 
     def _on_server_message(self, sock, message):
@@ -302,6 +315,7 @@ class InfiniteClipboard:
             port=self.config.port,
             auth_key=self.config.auth_key,
             device_name=self.config.device_name,
+            peer_id=self.config.peer_id,
         )
 
         self.client.on_connected = self._on_client_connected
@@ -311,9 +325,13 @@ class InfiniteClipboard:
         self.client.start()
 
     def _on_client_connected(self):
-        """서버 연결 성공"""
+        """서버 연결 성공 (v3.0: 학습한 서버 peer_id 로깅)"""
         self.connected = True
-        logger.info("[클라이언트] 서버 연결 성공")
+        server_peer = getattr(self.client, "server_peer_id", "")
+        logger.info(
+            f"[클라이언트] 서버 연결 성공 "
+            f"(server_peer={server_peer[:8]}… my_peer={self.config.peer_id[:8]}…)"
+        )
         self._notify_state_changed()
 
     def _on_client_disconnected(self):

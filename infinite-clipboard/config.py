@@ -11,6 +11,8 @@ from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from typing import Optional, List
 
+from core.protocol import generate_peer_id, is_valid_peer_id
+
 _logger = logging.getLogger(__name__)
 
 
@@ -91,10 +93,16 @@ class AppConfig:
     # v2.3: staging 디렉토리 (/tmp/ic_clipboard 등) TTL — mtime 기반 만료 후 삭제.
     # 1 ~ 720 시간 (1시간 ~ 30일). 0 또는 음수는 비허용 (의도치 않은 즉시 삭제 방지).
     staging_ttl_hours: int = 24
+    # v3.0: 안정적 peer 식별자 (targeted relay 라우팅 전제). 빈 문자열이면
+    # 자동 생성 후 영속. 같은 PC 는 재연결해도 같은 id. 32-char lowercase hex.
+    # 형식 정의/검증은 core.protocol.is_valid_peer_id 가 SSOT.
+    peer_id: str = ""
 
     def __post_init__(self):
         if not self.device_name:
             self.device_name = platform.node()
+        if not self.peer_id:
+            self.peer_id = generate_peer_id()
         if not self.download_path:
             self.download_path = _get_download_dir()
         # 약한 기본값(빈 문자열, "change-me", 6자리 숫자 PIN)이면 강한 키로 교체
@@ -209,6 +217,14 @@ class AppConfig:
                 f"reset to 24"
             )
             self.staging_ttl_hours = 24
+
+        # v3.0: peer_id 형식 검증 (32-char lowercase hex). settings.json 이
+        # 손상된 값을 담고 있으면 재생성 — 라우팅이 깨진 id 로 동작하는 것 방지.
+        if not is_valid_peer_id(self.peer_id):
+            _logger.warning(
+                f"peer_id={self.peer_id!r} invalid format, regenerating"
+            )
+            self.peer_id = generate_peer_id()
 
 
 CONFIG_FILE = _get_config_dir() / "settings.json"

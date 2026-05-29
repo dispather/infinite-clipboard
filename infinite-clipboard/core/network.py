@@ -17,6 +17,7 @@ from core.protocol import (
     MSG_HANDSHAKE_CHALLENGE, MSG_HANDSHAKE_RESPONSE, MSG_HANDSHAKE_ACK,
     PROTOCOL_VERSION,
     generate_nonce, compute_handshake_hmac, verify_handshake_hmac,
+    generate_peer_id, is_valid_peer_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,7 @@ class NetworkServer:
         auth_key: str,
         tailscale_trust: bool = True,
         bind_address: str = "",
+        peer_id: str = "",
     ):
         """
         서버 인스턴스를 초기화합니다.
@@ -90,15 +92,21 @@ class NetworkServer:
             bind_address: bind 할 IP 주소. 빈 문자열이면 v2.2 R2 자동 모드
                 (Tailscale IP 우선, 미감지 시 0.0.0.0 fallback). 명시적
                 "0.0.0.0" 은 모든 인터페이스 노출 (opt-in).
+            peer_id: v3.0 이 서버의 안정적 식별자 (challenge 로 클라이언트에게 알림).
+                보통 config.peer_id 가 전달된다. 비거나 형식 위반이면 자동 생성
+                (standalone/테스트 안전망 — 핸드셰이크 invariant 보장).
         """
         self.port = port
         self.auth_key = auth_key
         self.tailscale_trust = tailscale_trust
         self.bind_address = bind_address
+        self.peer_id = peer_id if is_valid_peer_id(peer_id) else generate_peer_id()
         self.protocol = Protocol(auth_key)
 
-        # 클라이언트 관리: {socket: client_name}
-        self.clients: Dict[socket.socket, str] = {}
+        # 클라이언트 관리: {socket: {"name": str, "peer_id": str}}
+        # v3.0: 값을 dict 로 확장 (peer_id 라우팅용). broadcast 는 key(socket)만
+        # 쓰므로 값 변경 영향 없음. peer_id→socket 역조회는 Task 3 에서 추가.
+        self.clients: Dict[socket.socket, Dict[str, str]] = {}
         self.clients_lock = threading.Lock()
         self._write_locks: Dict[socket.socket, threading.Lock] = {}  # 소켓별 write 직렬화
 
@@ -106,8 +114,8 @@ class NetworkServer:
         self.running = False
 
         # 콜백 속성 (상위 계층에서 설정)
-        self.on_client_connected: Optional[Callable] = None       # (sock, address, name)
-        self.on_client_disconnected: Optional[Callable] = None    # (sock, address, name)
+        self.on_client_connected: Optional[Callable] = None       # (sock, address, name, peer_id)
+        self.on_client_disconnected: Optional[Callable] = None    # (sock, address, name, peer_id)
         self.on_message_received: Optional[Callable] = None       # (sock, message)
 
     def start(self):
@@ -237,12 +245,13 @@ class NetworkServer:
             address: 클라이언트 주소 (host, port)
         """
         client_name = f"{address[0]}:{address[1]}"
+        client_peer_id = ""  # v3.0: response 파싱 후 채워짐 (disconnect 콜백까지 유지)
 
         try:
-            # ── v2.2 R3: 3-step mutual HMAC handshake ──
-            # 1. Server → Client: CHALLENGE (server_nonce, server_version)
+            # ── v2.2 R3: 3-step mutual HMAC handshake (v3.0: + peer_id) ──
+            # 1. Server → Client: CHALLENGE (server_nonce, server_version, server_peer_id)
             server_nonce = generate_nonce()
-            challenge = self.protocol.create_handshake_challenge(server_nonce)
+            challenge = self.protocol.create_handshake_challenge(server_nonce, self.peer_id)
             sock.sendall(challenge)
 
             # 2. Client → Server: RESPONSE (client_nonce, version, name, hmac)
@@ -294,21 +303,22 @@ class NetworkServer:
             sock.sendall(ack)
 
             client_name = payload["name"]
+            client_peer_id = payload["peer_id"]  # v3.0: 상대 peer_id 학습
 
-            # 클라이언트 등록
+            # 클라이언트 등록 (v3.0: name + peer_id)
             with self.clients_lock:
-                self.clients[sock] = client_name
+                self.clients[sock] = {"name": client_name, "peer_id": client_peer_id}
                 self._write_locks[sock] = threading.Lock()
 
             logger.info(
                 f"클라이언트 연결됨 (HMAC v{PROTOCOL_VERSION}): "
-                f"{client_name} ({address})"
+                f"{client_name} peer={client_peer_id[:8]}… ({address})"
             )
 
             # on_client_connected 콜백 호출
             if self.on_client_connected:
                 try:
-                    self.on_client_connected(sock, address, client_name)
+                    self.on_client_connected(sock, address, client_name, client_peer_id)
                 except Exception as e:
                     logger.error(f"on_client_connected 콜백 오류: {e}")
 
@@ -372,7 +382,7 @@ class NetworkServer:
             # on_client_disconnected 콜백 호출
             if self.on_client_disconnected:
                 try:
-                    self.on_client_disconnected(sock, address, client_name)
+                    self.on_client_disconnected(sock, address, client_name, client_peer_id)
                 except Exception as e:
                     logger.error(f"on_client_disconnected 콜백 오류: {e}")
 
@@ -482,7 +492,8 @@ class NetworkClient:
     연결이 끊어지면 자동으로 재연결을 시도합니다.
     """
 
-    def __init__(self, host: str, port: int, auth_key: str, device_name: str):
+    def __init__(self, host: str, port: int, auth_key: str, device_name: str,
+                 peer_id: str = ""):
         """
         클라이언트 인스턴스를 초기화합니다.
 
@@ -491,11 +502,16 @@ class NetworkClient:
             port: 서버 포트 번호
             auth_key: 서버 인증에 사용할 공유 키
             device_name: 이 디바이스의 식별 이름
+            peer_id: v3.0 이 클라이언트의 안정적 식별자 (response 로 서버에 알림).
+                보통 config.peer_id 가 전달된다. 비거나 형식 위반이면 자동 생성.
         """
         self.host = host
         self.port = port
         self.auth_key = auth_key
         self.device_name = device_name
+        self.peer_id = peer_id if is_valid_peer_id(peer_id) else generate_peer_id()
+        # v3.0: 핸드셰이크 challenge 에서 학습한 서버 peer_id (Task 3 라우팅이 사용).
+        self.server_peer_id = ""
         self.protocol = Protocol(auth_key)
 
         self.socket: Optional[socket.socket] = None
@@ -612,13 +628,16 @@ class NetworkClient:
                     f"!= client {PROTOCOL_VERSION!r} - hard break, upgrade required"
                 )
 
-            # 3. RESPONSE 송신 (client_nonce + HMAC)
+            # v3.0: 서버 peer_id 학습 (Task 3 라우팅에서 서버를 타깃할 때 사용)
+            self.server_peer_id = challenge["server_peer_id"]
+
+            # 3. RESPONSE 송신 (client_nonce + HMAC + peer_id)
             client_nonce = generate_nonce()
             client_hmac = compute_handshake_hmac(
                 self.auth_key, challenge["server_nonce"], client_nonce
             )
             response = self.protocol.create_handshake_response(
-                client_nonce, self.device_name, client_hmac,
+                client_nonce, self.device_name, client_hmac, self.peer_id,
             )
             self.socket.sendall(response)
 
@@ -650,7 +669,8 @@ class NetworkClient:
                 self.socket.settimeout(30)  # 수신 타임아웃 설정
 
             logger.info(
-                f"서버 연결 성공 (HMAC v{PROTOCOL_VERSION}): {self.host}:{self.port}"
+                f"서버 연결 성공 (HMAC v{PROTOCOL_VERSION}): {self.host}:{self.port} "
+                f"server_peer={self.server_peer_id[:8]}… my_peer={self.peer_id[:8]}…"
             )
 
             # on_connected 콜백 호출

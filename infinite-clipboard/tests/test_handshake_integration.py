@@ -15,7 +15,7 @@ import time
 import pytest
 
 from core.network import NetworkClient, NetworkServer
-from core.protocol import Protocol, MSG_HANDSHAKE
+from core.protocol import Protocol, MSG_HANDSHAKE, generate_peer_id, is_valid_peer_id
 
 
 def _free_port() -> int:
@@ -40,15 +40,19 @@ def _wait_until(predicate, timeout: float = 3.0, interval: float = 0.02) -> bool
 
 def test_mutual_handshake_success():
     port = _free_port()
+    server_peer = generate_peer_id()
+    client_peer = generate_peer_id()
     server = NetworkServer(
         port=port, auth_key="shared-secret",
         tailscale_trust=False, bind_address="127.0.0.1",
+        peer_id=server_peer,
     )
     server.start()
 
     client = NetworkClient(
         host="127.0.0.1", port=port,
         auth_key="shared-secret", device_name="testdev",
+        peer_id=client_peer,
     )
     client.start()
 
@@ -61,10 +65,17 @@ def test_mutual_handshake_success():
             lambda: len(server.clients) == 1, timeout=2.0
         ), "server should register the client"
 
-        # 등록된 이름이 device_name 과 일치
+        # v3.0: 등록 값이 {name, peer_id} dict — 이름 + peer_id 양쪽 확인
         with server.clients_lock:
             registered = list(server.clients.values())
-        assert registered == ["testdev"]
+        assert len(registered) == 1
+        assert registered[0]["name"] == "testdev"
+        # 서버가 클라이언트 peer_id 를 학습 (round-trip)
+        assert registered[0]["peer_id"] == client_peer
+        assert is_valid_peer_id(registered[0]["peer_id"])
+
+        # 클라이언트가 서버 peer_id 를 학습 (반대 방향 round-trip)
+        assert client.server_peer_id == server_peer
     finally:
         client.stop()
         server.stop()

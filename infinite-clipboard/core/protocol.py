@@ -16,9 +16,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# ── Protocol version (R3, hard break) ──────────────────────────────────
-# Major.minor 만 비교 — patch 차이는 호환. v2.2 부터 nonce HMAC handshake.
-PROTOCOL_VERSION = "2.2"
+# ── Protocol version (hard break) ──────────────────────────────────────
+# Major.minor 만 비교 — patch 차이는 호환.
+# v2.2: nonce HMAC handshake. v3.0: handshake 에 stable peer_id 추가
+# (라우팅 전제) — wire 비호환이라 v2.x peer 는 version mismatch 로 거부.
+PROTOCOL_VERSION = "3.0"
 
 
 # ── 메시지 타입 상수 ────────────────────────────────────────────────────
@@ -119,6 +121,30 @@ def generate_nonce() -> str:
 def is_valid_nonce(value: object) -> bool:
     """Nonce 가 64-char lowercase hex 인지 검증."""
     return isinstance(value, str) and bool(_NONCE_RE.match(value))
+
+
+# ── v3.0: stable peer_id ────────────────────────────────────────────────
+# 라우팅(targeted relay)의 전제. config 가 영속 생성(settings.json), 핸드셰이크로
+# 양쪽이 서로의 id 학습. nonce 와 달리 connection 마다 새로 만들지 않는다 —
+# 같은 PC 는 재연결해도 같은 peer_id. 16-byte random → 32-char lowercase hex.
+
+PEER_ID_BYTES = 16
+PEER_ID_HEX_LEN = PEER_ID_BYTES * 2  # 32
+
+_PEER_ID_RE = re.compile(rf"^[0-9a-f]{{{PEER_ID_HEX_LEN}}}$")
+
+
+def generate_peer_id() -> str:
+    """안정적 peer 식별자 — 16-byte random in lowercase hex (32 chars).
+
+    path-safe (hex 만 사용) 하므로 임시 디렉토리/파일명에 그대로 써도 안전.
+    """
+    return secrets.token_hex(PEER_ID_BYTES)
+
+
+def is_valid_peer_id(value: object) -> bool:
+    """peer_id 가 32-char lowercase hex 인지 검증."""
+    return isinstance(value, str) and bool(_PEER_ID_RE.match(value))
 
 
 def compute_handshake_hmac(key: str, nonce_a: str, nonce_b: str) -> str:
@@ -308,29 +334,38 @@ class Protocol:
     # Mutual auth: 양쪽 모두 같은 key 보유 증명.
     # Timing-safe: hmac.compare_digest 로 비교.
 
-    def create_handshake_challenge(self, server_nonce: str) -> bytes:
+    def create_handshake_challenge(self, server_nonce: str, server_peer_id: str) -> bytes:
         if not is_valid_nonce(server_nonce):
             raise ValueError(f"invalid server_nonce: {server_nonce!r}")
+        if not is_valid_peer_id(server_peer_id):
+            raise ValueError(f"invalid server_peer_id: {server_peer_id!r}")
         return self.create_message(MSG_HANDSHAKE_CHALLENGE, {
             "server_nonce": server_nonce,
             "server_version": PROTOCOL_VERSION,
+            "server_peer_id": server_peer_id,
         })
 
     @staticmethod
     def parse_handshake_challenge(data: object) -> Optional[Dict[str, str]]:
-        """검증 통과 시 {server_nonce, server_version} 반환, 실패 시 None."""
+        """검증 통과 시 {server_nonce, server_version, server_peer_id} 반환, 실패 시 None.
+
+        v3.0: server_peer_id 누락/형식 위반 시 None (v2.x server hard break 거부).
+        """
         if not isinstance(data, dict):
             return None
         sn = data.get("server_nonce")
         sv = data.get("server_version")
+        spid = data.get("server_peer_id")
         if not is_valid_nonce(sn):
             return None
         if not isinstance(sv, str) or not sv or len(sv) > 32:
             return None
-        return {"server_nonce": sn, "server_version": sv}
+        if not is_valid_peer_id(spid):
+            return None
+        return {"server_nonce": sn, "server_version": sv, "server_peer_id": spid}
 
     def create_handshake_response(
-        self, client_nonce: str, name: str, hmac_value: str,
+        self, client_nonce: str, name: str, hmac_value: str, peer_id: str,
     ) -> bytes:
         if not is_valid_nonce(client_nonce):
             raise ValueError(f"invalid client_nonce: {client_nonce!r}")
@@ -338,21 +373,26 @@ class Protocol:
             raise ValueError(f"invalid name: {name!r}")
         if not isinstance(hmac_value, str) or len(hmac_value) != 64:
             raise ValueError(f"invalid hmac: {hmac_value!r}")
+        if not is_valid_peer_id(peer_id):
+            raise ValueError(f"invalid peer_id: {peer_id!r}")
         return self.create_message(MSG_HANDSHAKE_RESPONSE, {
             "client_nonce": client_nonce,
             "client_version": PROTOCOL_VERSION,
             "name": name,
             "hmac": hmac_value,
+            "peer_id": peer_id,
         })
 
     @staticmethod
     def parse_handshake_response(data: object) -> Optional[Dict[str, str]]:
+        """v3.0: peer_id 누락/형식 위반 시 None (v2.x client hard break 거부)."""
         if not isinstance(data, dict):
             return None
         cn = data.get("client_nonce")
         cv = data.get("client_version")
         nm = data.get("name")
         hm = data.get("hmac")
+        pid = data.get("peer_id")
         if not is_valid_nonce(cn):
             return None
         if not isinstance(cv, str) or not cv or len(cv) > 32:
@@ -361,11 +401,14 @@ class Protocol:
             return None
         if not isinstance(hm, str) or len(hm) != 64:
             return None
+        if not is_valid_peer_id(pid):
+            return None
         return {
             "client_nonce": cn,
             "client_version": cv,
             "name": nm,
             "hmac": hm,
+            "peer_id": pid,
         }
 
     def create_handshake_ack(self, hmac_value: str) -> bytes:
