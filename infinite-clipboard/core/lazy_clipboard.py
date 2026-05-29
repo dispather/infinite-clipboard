@@ -164,8 +164,8 @@ def get_lazy_provider() -> Optional[LazyClipboardProvider]:
             from core.lazy_wayland import WaylandLazyProvider
             return WaylandLazyProvider()
         if backend == BACKEND_WINDOWS:
-            logger.debug("lazy provider: Windows 백엔드 미구현 (후속) — fallback")
-            return None
+            from core.lazy_win import WindowsLazyProvider
+            return WindowsLazyProvider()
         if backend == BACKEND_MACOS:
             logger.debug("lazy provider: macOS 백엔드 미구현 (후속) — fallback")
             return None
