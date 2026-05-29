@@ -184,6 +184,59 @@ def test_lazy_unknown_offer_raises(tmp_path):
         server_app.stop()
 
 
+def test_lazy_receive_fallback_to_download_path(tmp_path):
+    """lazy provider 없음(헤드리스/미지원) → offer 가 receivable 로 → 받기→download_path 저장.
+
+    Gate S4: 미지원 환경에서 사용성 확보. happy-path 가 아니므로 receivable 등록됨.
+    """
+    src = tmp_path / "fsrc"
+    src.mkdir()
+    f1 = src / "report.txt"; f1.write_bytes(b"fallback-content " * 1000)
+    file_paths = [str(f1)]
+
+    server_app, client_app, _server_stub, _client_stub = _setup_pair(tmp_path)
+    try:
+        # client 에 lazy provider 없음 강제 (이미 _inited=True 라 None 유지)
+        client_app.lazy_provider = None
+
+        server_app._announce_offer(file_paths)
+        # 미지원 → 받기 fallback 으로 등록 (provider 등록 안 됨)
+        assert _wait_until(
+            lambda: client_app.config.peer_id and bool(client_app.receivable_offers),
+            timeout=4.0,
+        ), "receivable 로 등록되지 않음"
+        offer_id = next(iter(client_app.receivable_offers))
+
+        # 받기 실행 (전송창 버튼 → IPC → _receive_offer 와 동일 경로)
+        dl = client_app.config.download_path
+        client_app._receive_offer(offer_id)
+
+        # download_path 에 저장됐고 내용 일치 + receivable 비워짐
+        saved = os.path.join(dl, "report.txt")
+        assert os.path.exists(saved), f"download_path 에 저장 안 됨: {os.listdir(dl)}"
+        assert open(saved, "rb").read() == f1.read_bytes()
+        assert not client_app.receivable_offers, "받기 후 receivable 비워져야"
+    finally:
+        client_app.stop()
+        server_app.stop()
+
+
+def test_lazy_happy_path_no_receivable(tmp_path):
+    """provider 등록 OK(happy-path) → receivable 비어있음 (Gate S4: 무음, 받기 행 없음)."""
+    src = tmp_path / "hsrc"
+    src.mkdir()
+    f1 = src / "x.txt"; f1.write_bytes(b"happy")
+    server_app, client_app, _server_stub, client_stub = _setup_pair(tmp_path)
+    try:
+        server_app._announce_offer([str(f1)])
+        assert _wait_until(lambda: client_stub.captured is not None, timeout=4.0)
+        # provider 가 등록을 수락(stub 은 True) → 받기 fallback 불필요
+        assert not client_app.receivable_offers, "happy-path 에선 receivable 0 이어야"
+    finally:
+        client_app.stop()
+        server_app.stop()
+
+
 def test_lazy_file_roundtrip_reverse(tmp_path):
     """역방향: client 복사 → server paste. 다른 라우팅 분기 검증.
 

@@ -53,10 +53,37 @@ class TransferWindow(customtkinter.CTkToplevel):
 
         self._active_widgets: dict[str, dict] = {}
         self._completed_ids: set[str] = set()
+        self._receivable_widgets: dict[str, dict] = {}
+
+        # ── 받기 섹션 (v3.0 S4: lazy 미지원/실패 시 수동 수신) ──
+        # 받을 항목이 있을 때만 표시. happy-path(paste 로 바로 가져옴)에선 비어 숨김.
+        recv_bar = customtkinter.CTkFrame(self, fg_color="transparent")
+        recv_bar.pack(fill="x", padx=t.SP[4], pady=(t.SP[4], t.SP[2]))
+        customtkinter.CTkLabel(
+            recv_bar, text="받기".upper(),
+            font=t.FONT_SECTION, text_color=t.spool_label,
+        ).pack(side="left")
+        self._recv_count = Badge(recv_bar, text="0", variant="muted")
+        self._recv_count.pack(side="left", padx=(t.SP[2], 0))
+        self._recv_bar = recv_bar
+
+        self._receive_frame = customtkinter.CTkScrollableFrame(
+            self, fg_color=t.relay_surface,
+            corner_radius=t.CARD["radius"],
+            border_color=t.whisper_line, border_width=1,
+            scrollbar_button_color=t.relay_raised,
+            height=120,
+        )
+        self._receive_frame.pack(fill="x", padx=t.SP[4], pady=(0, t.SP[3]))
+        # 받을 항목 0 이면 섹션 자체를 숨긴다 (아래 _poll_state 가 토글)
+        self._recv_bar.pack_forget()
+        self._receive_frame.pack_forget()
+        self._recv_visible = False
 
         # ── 진행 중 섹션 ──
         active_bar = customtkinter.CTkFrame(self, fg_color="transparent")
         active_bar.pack(fill="x", padx=t.SP[4], pady=(t.SP[4], t.SP[2]))
+        self._active_bar = active_bar  # 받기 섹션을 이 앞에 pack 하기 위한 참조
 
         customtkinter.CTkLabel(
             active_bar, text="진행 중".upper(),
@@ -124,6 +151,22 @@ class TransferWindow(customtkinter.CTkToplevel):
         state = self._read_state()
         active = state.get("active", {})
         completed = state.get("completed", [])
+        receivable = state.get("receivable", [])
+
+        # ── 받기 섹션 동기화 ──
+        recv_ids = set()
+        for entry in receivable:
+            oid = entry.get("offer_id", "")
+            if not oid:
+                continue
+            recv_ids.add(oid)
+            if oid not in self._receivable_widgets:
+                self._add_receivable_widget(entry)
+        for oid in list(self._receivable_widgets):
+            if oid not in recv_ids:
+                self._remove_receivable_widget(oid)
+        self._recv_count.configure(text=str(len(self._receivable_widgets)))
+        self._toggle_receive_section(bool(self._receivable_widgets))
 
         for tid, info in active.items():
             if tid not in self._active_widgets:
@@ -277,6 +320,97 @@ class TransferWindow(customtkinter.CTkToplevel):
         w["cancel_btn"].configure(state="disabled", text="...")
         w["speed_label"].configure(text="취소 중...")
         w["eta_label"].configure(text="")
+
+    # ── v3.0 S4: 받기 섹션 ──────────────────────────────────────────────
+
+    def _get_receive_request_file(self) -> str:
+        """main.py 의 _get_receive_request_file 와 동일 경로."""
+        from config import _get_config_dir
+        return str(_get_config_dir() / "receive_requests.json")
+
+    def _toggle_receive_section(self, show: bool) -> None:
+        """받을 항목 유무에 따라 받기 섹션을 보이거나 숨긴다 (진행중 섹션 앞)."""
+        if show and not self._recv_visible:
+            self._recv_bar.pack(fill="x", padx=t.SP[4], pady=(t.SP[4], t.SP[2]),
+                                before=self._active_bar)
+            self._receive_frame.pack(fill="x", padx=t.SP[4], pady=(0, t.SP[3]),
+                                     before=self._active_bar)
+            self._recv_visible = True
+        elif not show and self._recv_visible:
+            self._receive_frame.pack_forget()
+            self._recv_bar.pack_forget()
+            self._recv_visible = False
+
+    def _add_receivable_widget(self, entry: dict) -> None:
+        oid = entry.get("offer_id", "")
+        name = entry.get("name", "파일")
+        total_size = entry.get("total_size", 0)
+
+        frame = customtkinter.CTkFrame(
+            self._receive_frame, corner_radius=t.RADIUS["md"],
+            fg_color=t.relay_raised, border_width=1, border_color=t.whisper_line,
+        )
+        frame.pack(fill="x", padx=t.SP[2], pady=t.SP[1])
+
+        row = customtkinter.CTkFrame(frame, fg_color="transparent")
+        row.pack(fill="x", padx=t.SP[3], pady=t.SP[2])
+
+        dl_img = load_icon("arrow-down", size=16, color="accent")
+        if dl_img is not None:
+            customtkinter.CTkLabel(row, text="", image=dl_img).pack(
+                side="left", padx=(0, t.SP[2] - 2)
+            )
+        customtkinter.CTkLabel(
+            row, text=name, font=t.FONT_BODY_BOLD,
+            text_color=t.terminal_text, anchor="w",
+        ).pack(side="left", fill="x", expand=True)
+
+        recv_btn = customtkinter.CTkButton(
+            row, text="받기", width=52, height=26,
+            corner_radius=t.RADIUS["sm"], fg_color=t.relay_raised,
+            hover_color=t.signal_ok, text_color=t.terminal_text, font=t.FONT_META,
+            command=lambda o=oid: self._on_receive_click(o),
+        )
+        recv_btn.pack(side="right", padx=(t.SP[1], 0))
+        customtkinter.CTkLabel(
+            row, text=_format_size(total_size),
+            font=t.FONT_META, text_color=t.spool_dim,
+        ).pack(side="right", padx=(0, t.SP[2]))
+
+        self._receivable_widgets[oid] = {"frame": frame, "btn": recv_btn, "requested": False}
+
+    def _remove_receivable_widget(self, offer_id: str) -> None:
+        w = self._receivable_widgets.pop(offer_id, None)
+        if w:
+            try:
+                w["frame"].destroy()
+            except Exception:
+                pass
+
+    def _on_receive_click(self, offer_id: str) -> None:
+        """받기 버튼 → receive_requests.json 에 offer_id append (main 폴링 처리)."""
+        w = self._receivable_widgets.get(offer_id)
+        if not w or w.get("requested"):
+            return
+        req_file = self._get_receive_request_file()
+        try:
+            requests = []
+            try:
+                with open(req_file, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, list):
+                    requests = loaded
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass
+            if offer_id not in requests:
+                requests.append(offer_id)
+            with open(req_file, "w", encoding="utf-8") as f:
+                json.dump(requests, f)
+        except OSError:
+            return
+        # 즉시 UI 피드백 (완료되면 main 이 state 에서 제거 → 위젯 사라짐)
+        w["requested"] = True
+        w["btn"].configure(state="disabled", text="받는 중")
 
     def _update_active_widget(self, transfer_id: str, info: dict) -> None:
         w = self._active_widgets.get(transfer_id)

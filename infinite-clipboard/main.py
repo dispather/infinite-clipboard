@@ -13,6 +13,7 @@ import threading
 import platform
 import base64
 import tempfile
+import json  # v3.0 S4: 모듈 레벨 (watch 폴링 스레드들이 사용 — 함수별 로컬 import 통일)
 from pathlib import Path
 
 # Linux(특히 KDE Plasma Wayland)에서 pystray가 Xorg 백엔드를 선택하면
@@ -150,6 +151,9 @@ class InfiniteClipboard:
         self._outgoing_fetch_lock = threading.Lock()
         # [receiver 측] 등록한 offer 들 {offer_id: offer dict}. paste 시 fetch 에 사용.
         self.received_offers = {}
+        # [receiver 측] S4 받기 fallback — lazy 미지원/등록 실패 offer {offer_id: info}.
+        # 사용자가 전송창 "받기" 버튼으로 download_path 에 수동 수신. _offer_lock 으로 보호.
+        self.receivable_offers = {}
         # [receiver 측] OS lazy provider (첫 offer 수신 시 lazy-init). 미지원/헤드리스 None.
         self.lazy_provider = None
         self._lazy_provider_inited = False
@@ -189,6 +193,10 @@ class InfiniteClipboard:
         # v2.2.1 B2: TransferWindow cancel 버튼 IPC 폴링
         cancel_thread = threading.Thread(target=self._watch_cancel_requests, daemon=True)
         cancel_thread.start()
+
+        # v3.0 S4: TransferWindow "받기" 버튼 IPC 폴링 (lazy fallback 수동 수신)
+        receive_thread = threading.Thread(target=self._watch_receive_requests, daemon=True)
+        receive_thread.start()
 
         logger.info("Infinite Clipboard 동작 시작")
 
@@ -766,18 +774,27 @@ class InfiniteClipboard:
         with self._offer_lock:
             # 새 offer 가 이전 것을 supersede — 최신만 유지
             self.received_offers = {offer_id: offer}
+            # 이전 받기 fallback 잔여 정리 (supersede)
+            old_receivable = bool(self.receivable_offers)
+            self.receivable_offers = {}
         provider = self._ensure_lazy_provider()
-        if provider is None or not provider.is_supported(offer["kind"]):
-            # 미지원/헤드리스 → 받기 fallback (Task 8). 지금은 무음 기록만.
-            logger.info(f"[offer] 수신(미등록, fallback 대상): offer={offer_id[:8]}…")
-            return
-        try:
-            provider.clear()  # 이전 등록 해제 (supersede)
-            ok = provider.register_offer(offer, self._fetch_offer)
-        except Exception as e:
-            logger.warning(f"offer 등록 실패 — fallback: {e}")
-            ok = False
-        logger.info(f"[offer] 수신·등록({'OK' if ok else 'fallback'}): offer={offer_id[:8]}…")
+        ok = False
+        if provider is not None and provider.is_supported(offer["kind"]):
+            try:
+                provider.clear()  # 이전 등록 해제 (supersede)
+                ok = provider.register_offer(offer, self._provider_fetch)
+            except Exception as e:
+                logger.warning(f"offer 등록 실패 — 받기 fallback 으로: {e}")
+                ok = False
+        if ok:
+            # happy path — paste 로 바로 가져올 수 있음. 알림 무음 (Gate S4).
+            logger.info(f"[offer] 수신·등록(OK, happy-path): offer={offer_id[:8]}…")
+            if old_receivable:
+                self._save_transfer_state(force=True)  # 옛 받기 목록 비움 반영
+        else:
+            # lazy 미지원/헤드리스/등록 실패 → S4 받기 fallback (알림 + 전송창 받기 행)
+            self._add_receivable(offer)
+            logger.info(f"[offer] 수신(받기 fallback): offer={offer_id[:8]}…")
 
     def _fetch_timeout(self, total_size: int) -> float:
         """fetch 하드 타임아웃 (Rec 2). 크기 비례 + 하한/상한."""
@@ -898,6 +915,139 @@ class InfiniteClipboard:
         if parsed is None:
             return
         self._signal_fetch(parsed["offer_id"], fail=parsed["reason"])
+
+    # ── v3.0 S4: 받기 fallback (lazy 미지원/실패 시 수동 수신) ──────────
+
+    def _provider_fetch(self, offer_id):
+        """provider 콜백용 래퍼 — paste 실패 시 알림 후 re-raise(provider 가 빈 결과).
+
+        클립보드는 보존된다(provider 가 아무것도 안 내주면 OS 는 이전 내용 유지). Gate S4.
+        """
+        try:
+            return self._fetch_offer(offer_id)
+        except Exception:
+            with self._offer_lock:
+                offer = self.received_offers.get(offer_id)
+            name = self._offer_display_name(offer) if offer else "파일"
+            self._notify("받기 실패", f"{name} — 원본에서 받을 수 없음 (클립보드 유지)")
+            raise
+
+    @staticmethod
+    def _offer_display_name(offer) -> str:
+        """offer items → 표시 이름 ('a.txt' 또는 'a.txt 외 2개')."""
+        if not offer:
+            return "파일"
+        items = offer.get("items") or []
+        if not items:
+            return "파일"
+        first = items[0].get("name") or "파일"
+        return first if len(items) == 1 else f"{first} 외 {len(items) - 1}개"
+
+    def _add_receivable(self, offer) -> None:
+        """받기 fallback 대상 등록 + 알림 + 전송창 갱신용 상태 저장."""
+        name = self._offer_display_name(offer)
+        with self._offer_lock:
+            self.receivable_offers[offer["offer_id"]] = {
+                "offer_id": offer["offer_id"],
+                "source_peer": offer["source_peer"],
+                "name": name,
+                "kind": offer["kind"],
+                "total_size": int(offer.get("total_size", 0)),
+                "created_at": offer.get("created_at", time.time()),
+            }
+        self._save_transfer_state(force=True)
+        self._notify("파일 받기", f"{name} — 전송 창에서 [받기]")
+
+    def _clear_receivable(self, offer_id) -> None:
+        with self._offer_lock:
+            existed = self.receivable_offers.pop(offer_id, None)
+        if existed:
+            self._save_transfer_state(force=True)
+
+    def _notify(self, title, message) -> None:
+        """일반 OS 알림 (크기 무관). tray 우선, 없으면 plyer (비동기)."""
+        tray = self.tray
+        if tray is not None:
+            try:
+                tray.notify(title, message)
+                return
+            except Exception:
+                pass
+
+        def _do():
+            try:
+                from plyer import notification
+                notification.notify(
+                    title=title, message=message, timeout=5,
+                    app_name="Infinite Clipboard",
+                )
+            except Exception as e:
+                logger.debug(f"알림 실패 (무시): {e}")
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _receive_offer(self, offer_id) -> None:
+        """[받기 버튼] offer 를 fetch 해 download_path 에 저장 (provider 무관 수동 수신)."""
+        with self._offer_lock:
+            info = self.receivable_offers.get(offer_id)
+        name = info.get("name", "파일") if info else "파일"
+        try:
+            fetched = self._fetch_offer(offer_id)  # staging 경로 (메커니즘 재사용)
+        except Exception as e:
+            logger.warning(f"[받기] fetch 실패: {e}")
+            self._notify("받기 실패", f"{name} — 원본에서 받을 수 없음")
+            return
+
+        import shutil
+        dest_dir = self.config.download_path
+        saved = 0
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+            for p in fetched.paths:
+                base = os.path.basename(p.rstrip("/\\")) or "received"
+                target = os.path.join(dest_dir, base)
+                if os.path.isdir(p):
+                    shutil.copytree(p, target, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(p, target)
+                saved += 1
+        except Exception as e:
+            logger.error(f"[받기] 저장 실패: {e}")
+            self._notify("받기 실패", f"{name} — 저장 오류")
+            return
+
+        self._clear_receivable(offer_id)
+        self._notify("받기 완료", f"{name} — {saved}개 → {dest_dir}")
+        logger.info(f"[받기] 완료: {saved}개 → {dest_dir}")
+
+    @staticmethod
+    def _get_receive_request_file():
+        """TransferWindow 의 받기 버튼이 offer_id append 하는 파일."""
+        from config import _get_config_dir
+        return str(_get_config_dir() / "receive_requests.json")
+
+    def _watch_receive_requests(self):
+        """별도 프로세스 TransferWindow 받기 버튼 폴링 → _receive_offer (per-request 스레드)."""
+        req_file = self._get_receive_request_file()
+        while self.running:
+            try:
+                if os.path.exists(req_file):
+                    with open(req_file, "r", encoding="utf-8") as f:
+                        requests = json.load(f)
+                    if isinstance(requests, list) and requests:
+                        for oid in list(requests):
+                            # fetch 는 블로킹 → per-request 스레드
+                            threading.Thread(
+                                target=self._receive_offer, args=(oid,), daemon=True,
+                            ).start()
+                        try:
+                            os.unlink(req_file)
+                        except OSError:
+                            with open(req_file, "w", encoding="utf-8") as f:
+                                json.dump([], f)
+            except (json.JSONDecodeError, OSError) as e:
+                logger.debug(f"receive request 폴링: {e}")
+            time.sleep(0.5)
 
     def _send_file_ready(self, file_paths):
         """파일 복사 감지 → 메타데이터 수집 → FILE_READY 전송
@@ -1310,6 +1460,9 @@ class InfiniteClipboard:
                     "active": dict(self._transfer_progress),
                     "completed": self._completed_transfers[-20:],
                 }
+            # v3.0 S4: 받기 fallback 대상 (전송창이 "받기" 행으로 표시)
+            with self._offer_lock:
+                state["receivable"] = list(self.receivable_offers.values())
 
             state_file = self._get_transfer_state_file()
             # 원자적 쓰기: 임시 파일 → os.replace
