@@ -147,6 +147,32 @@ def test_lazy_file_roundtrip_loopback(tmp_path):
         server_app.stop()
 
 
+def test_lazy_image_roundtrip_loopback(tmp_path):
+    """이미지 복사(base64)→offer(kind=image)→fetch→FetchedContent.data 바이트 일치 (S3)."""
+    import base64
+
+    png = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 200  # ~51KB 임의 바이너리
+    b64 = base64.b64encode(png).decode("ascii")
+
+    server_app, client_app, _server_stub, stub = _setup_pair(tmp_path)
+    try:
+        # source(서버) 이미지 복사 → offer broadcast (kind=image)
+        server_app._announce_image_offer(b64)
+        assert _wait_until(lambda: stub.captured is not None, timeout=4.0), \
+            "이미지 offer 등록 안 됨"
+        offer, fetch_cb = stub.captured
+        assert offer["kind"] == "image"
+
+        # paste 흉내 — fetch → 이미지는 data 로 반환 (paths 아님)
+        fetched = fetch_cb(offer["offer_id"])
+        assert fetched.kind == "image"
+        assert fetched.data == png, f"이미지 바이트 불일치: got={len(fetched.data)} want={len(png)}"
+        assert not fetched.paths
+    finally:
+        client_app.stop()
+        server_app.stop()
+
+
 def test_lazy_fetch_missing_files_graceful(tmp_path):
     """offer 후 원본 삭제 → fetch 시 source 가 FETCH_FAIL(missing) → fetch 예외(→fallback)."""
     src = tmp_path / "src"

@@ -44,7 +44,7 @@ from core.protocol import (
     MSG_TRANSFER_COMPLETE,
     # v3.0 lazy clipboard 메시지 + fetch 실패 사유
     MSG_CLIP_OFFER, MSG_CLIP_FETCH, MSG_CLIP_FETCH_FAIL,
-    CLIP_OFFER_KIND_FILE,
+    CLIP_OFFER_KIND_FILE, CLIP_OFFER_KIND_IMAGE,
     FETCH_FAIL_SUPERSEDED, FETCH_FAIL_EXPIRED, FETCH_FAIL_MISSING,
     FETCH_FAIL_OFFLINE, FETCH_FAIL_ERROR,
 )
@@ -54,7 +54,7 @@ from core.clipboard_manager import ClipboardManager
 from core.file_transfer import FileTransferManager, FileMetadata, CheckpointManager, Checkpoint, format_size
 from core.privacy import detect_sensitive_kind
 # v3.0 lazy provider (OS 별 백엔드 팩토리 — 헤드리스/미지원 시 None graceful)
-from core.lazy_clipboard import get_lazy_provider, FetchedContent, KIND_FILE
+from core.lazy_clipboard import get_lazy_provider, FetchedContent, KIND_FILE, KIND_IMAGE
 
 # 로깅 설정 — 콘솔 + 파일 이중 출력
 from config import LOG_FILE
@@ -245,6 +245,8 @@ class InfiniteClipboard:
                 self.lazy_provider.stop()
             except Exception:
                 pass
+        # v3.0 S3: 이미지 offer 스냅샷 temp 정리
+        self._cleanup_offer_image()
         if self.server:
             self.server.stop()
         if self.client:
@@ -491,8 +493,11 @@ class InfiniteClipboard:
                         if content_type == "files":
                             # v3.0 S2c: eager 전송 대신 offer broadcast (paste 시점 fetch).
                             self._announce_offer(content)
+                        elif content_type == "image":
+                            # v3.0 S3: 이미지도 lazy — base64 디코드 → 임시 스냅샷 → offer
+                            self._announce_image_offer(content)
                         else:
-                            # 텍스트는 그대로 inline 전송. 이미지 lazy 는 Task 7(S3)에서 이관.
+                            # 텍스트만 inline 전송 (작고 즉시성 중요)
                             self._send_clipboard(content_type, content)
                         self._add_to_history(content_type, content)
 
@@ -716,6 +721,7 @@ class InfiniteClipboard:
         eager 전송 안 함. 데이터는 다른 PC 가 paste(fetch) 하는 시점에만 흐른다.
         새 복사는 이전 offer 를 supersede (offer_id 불일치 → 옛 fetch 는 superseded 거부).
         """
+        self._cleanup_offer_image()  # 이전 offer 가 이미지였으면 스냅샷 temp 정리
         try:
             metadata = self.file_manager.collect_metadata(file_paths)
         except Exception as e:
@@ -747,6 +753,77 @@ class InfiniteClipboard:
         logger.info(
             f"[offer] 알림: {metadata.file_count}개 "
             f"({format_size(metadata.total_size)}) offer={offer_id[:8]}…"
+        )
+
+    def _offer_image_dir(self):
+        """source 측 이미지 offer 스냅샷 임시 디렉토리 (paste 전까지 바이트 보관)."""
+        d = Path(tempfile.gettempdir()) / "ic_offer_images"
+        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return d
+
+    def _cleanup_offer_image(self):
+        """현재 offer 가 이미지면 그 스냅샷 temp 파일 삭제 (supersede/종료 시)."""
+        with self._offer_lock:
+            prev = self.current_offer
+        if prev and prev.get("_image_temp"):
+            try:
+                os.remove(prev["_image_temp"])
+            except OSError:
+                pass
+
+    def _announce_image_offer(self, b64_data):
+        """[source] 이미지 복사 → 바이트를 임시 파일로 스냅샷 + MSG_CLIP_OFFER(kind=image).
+
+        파일과 달리 클립보드 이미지는 디스크 경로가 없으므로, copy 시점에 바이트를
+        임시 파일로 떠 두고(다른 PC 가 paste 할 때 그 파일을 단일-파일 전송으로 보냄).
+        네트워크 전송은 paste 시점에만 발생(0바이트 copy 유지). base64 decode 는 로컬 CPU
+        만 사용 — 향후 capture-only 최적화 여지(현재는 단순/저위험 우선).
+        """
+        self._cleanup_offer_image()  # 이전 이미지 offer 스냅샷 정리
+        try:
+            png_bytes = base64.b64decode(b64_data)
+        except Exception as e:
+            logger.error(f"이미지 offer 디코드 오류: {e}")
+            return
+        if not png_bytes:
+            return
+        try:
+            tmp_dir = self._offer_image_dir()
+            fd, tmp_path = tempfile.mkstemp(prefix="ic_offer_img_", suffix=".png", dir=tmp_dir)
+            with os.fdopen(fd, "wb") as f:
+                f.write(png_bytes)
+        except Exception as e:
+            logger.error(f"이미지 스냅샷 오류: {e}")
+            return
+        try:
+            metadata = self.file_manager.collect_metadata([tmp_path])
+        except Exception as e:
+            logger.error(f"이미지 offer 메타데이터 오류: {e}")
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            return
+        offer_id = metadata.transfer_id
+        items = [{"name": "clipboard.png", "size": len(png_bytes), "hash": ""}]
+        created_at = time.time()
+        with self._offer_lock:
+            self.current_offer = {
+                "offer_id": offer_id, "kind": CLIP_OFFER_KIND_IMAGE,
+                "metadata": metadata, "file_paths": [tmp_path],
+                "created_at": created_at, "_image_temp": tmp_path,
+            }
+        try:
+            raw = self.protocol.create_clip_offer(
+                offer_id, self.config.peer_id, CLIP_OFFER_KIND_IMAGE,
+                items, len(png_bytes), created_at,
+            )
+        except Exception as e:
+            logger.error(f"이미지 offer 생성 오류: {e}")
+            return
+        self._send_raw_msg(raw)  # broadcast
+        logger.info(
+            f"[offer] 이미지 알림: {format_size(len(png_bytes))} offer={offer_id[:8]}…"
         )
 
     def _ensure_lazy_provider(self):
@@ -838,6 +915,11 @@ class InfiniteClipboard:
                     raise RuntimeError(f"fetch 실패: {fail}")
                 if not paths:
                     raise RuntimeError("fetch 결과 없음")
+                # v3.0 S3: 이미지는 조립된 단일 파일을 바이트로 읽어 data 로 반환
+                # (provider 가 image/png 으로 OS 클립보드에 제공). 파일은 paths 그대로.
+                if offer.get("kind") == CLIP_OFFER_KIND_IMAGE:
+                    with open(paths[0], "rb") as f:
+                        return FetchedContent(kind=KIND_IMAGE, data=f.read())
                 return FetchedContent(kind=KIND_FILE, paths=list(paths))
             finally:
                 with self._active_fetch_lock:
