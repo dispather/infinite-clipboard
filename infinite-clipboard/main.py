@@ -511,19 +511,18 @@ class InfiniteClipboard:
                     logger.debug(f"[lazy-diag] monitor poll owns_clipboard={_owns}")
                     if not _owns:
                         changed, content_type, content = self.clipboard.has_changed()
-
-                    if changed and content is not None:
-                        logger.info(f"[클립보드] 변경 감지: {content_type}")
-                        if content_type == "files":
-                            # v3.0 S2c: eager 전송 대신 offer broadcast (paste 시점 fetch).
-                            self._announce_offer(content)
-                        elif content_type == "image":
-                            # v3.0 S3: 이미지도 lazy — base64 디코드 → 임시 스냅샷 → offer
-                            self._announce_image_offer(content)
-                        else:
-                            # 텍스트만 inline 전송 (작고 즉시성 중요)
-                            self._send_clipboard(content_type, content)
-                        self._add_to_history(content_type, content)
+                        if changed and content is not None:
+                            logger.info(f"[클립보드] 변경 감지: {content_type}")
+                            if content_type == "files":
+                                # v3.0 S2c: eager 전송 대신 offer broadcast (paste 시점 fetch).
+                                self._announce_offer(content)
+                            elif content_type == "image":
+                                # v3.0 S3: 이미지도 lazy — base64 디코드 → 임시 스냅샷 → offer
+                                self._announce_image_offer(content)
+                            else:
+                                # 텍스트만 inline 전송 (작고 즉시성 중요)
+                                self._send_clipboard(content_type, content)
+                            self._add_to_history(content_type, content)
 
             except Exception as e:
                 logger.error(f"클립보드 모니터링 오류: {e}")
