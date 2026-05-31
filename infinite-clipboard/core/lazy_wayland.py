@@ -293,6 +293,9 @@ class WaylandLazyProvider(LazyClipboardProvider):
         return None
 
     def _on_send(self, _source, mime, fd) -> None:
+        # 진단(3.0.2): send(=누군가 selection 을 읽음) 발생. Wayland 데이터 컨트롤
+        # 프로토콜은 요청자 식별 정보를 안 줘서 시각·mime 만 기록 (X11/Windows 는 식별 가능).
+        logger.info(f"[lazy-diag] wayland send: our_pid={os.getpid()} mime={mime} (요청자 식별 불가)")
         # ← paste 시점에 컴포지터가 호출 (이벤트 스레드 안에서 동기). fetch→fd write.
         # 실패/미지원이면 빈 바이트를 내주고 fd 를 닫는다 → 붙여넣는 앱은 빈 결과
         # → main 이 받기 fallback 으로 우회 (Wayland 는 X11 처럼 요청 거부가 없으므로

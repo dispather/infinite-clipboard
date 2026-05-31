@@ -505,8 +505,12 @@ class InfiniteClipboard:
             try:
                 # lazy provider 가 클립보드를 소유 중이면(원격 offer placeholder) self-loop
                 # 방지를 위해 읽기 skip — 사용자 로컬 복사 시 소유권 회수되어 자동 재개.
-                if self._is_network_active() and not self._lazy_owns_clipboard():
-                    changed, content_type, content = self.clipboard.has_changed()
+                if self._is_network_active():
+                    _owns = self._lazy_owns_clipboard()
+                    # 진단(3.0.2): 가드 상태. 등록 후 owns=True 인데 render 가 뜨면 = 외부 reader.
+                    logger.debug(f"[lazy-diag] monitor poll owns_clipboard={_owns}")
+                    if not _owns:
+                        changed, content_type, content = self.clipboard.has_changed()
 
                     if changed and content is not None:
                         logger.info(f"[클립보드] 변경 감지: {content_type}")

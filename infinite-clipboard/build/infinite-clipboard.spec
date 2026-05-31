@@ -89,7 +89,7 @@ if IS_WIN:
     hiddenimports += [
         "pystray._win32",
         "plyer.platforms.win.notification",
-        "win32api", "win32con", "win32gui", "win32clipboard",
+        "win32api", "win32con", "win32gui", "win32clipboard", "win32process",
     ]
 elif IS_MAC:
     hiddenimports += [

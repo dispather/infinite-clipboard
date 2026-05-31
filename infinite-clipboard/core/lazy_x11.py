@@ -219,7 +219,39 @@ class X11LazyProvider(LazyClipboardProvider):
             return ("copy\n" + "\n".join(uris)).encode("utf-8")
         return None
 
+    def _log_requestor(self, req) -> None:
+        """진단(3.0.2): SelectionRequest(=누군가 CLIPBOARD 를 읽음) 요청자를 식별.
+
+        외부 reader(plasmashell/클립보드 매니저 등)가 등록 직후 읽으면 그게 곧 전체
+        fetch 를 강제 — WM_CLASS/PID 로 그 주체를 특정해 추측을 끝내기 위함. 동작 변경 없음.
+        """
+        try:
+            r = req.requestor
+            wm_class = None
+            try:
+                wm_class = r.get_wm_class()
+            except Exception:
+                pass
+            pid = None
+            try:
+                p = r.get_full_property(self._dpy.intern_atom("_NET_WM_PID"), Xatom.CARDINAL)
+                if p is not None and p.value is not None and len(p.value):
+                    pid = int(p.value[0])
+            except Exception:
+                pass
+            try:
+                target_name = self._dpy.get_atom_name(req.target)
+            except Exception:
+                target_name = req.target
+            logger.info(
+                f"[lazy-diag] selection requestor: our_pid={os.getpid()} "
+                f"target={target_name} wm_class={wm_class} pid={pid}"
+            )
+        except Exception as e:
+            logger.info(f"[lazy-diag] requestor 식별 실패: {e}")
+
     def _handle_request(self, req) -> None:
+        self._log_requestor(req)  # 진단(3.0.2): 누가 selection 을 읽었나
         requestor = req.requestor
         target = req.target
         prop = req.property if req.property != X.NONE else req.target

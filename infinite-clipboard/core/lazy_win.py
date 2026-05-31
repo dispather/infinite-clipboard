@@ -39,6 +39,7 @@ WM_RENDERFORMAT 안에서 fetch_callback 을 동기 호출 → 그동안 메시�
 import ctypes
 import itertools
 import logging
+import os
 import struct
 import threading
 import time
@@ -324,8 +325,53 @@ class WindowsLazyProvider(LazyClipboardProvider):
             return [_FMT_PNG]
         return [win32con.CF_HDROP]  # KIND_FILE
 
+    @staticmethod
+    def _exe_for_pid(pid) -> str:
+        """진단(3.0.2): PID → 실행 파일 경로 (실패해도 raise 안 함)."""
+        try:
+            import win32api
+            import win32process
+            h = win32api.OpenProcess(
+                win32con.PROCESS_QUERY_INFORMATION | win32con.PROCESS_VM_READ, False, pid,
+            )
+            try:
+                return win32process.GetModuleFileNameEx(h, 0)
+            finally:
+                win32api.CloseHandle(h)
+        except Exception as e:
+            return f"<exe 조회 실패: {e}>"
+
+    def _log_requester(self, fmt) -> None:
+        """진단(3.0.2): WM_RENDERFORMAT(=누군가 클립보드 파일/이미지를 읽음)를 유발한
+        프로세스를 로깅한다. 외부 reader(Phone Link/MWB/클립보드 매니저 등)가 등록 직후
+        읽으면 그게 곧 전체 fetch 를 강제 — 그 주체를 특정해 추측을 끝내기 위함.
+        opener_pid == our_pid 면 우리 자신(모니터), 다르면 외부. 동작 변경 없음.
+        """
+        info = f"fmt={fmt} our_pid={os.getpid()}"
+        try:
+            # GetOpenClipboardWindow: paste 요청자가 OpenClipboard 한 윈도우 (NULL 핸들로
+            # 열었으면 0). win32gui 위치가 불확실해 ctypes user32 로 직접 호출.
+            _u32.GetOpenClipboardWindow.restype = ctypes.c_void_p
+            hwnd = _u32.GetOpenClipboardWindow()
+            info += f" opener_hwnd={hwnd}"
+            if hwnd:
+                try:
+                    info += f" class={win32gui.GetClassName(hwnd)!r}"
+                except Exception:
+                    pass
+                try:
+                    import win32process
+                    _tid, pid = win32process.GetWindowThreadProcessId(hwnd)
+                    info += f" opener_pid={pid} exe={self._exe_for_pid(pid)}"
+                except Exception as e:
+                    info += f" pid_err={e}"
+        except Exception as e:
+            info += f" opener_err={e}"
+        logger.info(f"[lazy-diag] render requester: {info}")
+
     def _render(self, fmt) -> None:
         """WM_RENDERFORMAT: 요청 포맷 바이트를 생성해 제공 (클립보드 열지 않음)."""
+        self._log_requester(fmt)  # 진단(3.0.2): 누가 paste-render 를 유발했나
         with self._lock:
             offer = self._offer
             cb = self._fetch_cb
