@@ -117,6 +117,22 @@ class LazyClipboardProvider(ABC):
         """백엔드 완전 종료 (스레드/이벤트 루프 정리). 규칙 #9 silent 종료."""
         raise NotImplementedError
 
+    def owns_clipboard(self) -> bool:
+        """이 provider 가 현재 OS 클립보드(또는 selection)를 lazy offer 로 소유 중인지.
+
+        받는 PC 의 클립보드 모니터(main._monitor_clipboard)는 이 값이 True 면 클립보드
+        읽기를 건너뛴다. 이유 — 우리가 등록한 lazy placeholder 를 "로컬 복사" 로 오인해
+        ① 자기 자신의 paste-render(WM_RENDERFORMAT / SelectionRequest / send)를 유발해
+        paste 도 안 했는데 네트워크 fetch 하거나, ② 그 staging 경로로 offer 를 재
+        broadcast 하는 self-loop 를 막기 위함. 소유권을 잃으면(사용자가 로컬 복사 →
+        OS 가 소유권을 회수) 다시 False 가 되어 모니터가 정상 재개한다.
+
+        기본 False (소유 추적을 안 하는 백엔드/더미). 각 OS 백엔드는 활성 offer 유무로
+        override 한다 — abstractmethod 가 아니라 concrete 기본값이라, 일부 메서드만 구현한
+        구식 더미/테스트 서브클래스는 영향 없음.
+        """
+        return False
+
 
 def detect_backend() -> str:
     """현재 OS/세션에 맞는 백엔드 식별자를 반환 (순수 — env/platform 만 참조).

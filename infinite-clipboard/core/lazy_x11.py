@@ -87,6 +87,12 @@ class X11LazyProvider(LazyClipboardProvider):
     def is_supported(self, kind: str) -> bool:
         return kind in (KIND_FILE, KIND_IMAGE)
 
+    def owns_clipboard(self) -> bool:
+        # 활성 offer 가 있으면 우리가 CLIPBOARD selection 을 소유 중. SelectionClear
+        # (다른 owner 가 가져감 = 로컬 복사)가 _offer 를 None 으로 비우면 자동 False.
+        with self._lock:
+            return self._offer is not None
+
     def register_offer(self, offer: dict, fetch_callback: FetchCallback) -> bool:
         kind = offer.get("kind") if isinstance(offer, dict) else None
         if not self.is_supported(kind):

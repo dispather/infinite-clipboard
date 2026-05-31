@@ -147,3 +147,40 @@ def test_win_is_supported():
         assert prov.is_supported("text") is False
     finally:
         prov.stop()
+
+
+def test_win_open_clipboard_retry(monkeypatch):
+    """OpenClipboard 가 일시적으로 ACCESS_DENIED(5) 여도 재시도로 등록 성공.
+
+    2026-05-31 실사용 로그의 핵심 버그 회귀 — 단 한 번의 일시 경합으로 offer 가
+    받기-fallback 으로 새던 문제. OpenClipboard 를 처음 2회 거부시키고, 재시도로
+    결국 등록(ok=True)되는지 + owns_clipboard 가 등록/clear 를 반영하는지 검증.
+    """
+    import core.lazy_win as lw
+    from core.lazy_win import WindowsLazyProvider
+    from core.lazy_clipboard import FetchedContent, KIND_IMAGE
+
+    real_open = lw.win32clipboard.OpenClipboard
+    calls = {"n": 0}
+
+    def flaky_open(hwnd=None):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            # pywintypes.error 와 동형 — (code, fn, msg). _open_clipboard_retry 가 잡고 재시도.
+            raise Exception((5, "OpenClipboard", "액세스가 거부되었습니다."))
+        return real_open(hwnd) if hwnd is not None else real_open()
+
+    monkeypatch.setattr(lw.win32clipboard, "OpenClipboard", flaky_open)
+
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00\x01" * 200
+    prov = WindowsLazyProvider()
+    try:
+        offer = _make_offer("image", [{"name": "c.png", "size": len(png), "hash": ""}], len(png))
+        ok = prov.register_offer(offer, lambda oid: FetchedContent(kind=KIND_IMAGE, data=png))
+        assert ok is True, "재시도로 지연 등록이 성공해야 함 (fallback 회피)"
+        assert calls["n"] >= 3, f"OpenClipboard 재시도가 실제로 일어나야 함 (n={calls['n']})"
+        assert prov.owns_clipboard() is True, "등록 후 클립보드 소유 중이어야 함"
+        prov.clear()
+        assert prov.owns_clipboard() is False, "clear 후 소유 아님"
+    finally:
+        prov.stop()

@@ -481,11 +481,31 @@ class InfiniteClipboard:
 
     # ── 클립보드 처리 ──────────────────────────────────────────────────
 
+    def _lazy_owns_clipboard(self) -> bool:
+        """받는 PC 에서 lazy provider 가 현재 클립보드를 원격 offer placeholder 로 소유
+        중이면 True → 모니터는 이번 폴링에서 클립보드 읽기를 건너뛴다.
+
+        이유: 우리가 등록한 lazy placeholder 를 "로컬 복사" 로 오인하면 ① has_changed 의
+        클립보드 읽기가 우리 자신의 paste-render(WM_RENDERFORMAT / SelectionRequest /
+        send / provideDataForType)를 유발해 paste 도 안 했는데 네트워크 fetch 하고,
+        ② 받은 staging 경로로 offer 를 재broadcast 하는 self-loop 가 생긴다. 사용자가
+        로컬에서 새로 복사하면 OS 가 소유권을 회수 → provider 가 False 반환 → 정상 재개.
+        """
+        prov = self.lazy_provider
+        if prov is None:
+            return False
+        try:
+            return bool(prov.owns_clipboard())
+        except Exception:
+            return False
+
     def _monitor_clipboard(self):
         """클립보드 변경 폴링 루프"""
         while self.running:
             try:
-                if self._is_network_active():
+                # lazy provider 가 클립보드를 소유 중이면(원격 offer placeholder) self-loop
+                # 방지를 위해 읽기 skip — 사용자 로컬 복사 시 소유권 회수되어 자동 재개.
+                if self._is_network_active() and not self._lazy_owns_clipboard():
                     changed, content_type, content = self.clipboard.has_changed()
 
                     if changed and content is not None:

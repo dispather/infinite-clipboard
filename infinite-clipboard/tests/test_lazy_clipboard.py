@@ -125,6 +125,18 @@ def test_provider_full_subclass_ok():
     assert d.cleared and d.stopped
 
 
+def test_owns_clipboard_default_false():
+    """owns_clipboard 는 ABC 의 concrete 기본값(False) — 4 추상 메서드만 구현한 더미도
+    인스턴스화·호출 가능해야 한다(abstractmethod 로 추가하면 기존 더미가 깨짐)."""
+    class Dummy(LazyClipboardProvider):
+        def is_supported(self, kind): return True
+        def register_offer(self, offer, fetch_callback): return True
+        def clear(self): pass
+        def stop(self): pass
+
+    assert Dummy().owns_clipboard() is False
+
+
 # ─── 팩토리 graceful ─────────────────────────────────────────────────
 
 

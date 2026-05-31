@@ -14,6 +14,7 @@ import base64
 import hashlib
 import platform
 import subprocess
+import threading
 from typing import Any, List, Optional, Tuple
 from PIL import Image
 import logging
@@ -22,6 +23,14 @@ logger = logging.getLogger(__name__)
 
 # 현재 OS 확인
 SYSTEM = platform.system()  # 'Windows', 'Darwin' (macOS), 'Linux'
+
+# Windows 클립보드는 프로세스 단일 소유 — 한 시점에 한 윈도우만 OpenClipboard 가능.
+# 같은 프로세스의 두 사용자, 즉 ① 변경 폴링 모니터(WindowsClipboardHandler) 와
+# ② lazy provider(core.lazy_win, paste 시 클립보드 소유)가 동시에 OpenClipboard 하면
+# ERROR_ACCESS_DENIED(5) 로 한쪽이 실패한다. 이 프로세스 전역 락으로 둘을 직렬화한다
+# (lazy_win 이 이 객체를 import 해 공유). 외부 앱과의 경합은 락으로 못 막으므로 양쪽
+# 모두 OpenClipboard 재시도(backoff)도 병행한다. 비-Windows 에선 생성만 되고 미사용.
+WINDOWS_CLIPBOARD_LOCK = threading.Lock()
 
 
 def _decode_clipboard_bytes(data: bytes) -> str:
@@ -168,7 +177,14 @@ class WindowsClipboard:
         self._retry_delay = 0.1  # 100ms
 
     def _open_clipboard(self) -> bool:
-        """클립보드를 안전하게 열기 (재시도 포함)"""
+        """클립보드를 안전하게 열기 (공유 락 + 재시도 포함).
+
+        WINDOWS_CLIPBOARD_LOCK 으로 lazy provider 와의 내부 경합을 직렬화하고, 그 안에서
+        OpenClipboard 를 재시도해 외부 앱 경합(ERROR_ACCESS_DENIED)도 견딘다. 성공하면
+        락을 쥔 채 True 를 반환 — 호출자는 반드시 짝지어 `_close_clipboard()` 로 해제해야
+        한다(전 호출부가 try/finally 로 보장). 전부 실패하면 락을 풀고 False.
+        """
+        WINDOWS_CLIPBOARD_LOCK.acquire()
         for i in range(self._max_retries):
             try:
                 self.win32clipboard.OpenClipboard()
@@ -181,10 +197,11 @@ class WindowsClipboard:
                     logger.warning(
                         f"클립보드 열기 실패 (재시도 {self._max_retries}회): {e}"
                     )
+        WINDOWS_CLIPBOARD_LOCK.release()  # 전 재시도 실패 — 열지 못했으니 락 해제
         return False
 
     def _close_clipboard(self):
-        """클립보드를 안전하게 닫기"""
+        """클립보드를 안전하게 닫기 + 공유 락 해제 (열기에 성공했을 때만)."""
         if self._clipboard_open:
             try:
                 self.win32clipboard.CloseClipboard()
@@ -192,6 +209,7 @@ class WindowsClipboard:
                 pass
             finally:
                 self._clipboard_open = False
+                WINDOWS_CLIPBOARD_LOCK.release()
 
     def get_files(self) -> Optional[List[str]]:
         """

@@ -106,11 +106,27 @@ class MacLazyProvider(LazyClipboardProvider):
         self._cache: Optional[FetchedContent] = None
         self._providers = []  # GC 방지 ref 유지 (콜백 발화까지 살아있어야)
         self._items = []
+        # 등록 시점의 NSPasteboard changeCount. macOS 는 소유권 상실 콜백이 없어,
+        # owns_clipboard 는 현재 changeCount 와 비교해 "그 뒤 아무도 안 썼는지"로 판단한다
+        # (사용자가 로컬 복사하면 changeCount 가 올라가 자동으로 소유 아님 처리).
+        self._change_count: Optional[int] = None
 
     # ── LazyClipboardProvider 인터페이스 ──────────────────────────────
 
     def is_supported(self, kind: str) -> bool:
         return kind in (KIND_FILE, KIND_IMAGE)
+
+    def owns_clipboard(self) -> bool:
+        # 활성 offer + 등록 후 pasteboard 가 그대로(changeCount 불변)면 우리가 소유 중.
+        # changeCount 가 올라갔으면 다른 곳(로컬 복사 등)이 덮어쓴 것 → 소유 아님.
+        with self._lock:
+            if self._offer is None or self._change_count is None:
+                return False
+            expected = self._change_count
+        try:
+            return NSPasteboard.generalPasteboard().changeCount() == expected
+        except Exception:
+            return False
 
     def register_offer(self, offer: dict, fetch_callback: FetchCallback) -> bool:
         kind = offer.get("kind") if isinstance(offer, dict) else None
@@ -132,6 +148,7 @@ class MacLazyProvider(LazyClipboardProvider):
             self._offer = None
             self._fetch_cb = None
             self._cache = None
+            self._change_count = None
 
     def stop(self) -> None:
         with self._lock:
@@ -177,6 +194,9 @@ class MacLazyProvider(LazyClipboardProvider):
         wrote = pb.writeObjects_(items)
         self._providers = providers  # GC 방지
         self._items = items
+        # 등록 직후 changeCount 기록 (owns_clipboard 비교 기준)
+        with self._lock:
+            self._change_count = pb.changeCount()
         return bool(wrote)
 
     def _types_for_kind(self, kind: str) -> list:

@@ -41,12 +41,16 @@ import itertools
 import logging
 import struct
 import threading
+import time
 from typing import Optional
 
 from core.lazy_clipboard import (
     LazyClipboardProvider, FetchedContent, FetchCallback,
     KIND_FILE, KIND_IMAGE,
 )
+# 모니터(WindowsClipboardHandler)와 OpenClipboard 경합을 직렬화하는 프로세스 전역 락.
+# clipboard_manager 는 비-Windows 안전하게 import 되고 lazy_win 보다 먼저 로드돼 있다.
+from core.clipboard_manager import WINDOWS_CLIPBOARD_LOCK
 
 # pywin32 + Win32 API — 부재/비-Windows 면 ImportError/AttributeError → 팩토리가 잡아 None
 import win32clipboard
@@ -138,6 +142,12 @@ class WindowsLazyProvider(LazyClipboardProvider):
     def is_supported(self, kind: str) -> bool:
         return kind in (KIND_FILE, KIND_IMAGE)
 
+    def owns_clipboard(self) -> bool:
+        # 활성 offer 가 등록돼 있으면 우리가 클립보드를 소유 중. WM_DESTROYCLIPBOARD
+        # (다른 앱/로컬 복사가 소유권 회수)가 _offer 를 None 으로 비우면 자동 False.
+        with self._lock:
+            return self._offer is not None
+
     def register_offer(self, offer: dict, fetch_callback: FetchCallback) -> bool:
         kind = offer.get("kind") if isinstance(offer, dict) else None
         if not self.is_supported(kind):
@@ -150,7 +160,8 @@ class WindowsLazyProvider(LazyClipboardProvider):
         # 창 생성 완료 후 메시지 스레드를 깨워 지연 등록 수행
         if self._hwnd_ready.wait(timeout=2.0) and self._hwnd:
             win32gui.PostMessage(self._hwnd, _WM_APP_DRAIN, 0, 0)
-        done.wait(timeout=2.0)
+        # _drain_pending 의 OpenClipboard 재시도(최대 ~1s)를 포함하도록 넉넉히 대기
+        done.wait(timeout=4.0)
         return result["ok"]
 
     def clear(self) -> None:
@@ -254,6 +265,26 @@ class WindowsLazyProvider(LazyClipboardProvider):
             return 0
         return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
 
+    def _open_clipboard_retry(self, retries: int = 8, delay: float = 0.1) -> None:
+        """OpenClipboard 를 재시도로 감싼다 (실패 시 마지막 예외 re-raise).
+
+        클립보드는 프로세스 단일 소유라 모니터/다른 앱과 일시 경합 시 OpenClipboard 가
+        ERROR_ACCESS_DENIED(5) 로 실패한다. WINDOWS_CLIPBOARD_LOCK 으로 앱 내부(모니터)
+        경합은 직렬화하지만, 외부 앱 경합은 backoff 재시도로 견딘다. 단 한 번의 일시적
+        거부가 offer 를 받기-fallback 으로 떨어뜨리던 버그(2026-05-31 로그)의 핵심 수정.
+        clipboard_manager.WindowsClipboardHandler._open_clipboard 와 동일 정책.
+        """
+        last = None
+        for i in range(retries):
+            try:
+                win32clipboard.OpenClipboard(self._hwnd)
+                return
+            except Exception as e:
+                last = e
+                if i < retries - 1:
+                    time.sleep(delay)
+        raise last if last is not None else OSError("OpenClipboard 실패")
+
     def _drain_pending(self) -> None:
         """register_offer 커맨드 처리: 지연 포맷 등록 (메시지 스레드 = 클립보드 소유자)."""
         with self._lock:
@@ -263,24 +294,26 @@ class WindowsLazyProvider(LazyClipboardProvider):
             return
         offer, cb, done, result = pending
         try:
-            win32clipboard.OpenClipboard(self._hwnd)
-            try:
-                win32clipboard.EmptyClipboard()  # WM_DESTROYCLIPBOARD(옛 offer) 동기 발생
-                # EmptyClipboard 이후 새 offer 설정 (옛 WM_DESTROYCLIPBOARD 가 새 offer 안 지우게)
-                with self._lock:
-                    self._offer = offer
-                    self._fetch_cb = cb
-                    self._cache = None
-                for fmt in self._formats_for_kind(offer.get("kind")):
-                    _u32.SetClipboardData(fmt, None)  # 지연 등록 (NULL = 정상)
-                if offer.get("kind") == KIND_FILE:
-                    # 즉시 작은 포맷: copy 의도 (Explorer move/copy 결정)
-                    _u32.SetClipboardData(
-                        _FMT_DROPEFFECT, _hglobal(struct.pack("<I", _DROPEFFECT_COPY)),
-                    )
-                result["ok"] = True
-            finally:
-                win32clipboard.CloseClipboard()
+            # 모니터와의 내부 경합 직렬화 — 락을 쥔 채 재시도로 OpenClipboard.
+            with WINDOWS_CLIPBOARD_LOCK:
+                self._open_clipboard_retry()  # 전 재시도 실패 시 예외 → 아래 except → fallback
+                try:
+                    win32clipboard.EmptyClipboard()  # WM_DESTROYCLIPBOARD(옛 offer) 동기 발생
+                    # EmptyClipboard 이후 새 offer 설정 (옛 WM_DESTROYCLIPBOARD 가 새 offer 안 지우게)
+                    with self._lock:
+                        self._offer = offer
+                        self._fetch_cb = cb
+                        self._cache = None
+                    for fmt in self._formats_for_kind(offer.get("kind")):
+                        _u32.SetClipboardData(fmt, None)  # 지연 등록 (NULL = 정상)
+                    if offer.get("kind") == KIND_FILE:
+                        # 즉시 작은 포맷: copy 의도 (Explorer move/copy 결정)
+                        _u32.SetClipboardData(
+                            _FMT_DROPEFFECT, _hglobal(struct.pack("<I", _DROPEFFECT_COPY)),
+                        )
+                    result["ok"] = True
+                finally:
+                    win32clipboard.CloseClipboard()
         except Exception as e:
             logger.warning(f"Windows lazy: 지연 등록 실패: {e}")
             result["ok"] = False

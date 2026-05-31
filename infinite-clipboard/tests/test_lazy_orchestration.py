@@ -60,6 +60,10 @@ class _StubProvider:
         self.captured = (offer, fetch_callback)
         return True
 
+    def owns_clipboard(self):
+        # 핸들러 단위 테스트는 모니터 루프를 안 돌리므로 항상 False (소유 추적 불필요).
+        return False
+
     def clear(self):
         self.cleared += 1
 
@@ -291,3 +295,31 @@ def test_lazy_file_roundtrip_reverse(tmp_path):
     finally:
         client_app.stop()
         server_app.stop()
+
+
+def test_lazy_owns_clipboard_guard(tmp_path):
+    """모니터 self-loop 가드: provider 없으면 False, 있으면 provider 값, 예외는 False.
+
+    받는 PC 에서 lazy provider 가 클립보드를 소유 중이면 모니터가 읽기를 건너뛰어야
+    한다(self-fetch/재broadcast 방지). 이 헬퍼가 그 판단의 단일 진입점.
+    """
+    app = _make_app("server", _free_port(), tmp_path / "dl")
+
+    # ① provider 없음 → False (lazy 미지원/헤드리스 — 기존 동작 유지)
+    app.lazy_provider = None
+    assert app._lazy_owns_clipboard() is False
+
+    # ② provider.owns_clipboard() 값을 그대로 반영
+    class _Owns:
+        def __init__(self, v): self.v = v
+        def owns_clipboard(self): return self.v
+    app.lazy_provider = _Owns(True)
+    assert app._lazy_owns_clipboard() is True
+    app.lazy_provider = _Owns(False)
+    assert app._lazy_owns_clipboard() is False
+
+    # ③ provider 가 예외를 던져도 모니터는 죽지 않고 False (안전 기본값)
+    class _Boom:
+        def owns_clipboard(self): raise RuntimeError("boom")
+    app.lazy_provider = _Boom()
+    assert app._lazy_owns_clipboard() is False

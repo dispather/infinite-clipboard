@@ -92,6 +92,12 @@ class WaylandLazyProvider(LazyClipboardProvider):
     def is_supported(self, kind: str) -> bool:
         return kind in (KIND_FILE, KIND_IMAGE)
 
+    def owns_clipboard(self) -> bool:
+        # 활성 offer 가 있으면 우리가 selection 을 소유 중. 컴포지터의 cancelled
+        # (다른 source 가 selection 을 가져감 = 로컬 복사)가 _offer 를 비우면 자동 False.
+        with self._lock:
+            return self._offer is not None
+
     def register_offer(self, offer: dict, fetch_callback: FetchCallback) -> bool:
         kind = offer.get("kind") if isinstance(offer, dict) else None
         if not self.is_supported(kind):
