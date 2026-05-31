@@ -93,6 +93,14 @@ def _setup_logging(debug=False):
 logger = logging.getLogger("infinite-clipboard")
 
 
+class _GracePeek(Exception):
+    """v3.0.3 타이밍 가드 — 등록 직후 grace 안의 read(OS 셸/DE 의 즉시 peek)를 나타낸다.
+
+    _provider_fetch 가 던지면 provider 는 빈 결과를 내주고(전송 안 함), 진짜 paste(grace
+    후)는 다시 콜백을 호출해 정상 전송된다. 일반 fetch 실패와 구분해 알림을 띄우지 않는다.
+    """
+
+
 class InfiniteClipboard:
     """앱 핵심 로직 — 네트워크 + 클립보드 + 파일전송 조립"""
 
@@ -505,24 +513,21 @@ class InfiniteClipboard:
             try:
                 # lazy provider 가 클립보드를 소유 중이면(원격 offer placeholder) self-loop
                 # 방지를 위해 읽기 skip — 사용자 로컬 복사 시 소유권 회수되어 자동 재개.
-                if self._is_network_active():
-                    _owns = self._lazy_owns_clipboard()
-                    # 진단(3.0.2): 가드 상태. 등록 후 owns=True 인데 render 가 뜨면 = 외부 reader.
-                    logger.debug(f"[lazy-diag] monitor poll owns_clipboard={_owns}")
-                    if not _owns:
-                        changed, content_type, content = self.clipboard.has_changed()
-                        if changed and content is not None:
-                            logger.info(f"[클립보드] 변경 감지: {content_type}")
-                            if content_type == "files":
-                                # v3.0 S2c: eager 전송 대신 offer broadcast (paste 시점 fetch).
-                                self._announce_offer(content)
-                            elif content_type == "image":
-                                # v3.0 S3: 이미지도 lazy — base64 디코드 → 임시 스냅샷 → offer
-                                self._announce_image_offer(content)
-                            else:
-                                # 텍스트만 inline 전송 (작고 즉시성 중요)
-                                self._send_clipboard(content_type, content)
-                            self._add_to_history(content_type, content)
+                if self._is_network_active() and not self._lazy_owns_clipboard():
+                    changed, content_type, content = self.clipboard.has_changed()
+
+                    if changed and content is not None:
+                        logger.info(f"[클립보드] 변경 감지: {content_type}")
+                        if content_type == "files":
+                            # v3.0 S2c: eager 전송 대신 offer broadcast (paste 시점 fetch).
+                            self._announce_offer(content)
+                        elif content_type == "image":
+                            # v3.0 S3: 이미지도 lazy — base64 디코드 → 임시 스냅샷 → offer
+                            self._announce_image_offer(content)
+                        else:
+                            # 텍스트만 inline 전송 (작고 즉시성 중요)
+                            self._send_clipboard(content_type, content)
+                        self._add_to_history(content_type, content)
 
             except Exception as e:
                 logger.error(f"클립보드 모니터링 오류: {e}")
@@ -872,7 +877,10 @@ class InfiniteClipboard:
             return
         offer_id = offer["offer_id"]
         with self._offer_lock:
-            # 새 offer 가 이전 것을 supersede — 최신만 유지
+            # 새 offer 가 이전 것을 supersede — 최신만 유지.
+            # _registered_at: fetch grace 기준 시각. 등록(클립보드 placeholder) 직전에
+            # 박아두면 그 직후 OS 셸의 즉시 peek 까지 grace 안에 들어와 차단된다(race 없음).
+            offer["_registered_at"] = time.time()
             self.received_offers = {offer_id: offer}
             # 이전 받기 fallback 잔여 정리 (supersede)
             old_receivable = bool(self.receivable_offers)
@@ -1027,9 +1035,29 @@ class InfiniteClipboard:
         """provider 콜백용 래퍼 — paste 실패 시 알림 후 re-raise(provider 가 빈 결과).
 
         클립보드는 보존된다(provider 가 아무것도 안 내주면 OS 는 이전 내용 유지). Gate S4.
+
+        **v3.0.3 타이밍 가드**: 등록 직후 `fetch_grace_seconds` 안에 들어온 read 는 OS 셸
+        (Windows explorer.exe)/DE 의 즉시 peek 으로 간주해 fetch 하지 않는다(GracePeek 으로
+        조용히 빈 결과 → 전송 안 함). 진짜 paste 는 항상 grace 보다 한참 뒤라 정상 전송된다.
+        provider 의 1회 캐시는 GracePeek 시 채워지지 않으므로(예외=미캐시) 이후 진짜 paste 가
+        다시 콜백을 호출한다. grace=0 이면 가드 끔(eager). (받기 버튼은 _fetch_offer 직접
+        호출이라 grace 무관 — 명시적 수신은 즉시.)
         """
+        grace = float(getattr(self.config, "fetch_grace_seconds", 0) or 0)
+        if grace > 0:
+            with self._offer_lock:
+                offer = self.received_offers.get(offer_id)
+                reg_at = offer.get("_registered_at", 0) if offer else 0
+            if reg_at and (time.time() - reg_at) < grace:
+                logger.info(
+                    f"[offer] grace peek 무시 ({time.time() - reg_at:.2f}s < {grace:.1f}s) "
+                    f"— 전송 안 함 offer={offer_id[:8]}…"
+                )
+                raise _GracePeek(offer_id)
         try:
             return self._fetch_offer(offer_id)
+        except _GracePeek:
+            raise  # 가드 — 알림 없이 provider 가 빈 결과 처리
         except Exception:
             with self._offer_lock:
                 offer = self.received_offers.get(offer_id)

@@ -96,6 +96,11 @@ class AppConfig:
     # v3.0: lazy offer TTL — copy 후 이 시간이 지나면 paste(fetch) 시 expired 거부.
     # 1 ~ 720 시간. staging_ttl 과 동일 검증 패턴. 오래된 offer 의 stale fetch 차단.
     offer_ttl_hours: int = 24
+    # v3.0.3: lazy fetch grace — 받는 PC 가 offer 를 등록한 직후 이 시간(초) 안에 들어온
+    # 클립보드 read 는 OS 셸(Windows explorer.exe)/DE 의 즉시 peek 으로 간주해 전송하지
+    # 않는다(진짜 paste 는 항상 수 초 뒤). 0 이면 가드 끔(즉시 전송=eager). 크로스머신은
+    # 1초 내 paste 가 사실상 불가능해 안전. 같은 PC 에서 빠른 paste 가 잦으면 낮춰서 튜닝.
+    fetch_grace_seconds: float = 2.0
     # v3.0: 안정적 peer 식별자 (targeted relay 라우팅 전제). 빈 문자열이면
     # 자동 생성 후 영속. 같은 PC 는 재연결해도 같은 id. 32-char lowercase hex.
     # 형식 정의/검증은 core.protocol.is_valid_peer_id 가 SSOT.
@@ -229,6 +234,19 @@ class AppConfig:
                 f"reset to 24"
             )
             self.offer_ttl_hours = 24
+
+        # v3.0.3: fetch_grace_seconds 범위 검증 (0 ~ 30초). 0 = 가드 끔(eager).
+        # 음수/비수치/과대값은 default 2.0 으로 보정.
+        if not isinstance(self.fetch_grace_seconds, (int, float)) \
+                or isinstance(self.fetch_grace_seconds, bool) \
+                or not (0 <= self.fetch_grace_seconds <= 30):
+            _logger.warning(
+                f"fetch_grace_seconds={self.fetch_grace_seconds!r} out of range "
+                f"[0,30], reset to 2.0"
+            )
+            self.fetch_grace_seconds = 2.0
+        else:
+            self.fetch_grace_seconds = float(self.fetch_grace_seconds)
 
         # v3.0: peer_id 형식 검증 (32-char lowercase hex). settings.json 이
         # 손상된 값을 담고 있으면 재생성 — 라우팅이 깨진 id 로 동작하는 것 방지.

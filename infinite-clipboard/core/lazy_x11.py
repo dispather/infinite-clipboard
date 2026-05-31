@@ -243,12 +243,12 @@ class X11LazyProvider(LazyClipboardProvider):
                 target_name = self._dpy.get_atom_name(req.target)
             except Exception:
                 target_name = req.target
-            logger.info(
+            logger.debug(
                 f"[lazy-diag] selection requestor: our_pid={os.getpid()} "
                 f"target={target_name} wm_class={wm_class} pid={pid}"
             )
         except Exception as e:
-            logger.info(f"[lazy-diag] requestor 식별 실패: {e}")
+            logger.debug(f"[lazy-diag] requestor 식별 실패: {e}")
 
     def _handle_request(self, req) -> None:
         self._log_requestor(req)  # 진단(3.0.2): 누가 selection 을 읽었나

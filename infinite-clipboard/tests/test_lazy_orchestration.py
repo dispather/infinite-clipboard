@@ -82,6 +82,9 @@ def _make_app(mode, port, download_path) -> InfiniteClipboard:
         download_path=str(download_path),
         tailscale_trust=False,
         bind_address="127.0.0.1",
+        # 테스트는 paste 를 즉시 시뮬레이션(fetch_cb 직접 호출)하므로 grace 끔(eager).
+        # 타이밍 가드 자체는 test_provider_fetch_grace_gate 가 별도 검증.
+        fetch_grace_seconds=0,
     )
     return InfiniteClipboard(cfg)
 
@@ -323,3 +326,38 @@ def test_lazy_owns_clipboard_guard(tmp_path):
         def owns_clipboard(self): raise RuntimeError("boom")
     app.lazy_provider = _Boom()
     assert app._lazy_owns_clipboard() is False
+
+
+def test_provider_fetch_grace_gate(tmp_path, monkeypatch):
+    """v3.0.3 타이밍 가드: 등록 직후 grace 안의 read 는 _GracePeek(전송 안 함),
+    grace 후/끔(0) 은 정상 fetch. OS 셸의 즉시 peek 으로 인한 복사 즉시 전송 차단."""
+    from main import _GracePeek
+
+    app = _make_app("server", _free_port(), tmp_path / "dl")
+    app.config.fetch_grace_seconds = 2.0
+    oid = "grace-test-offer"
+    with app._offer_lock:
+        app.received_offers = {oid: {
+            "offer_id": oid, "kind": "file", "source_peer": "a" * 32,
+            "_registered_at": time.time(),  # 방금 등록 (grace 안)
+        }}
+    called = {"fetch": 0}
+    monkeypatch.setattr(app, "_fetch_offer", lambda o: called.__setitem__("fetch", called["fetch"] + 1))
+
+    # ① grace 안의 read = 셸 peek → GracePeek, _fetch_offer 호출 안 함
+    with pytest.raises(_GracePeek):
+        app._provider_fetch(oid)
+    assert called["fetch"] == 0, "grace peek 인데 전송이 일어남"
+
+    # ② grace 지난 뒤(=진짜 paste) → 정상 fetch
+    with app._offer_lock:
+        app.received_offers[oid]["_registered_at"] = time.time() - 5.0
+    app._provider_fetch(oid)
+    assert called["fetch"] == 1, "grace 후엔 전송돼야 함"
+
+    # ③ grace=0 → 가드 끔(eager), 등록 직후라도 즉시 fetch
+    app.config.fetch_grace_seconds = 0
+    with app._offer_lock:
+        app.received_offers[oid]["_registered_at"] = time.time()
+    app._provider_fetch(oid)
+    assert called["fetch"] == 2, "grace=0 이면 즉시 전송돼야 함"

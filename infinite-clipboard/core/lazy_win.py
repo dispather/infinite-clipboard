@@ -367,7 +367,7 @@ class WindowsLazyProvider(LazyClipboardProvider):
                     info += f" pid_err={e}"
         except Exception as e:
             info += f" opener_err={e}"
-        logger.info(f"[lazy-diag] render requester: {info}")
+        logger.debug(f"[lazy-diag] render requester: {info}")
 
     def _render(self, fmt) -> None:
         """WM_RENDERFORMAT: 요청 포맷 바이트를 생성해 제공 (클립보드 열지 않음)."""
