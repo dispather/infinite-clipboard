@@ -101,6 +101,11 @@ class AppConfig:
     # 않는다(진짜 paste 는 항상 수 초 뒤). 0 이면 가드 끔(즉시 전송=eager). 크로스머신은
     # 1초 내 paste 가 사실상 불가능해 안전. 같은 PC 에서 빠른 paste 가 잦으면 낮춰서 튜닝.
     fetch_grace_seconds: float = 2.0
+    # v3.0.5: 파일/이미지 수신 모드. False(기본)=명시적 '받기' 모드 — 받는 PC 가 클립보드를
+    # 소유하지 않아 클립보드 매니저/파일인식 앱의 자동 read 가 paste 없이 전송을 트리거하는
+    # 것을 원천 차단(함정 #28). 받을 항목은 전송창 '받기' 버튼으로 수신. True=기존 paste-
+    # 트리거 lazy 등록(자동 peek 없는 환경 한정 opt-in; KDE 등에선 자동 전송 회귀 위험).
+    lazy_paste: bool = False
     # v3.0: 안정적 peer 식별자 (targeted relay 라우팅 전제). 빈 문자열이면
     # 자동 생성 후 영속. 같은 PC 는 재연결해도 같은 id. 32-char lowercase hex.
     # 형식 정의/검증은 core.protocol.is_valid_peer_id 가 SSOT.

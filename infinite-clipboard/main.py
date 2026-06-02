@@ -885,24 +885,29 @@ class InfiniteClipboard:
             # 이전 받기 fallback 잔여 정리 (supersede)
             old_receivable = bool(self.receivable_offers)
             self.receivable_offers = {}
-        provider = self._ensure_lazy_provider()
+        # v3.0.5: 기본은 명시적 '받기' 모드 — 받는 PC 가 클립보드를 소유하지 않으므로
+        # 클립보드 매니저/파일인식 앱의 자동 read 가 paste 없이 전송을 트리거하지 못한다
+        # (함정 #28: Wayland 는 peek vs paste 구분 신호가 없어 paste-트리거 lazy 가 샘).
+        # config.lazy_paste=True 면 자동 peek 없는 환경 한정 기존 paste-트리거 lazy 등록.
         ok = False
-        if provider is not None and provider.is_supported(offer["kind"]):
-            try:
-                provider.clear()  # 이전 등록 해제 (supersede)
-                ok = provider.register_offer(offer, self._provider_fetch)
-            except Exception as e:
-                logger.warning(f"offer 등록 실패 — 받기 fallback 으로: {e}")
-                ok = False
+        if getattr(self.config, "lazy_paste", False):
+            provider = self._ensure_lazy_provider()
+            if provider is not None and provider.is_supported(offer["kind"]):
+                try:
+                    provider.clear()  # 이전 등록 해제 (supersede)
+                    ok = provider.register_offer(offer, self._provider_fetch)
+                except Exception as e:
+                    logger.warning(f"offer 등록 실패 — 받기 모드로: {e}")
+                    ok = False
         if ok:
-            # happy path — paste 로 바로 가져올 수 있음. 알림 무음 (Gate S4).
-            logger.info(f"[offer] 수신·등록(OK, happy-path): offer={offer_id[:8]}…")
+            # opt-in lazy paste — Ctrl+V 로 바로 가져옴. 알림 무음 (Gate S4).
+            logger.info(f"[offer] 수신·등록(OK, lazy-paste): offer={offer_id[:8]}…")
             if old_receivable:
                 self._save_transfer_state(force=True)  # 옛 받기 목록 비움 반영
         else:
-            # lazy 미지원/헤드리스/등록 실패 → S4 받기 fallback (알림 + 전송창 받기 행)
+            # 기본 경로 — 명시적 '받기' (알림 + 전송창 받기 행). 자동 전송 없음.
             self._add_receivable(offer)
-            logger.info(f"[offer] 수신(받기 fallback): offer={offer_id[:8]}…")
+            logger.info(f"[offer] 수신(받기 모드): offer={offer_id[:8]}…")
 
     def _fetch_timeout(self, total_size: int) -> float:
         """fetch 하드 타임아웃 (Rec 2). 크기 비례 + 하한/상한."""

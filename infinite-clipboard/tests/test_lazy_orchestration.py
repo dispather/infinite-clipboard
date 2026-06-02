@@ -71,7 +71,7 @@ class _StubProvider:
         pass
 
 
-def _make_app(mode, port, download_path) -> InfiniteClipboard:
+def _make_app(mode, port, download_path, lazy_paste=True) -> InfiniteClipboard:
     download_path.mkdir(parents=True, exist_ok=True)
     cfg = AppConfig(
         mode=mode,
@@ -85,6 +85,9 @@ def _make_app(mode, port, download_path) -> InfiniteClipboard:
         # 테스트는 paste 를 즉시 시뮬레이션(fetch_cb 직접 호출)하므로 grace 끔(eager).
         # 타이밍 가드 자체는 test_provider_fetch_grace_gate 가 별도 검증.
         fetch_grace_seconds=0,
+        # v3.0.5: lazy round-trip 테스트는 opt-in lazy 경로(lazy_paste=True)를 검증한다.
+        # 기본(False) '받기' 모드는 test_offer_default_receive_mode 가 별도 검증.
+        lazy_paste=lazy_paste,
     )
     return InfiniteClipboard(cfg)
 
@@ -149,6 +152,46 @@ def test_lazy_file_roundtrip_loopback(tmp_path):
         got = sorted(open(p, "rb").read() for p in fetched.paths)
         want = sorted([f1.read_bytes(), f2.read_bytes()])
         assert got == want, "조립된 내용이 원본과 불일치"
+    finally:
+        client_app.stop()
+        server_app.stop()
+
+
+def test_offer_default_receive_mode(tmp_path):
+    """v3.0.5 기본 동작: lazy_paste=False 면 offer 가 lazy provider 에 등록되지 않고
+    (클립보드 미소유 → 매니저/앱의 자동 read 가 전송을 트리거할 수 없음) 받기 목록에 들어간다.
+    '받기'(_receive_offer)로만 download_path 에 수신된다."""
+    src = tmp_path / "src"; src.mkdir()
+    f1 = src / "a.txt"; f1.write_bytes(b"hello-receive " * 1000)  # ~13KB
+
+    port = _free_port()
+    server_app = _make_app("server", port, tmp_path / "srv_dl")  # 송신측 (lazy_paste 무관)
+    client_app = _make_app("client", port, tmp_path / "cli_dl", lazy_paste=False)
+    server_stub, client_stub = _StubProvider(), _StubProvider()
+    server_app.lazy_provider = server_stub
+    server_app._lazy_provider_inited = True
+    client_app.lazy_provider = client_stub
+    client_app._lazy_provider_inited = True
+    server_app._start_server()
+    client_app._start_client()
+    try:
+        assert _wait_until(lambda: client_app.client and client_app.client.connected)
+        assert _wait_until(lambda: len(server_app.peers) == 1)
+
+        server_app._announce_offer([str(f1)])
+
+        # 받기 목록엔 들어오되, provider 에는 등록되지 않아야 한다 (자동전송 원천 차단)
+        assert _wait_until(lambda: len(client_app.receivable_offers) == 1, timeout=4.0), \
+            "offer 가 받기 목록에 안 들어옴"
+        assert client_stub.captured is None, "받기 모드인데 provider 등록됨 (자동전송 위험)"
+
+        # '받기' 실행 → download_path 저장 + 목록 비워짐
+        offer_id = next(iter(client_app.receivable_offers))
+        client_app._receive_offer(offer_id)
+        dest = os.path.join(client_app.config.download_path, "a.txt")
+        assert os.path.exists(dest), f"받기 저장 안 됨: {dest}"
+        assert open(dest, "rb").read() == f1.read_bytes()
+        assert len(client_app.receivable_offers) == 0
     finally:
         client_app.stop()
         server_app.stop()
