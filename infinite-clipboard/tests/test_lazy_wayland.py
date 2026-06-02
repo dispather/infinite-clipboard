@@ -146,6 +146,41 @@ def test_wayland_large_payload():
         prov.stop()
 
 
+def test_wayland_kde_hint_suppresses_fetch(tmp_path):
+    """KDE privacy 힌트 회귀: x-kde-passwordManagerHint 가 offer 에 포함되고, 그 mime 만
+    읽으면 fetch 없이 'secret' 를 서빙한다 (Klipper peek 이 전송을 트리거 안 하게).
+    진짜 데이터 mime(text/uri-list)을 읽을 때만 fetch 가 발화한다."""
+    from core.lazy_wayland import WaylandLazyProvider
+    from core.lazy_clipboard import FetchedContent, KIND_FILE
+
+    f1 = tmp_path / "a.txt"; f1.write_text("A")
+    calls = {"n": 0}
+
+    def fetch(offer_id):
+        calls["n"] += 1
+        return FetchedContent(kind=KIND_FILE, paths=[str(f1)])
+
+    prov = WaylandLazyProvider()
+    try:
+        offer = _make_offer("file", [{"name": "a.txt", "size": 1, "hash": ""}], 1)
+        _register_or_skip(prov, offer, fetch)
+        time.sleep(0.05)
+        # 힌트 mime 이 offer 목록에 노출되는가
+        listed = subprocess.run(
+            ["wl-paste", "-l"], capture_output=True, timeout=10,
+        ).stdout.decode("utf-8", "replace")
+        assert "x-kde-passwordManagerHint" in listed, f"힌트 mime 미노출: {listed!r}"
+        # 힌트만 읽으면 'secret' + fetch 호출 0 (= Klipper peek 이 전송 안 함)
+        assert _wl_paste("x-kde-passwordManagerHint") == b"secret"
+        assert calls["n"] == 0, "힌트 read 가 fetch 를 트리거하면 안 됨"
+        # 진짜 데이터 mime 을 읽으면 그제서야 fetch (정상 paste 는 동작)
+        uri = _wl_paste("text/uri-list").decode("utf-8")
+        assert "file://" in uri
+        assert calls["n"] == 1, "데이터 mime read 는 fetch 1회를 발화해야"
+    finally:
+        prov.stop()
+
+
 def test_wayland_is_supported():
     """is_supported 정적 확인 (selection 소유 무관 — WAYLAND_DISPLAY 연결만 필요)."""
     from core.lazy_wayland import WaylandLazyProvider

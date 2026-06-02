@@ -56,6 +56,14 @@ _MIME_PNG = "image/png"
 _MIME_URILIST = "text/uri-list"
 _MIME_GNOME = "x-special/gnome-copied-files"
 
+# KDE 클립보드 매니저(Klipper) privacy 힌트. offer 에 포함하면 Klipper 는 이 mime 만 읽어
+# 'secret' 인지 확인한 뒤 실제 데이터 mime(uri-list/png)은 **read 하지 않는다** → 매니저의
+# 자동 peek 이 lazy fetch(=전송)를 트리거하지 않게 막는다. KeePassXC 가 쓰는 그 힌트.
+# 실측: spikes/lazy-clipboard/klipper_hint_probe.py — control=데이터 read 2회 /
+# --hint=0회(힌트 mime 만 read) 로 (B 효과) 확정 (2026-06-02, Plasma Wayland).
+_MIME_KDE_PW_HINT = "x-kde-passwordManagerHint"
+_KDE_PW_HINT_VALUE = b"secret"
+
 
 def _path_to_uri(path: str) -> str:
     """절대경로 → file:// URI (공백/한글 등 percent-encoding)."""
@@ -241,9 +249,10 @@ class WaylandLazyProvider(LazyClipboardProvider):
         done.set()
 
     def _mimes_for_kind(self, kind: str) -> list:
-        if kind == KIND_IMAGE:
-            return [_MIME_PNG]
-        return [_MIME_URILIST, _MIME_GNOME]  # KIND_FILE
+        base = [_MIME_PNG] if kind == KIND_IMAGE else [_MIME_URILIST, _MIME_GNOME]
+        # 항상 KDE privacy 힌트를 함께 offer — Klipper 자동 peek 이 데이터 mime 을 읽지
+        # 않게 해 paste 전 전송을 차단 (file/image 공통, 메커니즘은 데이터 mime 무관).
+        return base + [_MIME_KDE_PW_HINT]
 
     def _on_cancelled(self, source) -> None:
         # 다른 source 가 selection 을 가져감 (로컬 복사 / 새 offer 가 우리 옛 source 회수).
@@ -266,6 +275,10 @@ class WaylandLazyProvider(LazyClipboardProvider):
             cache = self._cache
         if offer is None or cb is None:
             return None
+        # KDE privacy 힌트는 fetch 없이 상수로 응답 — Klipper 가 이걸 읽고 데이터 mime 은
+        # 건너뛰므로 lazy fetch(전송)가 트리거되지 않는다 (실측 (B), klipper_hint_probe.py).
+        if mime == _MIME_KDE_PW_HINT:
+            return _KDE_PW_HINT_VALUE
         kind = offer.get("kind")
 
         if cache is None:
