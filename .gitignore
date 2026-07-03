@@ -38,6 +38,7 @@ settings.json
 # Claude Code
 .claude/
 .next-tasks.json
+.next-tasks.archive.jsonl
 
 # Serena agent local state
 .serena/
