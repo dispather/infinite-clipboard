@@ -287,6 +287,26 @@ def _is_safe_rel_path(rel_path: str) -> bool:
     return True
 
 
+def _dedup_rel_path(path_map: Dict[str, str], rel_path: str, abs_path: str) -> str:
+    """C6: rel_path 가 이미 다른 절대경로를 가리키면 번호를 붙여 유일화한다.
+
+    다중 파일/폴더 선택 시 서로 다른 위치의 동일 파일명(또는 동일 폴더명)이
+    섞이면 path_map 의 rel_path 키가 충돌해 last-write-wins 로 앞 항목의
+    데이터가 조립 단계에서 조용히 사라지는 문제(단일 폴더 전송은 전체 상대경로를
+    보존해 영향 없음)를 막는다. 기존 "rename_with_counter" 정책과 같은 명명
+    관례("name (1).ext")를 사용해 사용자에게 익숙하다.
+    """
+    if rel_path not in path_map or path_map[rel_path] == abs_path:
+        return rel_path
+    stem, ext = os.path.splitext(rel_path)
+    n = 1
+    candidate = f"{stem} ({n}){ext}"
+    while candidate in path_map:
+        n += 1
+        candidate = f"{stem} ({n}){ext}"
+    return candidate
+
+
 def _resolve_within(base: Path, rel_path: str) -> Optional[Path]:
     """base 하위에 위치하는 안전한 절대 경로를 반환. 이탈 시 None.
 
@@ -616,6 +636,9 @@ class FileTransferManager:
                             abs_path = os.path.join(dirpath, fname)
                             rel_path = os.path.relpath(abs_path, dir_base)
                             rel_path = rel_path.replace("\\", "/")
+                            # C6: 서로 다른 선택 폴더가 동일한 이름/구조를 가지면
+                            # rel_path 가 충돌할 수 있음 — 유일화
+                            rel_path = _dedup_rel_path(path_map, rel_path, abs_path)
                             fsize = os.path.getsize(abs_path)
                             file_entries.append({
                                 "path": rel_path,
@@ -626,6 +649,10 @@ class FileTransferManager:
                 else:
                     fsize = os.path.getsize(p)
                     rel_path = os.path.basename(p)
+                    # C6: 다중 파일 선택에 동일 파일명이 서로 다른 디렉토리에서 섞이면
+                    # basename 만으로는 충돌 — 충돌 검사 없이 last-write-wins 였던
+                    # 것이 앞 파일 데이터를 조립 단계에서 조용히 유실시켰다.
+                    rel_path = _dedup_rel_path(path_map, rel_path, p)
                     file_entries.append({
                         "path": rel_path,
                         "size": fsize,
@@ -680,6 +707,15 @@ class FileTransferManager:
             while True:
                 chunk_data = f.read(CHUNK_SIZE)
                 if not chunk_data:
+                    # C5: 0바이트 파일은 여기서 chunk_index==0 인 채로 끝난다 — 청크
+                    # 콜백이 한 번도 안 불리면 수신측 assembled_* 파일이 아예 안
+                    # 만들어져 assemble_file 이 "조립 파일 없음"으로 실패하고, 그
+                    # 실패가 전송 전체(폴더/다중 파일)를 취소시킨다(.gitkeep 등 흔한
+                    # 케이스). 빈 청크를 1회 호출해 수신측 "첫 청크면 조립 파일
+                    # touch" 로직을 그대로 태워 0바이트 assembled 파일을 만든다.
+                    if chunk_index == 0:
+                        empty_hash = xxhash.xxh64(b"").hexdigest()
+                        chunk_callback(0, b"", empty_hash)
                     break
 
                 # 청크별 xxHash64 해시

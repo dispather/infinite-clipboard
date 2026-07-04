@@ -7,6 +7,9 @@ import time
 import pytest
 
 from core.network import NetworkServer
+from config import AppConfig
+from core.protocol import generate_peer_id
+from main import InfiniteClipboard
 
 
 def _free_port() -> int:
@@ -89,3 +92,35 @@ def test_resolve_bind_auto_fallback_to_all_interfaces(monkeypatch, caplog):
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert any("Tailscale" in m for m in warnings), \
         f"Expected Tailscale-fallback warning, got {warnings}"
+
+
+def test_app_start_survives_port_conflict(tmp_path):
+    """C3: InfiniteClipboard._start_server() 가 포트 충돌(OSError) 을 삼키고
+    무음 크래시 대신 self.connected=False + self._startup_error 로 보고해야 한다."""
+    port = _free_port()
+
+    # 포트를 먼저 점유해 실제 bind 충돌을 유발
+    blocker = sock_module.socket(sock_module.AF_INET, sock_module.SOCK_STREAM)
+    blocker.setsockopt(sock_module.SOL_SOCKET, sock_module.SO_REUSEADDR, 1)
+    blocker.bind(("127.0.0.1", port))
+    blocker.listen(1)
+
+    config = AppConfig(
+        mode="server",
+        port=port,
+        auth_key="conflict-test-shared-secret-key-0123456789",
+        peer_id=generate_peer_id(),
+        download_path=str(tmp_path / "dl"),
+        tailscale_trust=False,
+        bind_address="127.0.0.1",
+    )
+    app = InfiniteClipboard(config)
+    try:
+        app.start()  # OSError 를 raise 하면 이 줄에서 테스트가 즉시 실패한다
+        assert app.connected is False
+        assert app.server is None
+        assert app._startup_error is not None
+        assert str(port) in app._startup_error
+    finally:
+        app.stop()
+        blocker.close()

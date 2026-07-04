@@ -33,7 +33,7 @@ if sys.platform.startswith("linux") and "PYSTRAY_BACKEND" not in os.environ:
     except ImportError:
         pass
 
-from config import AppConfig, load_config, save_config
+from config import AppConfig, load_config, save_config, get_last_config_warning
 from core.protocol import (
     MSG_CLIPBOARD, MSG_PING, MSG_PONG,
     MSG_FILE_READY, MSG_FILE_REQUEST, MSG_FILE_START,
@@ -144,6 +144,9 @@ class InfiniteClipboard:
         # 상태
         self.connected = False
         self.connected_clients = 0
+        # C3/C4: 트레이가 아직 없는 시점(app.start() 는 TrayApp 생성 전 호출됨)에
+        # 발생한 시작 실패를 main() 이 tray 준비 후 한 번에 notify 할 수 있게 보관.
+        self._startup_error = None
         # v3.0: peer 레지스트리 (targeted relay 라우팅의 기반, Task 3 가 사용).
         # 서버 모드: {peer_id: name} 연결된 클라이언트들. 클라이언트 모드: 서버
         # peer_id 는 self.client.server_peer_id 에 보관되므로 여기선 비워 둔다.
@@ -277,8 +280,20 @@ class InfiniteClipboard:
         self.server.on_client_disconnected = self._on_server_client_disconnected
         self.server.on_message_received = self._on_server_message
 
-        self.server.start()
-        self.connected = True
+        # C3: bind 실패(포트 충돌 등)를 감싸지 않으면 tray 가 생기기도 전에
+        # 무음으로 전체 크래시(windowed 빌드는 콘솔이 없어 로그도 안 보임).
+        try:
+            self.server.start()
+            self.connected = True
+        except OSError as e:
+            logger.error(f"서버 시작 실패 (포트 {self.config.port}): {e}")
+            self.server = None
+            self.connected = False
+            self._startup_error = (
+                f"서버 시작 실패: 포트 {self.config.port}을(를) 사용할 수 없습니다 "
+                f"({e}). 다른 프로그램이 포트를 사용 중이거나 권한이 없을 수 있습니다. "
+                f"설정에서 포트를 변경해보세요."
+            )
         # 실제 bind IP 는 NetworkServer.start() 가 로깅 (Tailscale 자동 / 0.0.0.0)
 
     def _on_server_client_connected(self, sock, address, name, peer_id):
@@ -302,6 +317,15 @@ class InfiniteClipboard:
             f"({self.connected_clients}대)"
         )
         self._notify_state_changed()
+
+    def _verify_sender_identity(self, sock, data, field_name) -> bool:
+        """서버: JSON 메시지의 자기신고 identity 필드가 handshake 로 확인된 소켓
+        peer_id 와 일치하는지 검증한다 (C1 — 위조된 requester_peer/source_peer 로
+        다른 peer 를 사칭하는 것 차단). 불일치/누락 시 False (호출자가 drop)."""
+        claimed = data.get(field_name) if isinstance(data, dict) else None
+        with self.server.clients_lock:
+            actual = self.server.clients.get(sock, {}).get("peer_id")
+        return bool(claimed) and claimed == actual
 
     def _server_route(self, msg_type, data, sock, local_handler):
         """v3.0 JSON 메시지 라우팅: receiver_peer 있으면 그 peer 1 소켓에만 중계.
@@ -335,13 +359,23 @@ class InfiniteClipboard:
 
         # ── v3.0 lazy clipboard ──
         elif msg_type == MSG_CLIP_OFFER:
-            # copy 알림 — 로컬 처리(서버도 receiver 일 수 있음) + broadcast
-            self._handle_clip_offer(data)
-            self.server.broadcast(MSG_CLIP_OFFER, data, exclude_sock=sock)
+            # C1: source_peer 자기신고가 실제 소켓 identity 와 일치하는지 검증
+            if not self._verify_sender_identity(sock, data, "source_peer"):
+                logger.warning(f"[보안] MSG_CLIP_OFFER source_peer 위조 의심 — drop ({sock})")
+            else:
+                # copy 알림 — 로컬 처리(서버도 receiver 일 수 있음) + broadcast
+                self._handle_clip_offer(data)
+                self.server.broadcast(MSG_CLIP_OFFER, data, exclude_sock=sock)
 
         elif msg_type == MSG_CLIP_FETCH:
-            # paste 요청 — receiver_peer(=source) 로 routed
-            self._server_route(MSG_CLIP_FETCH, data, sock, self._handle_clip_fetch)
+            # C1: requester_peer 자기신고가 실제 소켓 identity 와 일치하는지 검증
+            # (위조 시 다른 peer 를 사칭해 그 peer 에게 원치 않는 파일/클립보드
+            # 강제 전송을 유발할 수 있었음 — 감사 Critical #1)
+            if not self._verify_sender_identity(sock, data, "requester_peer"):
+                logger.warning(f"[보안] MSG_CLIP_FETCH requester_peer 위조 의심 — drop ({sock})")
+            else:
+                # paste 요청 — receiver_peer(=source) 로 routed
+                self._server_route(MSG_CLIP_FETCH, data, sock, self._handle_clip_fetch)
 
         elif msg_type == MSG_CLIP_FETCH_FAIL:
             # fetch 실패 — receiver_peer(=requester) 로 routed
@@ -645,6 +679,9 @@ class InfiniteClipboard:
             # v2.1: manager active state 도 함께 동기화 (transfer_id 일치 시에만 set)
             self.file_manager.cancel_outgoing(transfer_id, reason="error")
             logger.info(f"[파일] 전송 중단 요청 수신: {transfer_id}")
+            # C2: 이 전송을 기다리는 _active_fetch 가 있으면 즉시 깨움 (최대 600초
+            # hang 방지 — 진행 도중 실패는 이 레거시 FILE_ERROR 경로로만 보고됨)
+            self._signal_fetch(transfer_id, fail=data.get("error", "source_error"))
 
     def _handle_file_cancel(self, data):
         """MSG_FILE_CANCEL 수신 → 송수신 양쪽 cleanup.
@@ -679,6 +716,8 @@ class InfiniteClipboard:
             with self._transfers_lock:
                 self.pending_transfers.pop(transfer_id, None)
             self._cancel_transfer_tracking(transfer_id)
+            # C2: 진행 중이던 fetch 를 취소로 즉시 깨움 (hang 방지)
+            self._signal_fetch(transfer_id, fail="cancelled")
 
         # v2.3.1 ack — 어떤 role 로 cleanup 했는지 originator 에게 통지.
         if cancelled_out is not None:
@@ -1464,6 +1503,8 @@ class InfiniteClipboard:
             })
             with self._transfers_lock:
                 self.pending_transfers.pop(transfer_id, None)
+            # C2: 이 전송을 기다리는 _active_fetch 가 있으면 즉시 깨움 (hang 방지)
+            self._signal_fetch(transfer_id, fail="chunk_hash_mismatch")
 
     def _handle_file_end(self, data):
         """FILE_END 수신 → 파일 조립 및 SHA-256 검증"""
@@ -1501,6 +1542,8 @@ class InfiniteClipboard:
                 "transfer_id": transfer_id,
                 "error": f"파일 조립 실패: {file_path}",
             })
+            # C2: 이 전송을 기다리는 _active_fetch 가 있으면 즉시 깨움 (hang 방지)
+            self._signal_fetch(transfer_id, fail="assemble_failed")
             with self._transfers_lock:
                 self.pending_transfers.pop(transfer_id, None)
 
@@ -1533,9 +1576,16 @@ class InfiniteClipboard:
                     clipboard_paths = restored_paths
                 # v3.0 S2c: lazy fetch 가 진행 중이면 그 fetch 에 경로를 넘긴다 — OS
                 # 클립보드 set 은 provider 가 paste 시점에 수행하므로 여기서 직접 set 안 함.
-                # 매칭되는 fetch 가 없으면(방어적) 기존처럼 직접 set.
+                # C1 방어심층화: 매칭되는 fetch 가 없으면 이 전송을 요청한 적이 없다는
+                # 뜻이므로(정상 흐름은 "받기"/lazy-paste 모두 _fetch_offer 를 거쳐 미리
+                # _active_fetch 를 채워둔다) 더 이상 클립보드에 직접 set 하지 않는다 —
+                # 과거엔 여기가 위조된 requester_peer 로 동의 없는 clipboard 강제 주입을
+                # 허용하는 지점이었다.
                 if not self._signal_fetch(transfer_id, paths=clipboard_paths):
-                    self.clipboard.set_clipboard_content("files", clipboard_paths)
+                    logger.warning(
+                        f"[보안] 대응하는 fetch 없이 TRANSFER_COMPLETE 수신 — "
+                        f"clipboard 미설정 (transfer={transfer_id})"
+                    )
         finally:
             # 예외 발생 시에도 반드시 정리
             self.checkpoint_manager.delete(transfer_id)
@@ -1944,6 +1994,11 @@ def main():
 
     # 설정 로드
     config = load_config()
+    # C3/C4: tray 가 생기기 전에 발생한 시작 경고(설정 손상/서버 바인드 실패)를
+    # 모아뒀다가 tray 준비 후 한 번에 notify.
+    startup_warnings = []
+    if get_last_config_warning():
+        startup_warnings.append(get_last_config_warning())
 
     # CLI 인자로 설정 오버라이드
     if args.mode:
@@ -1961,6 +2016,8 @@ def main():
     # 앱 시작
     app = InfiniteClipboard(config)
     app.start()
+    if app._startup_error:
+        startup_warnings.append(app._startup_error)
 
     if args.no_tray:
         # 설정 변경 감시 시작
@@ -1982,6 +2039,10 @@ def main():
         tray = TrayApp(app)
         # v2.3 audit P2: 양방향 link — app._cleanup_staging 이 tray.notify 호출.
         app.tray = tray
+
+        # C3/C4: tray 준비 완료 — 시작 단계에서 쌓인 경고를 이제 notify
+        for warning in startup_warnings:
+            tray.notify("Infinite Clipboard", warning)
 
         # 설정 변경 감시 시작
         threading.Thread(

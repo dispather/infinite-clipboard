@@ -11,9 +11,12 @@
 종단 검증한다. provider 는 fetch_callback 을 캡처만 하고, 테스트가 paste 처럼 호출한다.
 """
 
+import logging
 import os
 import socket
+import threading
 import time
+import uuid
 
 import pytest
 
@@ -162,7 +165,11 @@ def test_offer_default_receive_mode(tmp_path):
     (클립보드 미소유 → 매니저/앱의 자동 read 가 전송을 트리거할 수 없음) 받기 목록에 들어간다.
     '받기'(_receive_offer)로만 download_path 에 수신된다."""
     src = tmp_path / "src"; src.mkdir()
-    f1 = src / "a.txt"; f1.write_bytes(b"hello-receive " * 1000)  # ~13KB
+    # 파일명은 test_lazy_file_roundtrip_loopback 의 "a.txt" 와 겹치면 실제 OS
+    # 임시 staging 디렉토리(/tmp/ic_clipboard, 테스트 간 공유되는 고정 경로)에서
+    # rename_with_counter 정책이 발동해 "a (1).txt" 로 저장되고, 아래 dest 단언이
+    # 실행 순서에 따라 flaky 하게 실패한다 (감사 세션 중 발견, C1~C7과는 무관).
+    f1 = src / "receive-mode.txt"; f1.write_bytes(b"hello-receive " * 1000)  # ~13KB
 
     port = _free_port()
     server_app = _make_app("server", port, tmp_path / "srv_dl")  # 송신측 (lazy_paste 무관)
@@ -188,7 +195,7 @@ def test_offer_default_receive_mode(tmp_path):
         # '받기' 실행 → download_path 저장 + 목록 비워짐
         offer_id = next(iter(client_app.receivable_offers))
         client_app._receive_offer(offer_id)
-        dest = os.path.join(client_app.config.download_path, "a.txt")
+        dest = os.path.join(client_app.config.download_path, "receive-mode.txt")
         assert os.path.exists(dest), f"받기 저장 안 됨: {dest}"
         assert open(dest, "rb").read() == f1.read_bytes()
         assert len(client_app.receivable_offers) == 0
@@ -404,3 +411,104 @@ def test_provider_fetch_grace_gate(tmp_path, monkeypatch):
         app.received_offers[oid]["_registered_at"] = time.time()
     app._provider_fetch(oid)
     assert called["fetch"] == 2, "grace=0 이면 즉시 전송돼야 함"
+
+
+def test_spoofed_requester_peer_is_dropped(tmp_path, caplog):
+    """감사 Critical #1: MSG_CLIP_FETCH 의 requester_peer 자기신고가 실제 소켓
+    identity 와 다르면 서버가 drop 해야 한다. 과거엔 검증 없이 라우팅되어, 인증된
+    peer 가 다른 peer 를 사칭해 그 peer 에게 원치 않는 파일 전송/클립보드 강제
+    주입을 유발할 수 있었다 (v3.0.5 '받기 명시적 동의' 설계의 프로토콜 계층 우회)."""
+    src = tmp_path / "src"
+    src.mkdir()
+    f1 = src / "secret.txt"
+    f1.write_bytes(b"top-secret-data")
+
+    server_app, client_app, _server_stub, stub = _setup_pair(tmp_path)
+    try:
+        server_app._announce_offer([str(f1)])
+        assert _wait_until(lambda: stub.captured is not None, timeout=4.0)
+        offer, _fetch_cb = stub.captured
+
+        # client 는 실제로는 자신의 진짜 peer_id 로만 handshake 했다 — 여기서
+        # 전혀 다른(연결한 적도 없는) peer_id 를 자기신고해 스푸핑을 흉내낸다.
+        forged_peer = generate_peer_id()
+        assert forged_peer != client_app.config.peer_id
+        raw = client_app.protocol.create_clip_fetch(
+            offer["offer_id"], forged_peer, receiver_peer=offer["source_peer"],
+        )
+        caplog.set_level(logging.WARNING, logger="infinite-clipboard")
+        client_app._send_raw_to(raw, offer["source_peer"])
+
+        # 서버(source)가 위조를 감지해 drop 로그를 남겨야 함
+        assert _wait_until(
+            lambda: any(
+                "MSG_CLIP_FETCH requester_peer 위조" in r.getMessage()
+                for r in caplog.records
+            ),
+            timeout=2.0,
+        ), "스푸핑 감지 로그가 없음 — 검증이 우회됐을 수 있음"
+
+        # 어느 쪽도 실제 전송을 시작하지 않아야 함
+        time.sleep(0.3)
+        with client_app._transfers_lock:
+            assert len(client_app.pending_transfers) == 0
+        with server_app._transfers_lock:
+            assert len(server_app.outgoing_files) == 0
+    finally:
+        client_app.stop()
+        server_app.stop()
+
+
+def test_chunk_hash_mismatch_wakes_fetch_immediately():
+    """감사 Critical #2: 전송 도중 청크 해시 불일치 시 _signal_fetch(fail=...) 가
+    호출되어 대기 중인 fetch 가 즉시 깨어나야 한다. 과거엔 이 실패가 레거시
+    MSG_FILE_ERROR 로만 보고되고 _active_fetch 를 깨우지 않아, 받기 버튼을 누른
+    쪽이 최대 600초(하드 타임아웃) 동안 무진행률로 멎어 있었다."""
+    app = InfiniteClipboard(AppConfig(
+        mode="client", auth_key="x" * 32, peer_id=generate_peer_id(),
+    ))
+    transfer_id = str(uuid.uuid4())
+    event = threading.Event()
+    app._active_fetch = {
+        "offer_id": transfer_id, "transfer_id": transfer_id,
+        "event": event, "paths": None, "fail": None,
+    }
+    with app._transfers_lock:
+        app.pending_transfers[transfer_id] = object()  # 존재만 하면 early-return 통과
+
+    app._handle_file_chunk({
+        "transfer_id": transfer_id,
+        "file_path": "x.bin",
+        "chunk_index": 0,
+        "binary_data": b"corrupted-bytes",
+        "hash": "0" * 16,  # 실제 xxHash64 와 고의로 불일치
+    })
+
+    assert event.is_set(), "청크 해시 불일치가 대기 중인 fetch 를 깨우지 못함 (hang 가능)"
+    assert app._active_fetch["fail"] == "chunk_hash_mismatch"
+
+
+def test_assemble_failure_wakes_fetch_immediately():
+    """감사 Critical #2: 조립(SHA-256) 실패도 동일하게 _signal_fetch(fail=...) 로
+    즉시 깨워야 한다."""
+    app = InfiniteClipboard(AppConfig(
+        mode="client", auth_key="x" * 32, peer_id=generate_peer_id(),
+    ))
+    transfer_id = str(uuid.uuid4())
+    event = threading.Event()
+    app._active_fetch = {
+        "offer_id": transfer_id, "transfer_id": transfer_id,
+        "event": event, "paths": None, "fail": None,
+    }
+    with app._transfers_lock:
+        app.pending_transfers[transfer_id] = object()
+
+    # assemble_file 이 존재하지 않는 조립 파일에 대해 False 를 반환하도록 유도
+    app._handle_file_end({
+        "transfer_id": transfer_id,
+        "file_path": "never-received.bin",
+        "sha256": "0" * 64,
+    })
+
+    assert event.is_set(), "조립 실패가 대기 중인 fetch 를 깨우지 못함 (hang 가능)"
+    assert app._active_fetch["fail"] == "assemble_failed"

@@ -382,6 +382,33 @@ def _clean_env():
     return env
 
 
+def _write_via_subprocess(cmd: List[str], payload: bytes, env=None,
+                           timeout: float = 5.0) -> bool:
+    """C7: 클립보드 쓰기 subprocess 공통 실행 — returncode 확인 + timeout 가드.
+
+    과거엔 pbcopy/wl-copy/xclip/xsel/uri-list 쓰기 경로가 모두
+    `process.communicate()` 결과와 무관하게 무조건 True 를 반환해, 문서화된
+    폴백 체인(wl-copy→xclip/xsel→Klipper)이 실제로는 절대 타지 않는 죽은
+    코드였다. 이 헬퍼가 실패(비정상 종료/타임아웃)를 정확히 알려야 호출부가
+    다음 폴백으로 넘어갈 수 있다.
+
+    Returns:
+        bool: 프로세스가 정상 종료(returncode == 0)했으면 True.
+    """
+    process = subprocess.Popen(cmd, stdin=subprocess.PIPE, env=env)
+    try:
+        process.communicate(payload, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        logger.warning(f"{cmd[0]} 쓰기 타임아웃")
+        return False
+    if process.returncode != 0:
+        logger.warning(f"{cmd[0]} 쓰기 실패 (returncode={process.returncode})")
+        return False
+    return True
+
+
 class MacClipboard:
     """macOS 클립보드 핸들러 (pbcopy/pbpaste 및 PyObjC 사용)"""
 
@@ -455,8 +482,8 @@ class MacClipboard:
     def set_content(self, content_type: str, data: Any) -> bool:
         try:
             if content_type == "text":
-                process = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE, env=_clean_env())
-                process.communicate(data.encode("utf-8"))
+                if not _write_via_subprocess(["pbcopy"], data.encode("utf-8"), env=_clean_env()):
+                    return False
                 # v2.2 R1 privacy: INFO 로그에선 길이만, content 는 DEBUG 만
                 logger.info(f"텍스트 클립보드 설정: {len(data)}자")
                 logger.debug(f"  preview: {data[:50]}{'...' if len(data) > 50 else ''}")
@@ -984,14 +1011,11 @@ class LinuxClipboard:
                 # 1순위: wl-copy (Wayland 표준)
                 # v2.2 R1 privacy: INFO 로그에선 길이만, content preview 는 DEBUG 만
                 if _sh.which("wl-copy"):
-                    try:
-                        process = subprocess.Popen(["wl-copy"], stdin=subprocess.PIPE)
-                        process.communicate(data.encode("utf-8"))
+                    if _write_via_subprocess(["wl-copy"], data.encode("utf-8")):
                         logger.info(f"텍스트 클립보드 설정 (wl-copy): {len(data)}자")
                         logger.debug(f"  preview: {data[:50]}{'...' if len(data) > 50 else ''}")
                         return True
-                    except Exception as e:
-                        logger.warning(f"wl-copy 실패 ({e}), 다음 도구 시도")
+                    logger.warning("wl-copy 실패, 다음 도구 시도")
 
                 # 2순위: X11 tools
                 if self.tool == "xclip":
@@ -1002,11 +1026,11 @@ class LinuxClipboard:
                     cmd = None
 
                 if cmd is not None:
-                    process = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-                    process.communicate(data.encode("utf-8"))
-                    logger.info(f"텍스트 클립보드 설정 ({cmd[0]}): {len(data)}자")
-                    logger.debug(f"  preview: {data[:50]}{'...' if len(data) > 50 else ''}")
-                    return True
+                    if _write_via_subprocess(cmd, data.encode("utf-8")):
+                        logger.info(f"텍스트 클립보드 설정 ({cmd[0]}): {len(data)}자")
+                        logger.debug(f"  preview: {data[:50]}{'...' if len(data) > 50 else ''}")
+                        return True
+                    logger.warning(f"{cmd[0]} 실패, Klipper D-Bus 폴백 시도")
 
                 # 최후 폴백: Klipper D-Bus (히스토리에만 들어갈 수 있음)
                 if self._klipper_iface:
@@ -1043,8 +1067,8 @@ class LinuxClipboard:
             else:
                 return False
 
-            process = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-            process.communicate(uri_list.encode("utf-8"))
+            if not _write_via_subprocess(cmd, uri_list.encode("utf-8")):
+                return False
             logger.info(f"파일 클립보드 설정: {len(file_paths)}개 항목")
             return True
         except Exception as e:
@@ -1062,8 +1086,8 @@ class LinuxClipboard:
             else:
                 return False
 
-            process = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-            process.communicate(image_bytes)
+            if not _write_via_subprocess(cmd, image_bytes):
+                return False
             logger.info("이미지 클립보드 설정 완료")
             return True
         except Exception as e:

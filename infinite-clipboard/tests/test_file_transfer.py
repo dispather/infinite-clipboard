@@ -182,6 +182,71 @@ def test_collect_metadata_folder(manager, tmp_path):
     assert all("\\" not in p for p in paths)
 
 
+def test_collect_metadata_multi_file_same_basename_deduped(manager, tmp_path):
+    """감사 Critical #6: 서로 다른 디렉토리의 동일 파일명이 다중 선택에 섞이면
+    과거엔 path_map 키 충돌(last-write-wins)로 앞 파일이 조립 단계에서 조용히
+    사라졌다. 이제 rel_path 를 유일화해 둘 다 살아남아야 한다."""
+    d1 = tmp_path / "a"; d1.mkdir()
+    d2 = tmp_path / "b"; d2.mkdir()
+    f1 = d1 / "report.txt"; f1.write_bytes(b"AAAA")
+    f2 = d2 / "report.txt"; f2.write_bytes(b"BBBBBB")
+
+    md = manager.collect_metadata([str(f1), str(f2)])
+    assert md.transfer_type == "files"
+    assert md.file_count == 2
+
+    paths = [e["path"] for e in md.files]
+    assert len(set(paths)) == 2, f"rel_path 충돌 미해결: {paths}"
+    # path_map 이 두 원본 절대경로를 모두 보존해야 함(둘 다 전송 가능해야 함)
+    assert set(md.path_map.values()) == {str(f1), str(f2)}
+
+
+def test_send_file_empty_file_emits_one_empty_chunk(manager, tmp_path):
+    """감사 Critical #5: 0바이트 파일은 과거엔 chunk_callback 이 한 번도 안
+    불려 수신측 assembled_* 파일이 안 만들어지고, assemble_file 이 "조립 파일
+    없음"으로 실패해 (.gitkeep 등이 섞인) 폴더/다중 전송 전체가 취소됐다."""
+    empty = tmp_path / "empty.bin"
+    empty.write_bytes(b"")
+
+    calls = []
+    sha = manager.send_file(str(empty), lambda idx, data, h: calls.append((idx, data, h)))
+
+    assert len(calls) == 1, "0바이트 파일은 정확히 1회의 빈 청크 콜백이 있어야 함"
+    assert calls[0] == (0, b"", xxhash.xxh64(b"").hexdigest())
+    assert sha == hashlib.sha256(b"").hexdigest()
+
+
+def test_empty_file_full_round_trip_assembles(manager, tmp_path):
+    """C5: send_file → receive_chunk → assemble_file 종단 — 0바이트 파일이
+    실제로 수신측에 조립되어야 한다(과거엔 assemble_file 이 False 반환)."""
+    empty = tmp_path / "empty.bin"
+    empty.write_bytes(b"")
+    tid = str(uuid.uuid4())
+
+    def cb(idx, data, h):
+        assert manager.receive_chunk(tid, "empty.bin", idx, data, h)
+
+    sha = manager.send_file(str(empty), cb)
+    assert manager.assemble_file(tid, "empty.bin", sha) is True
+    assembled = get_temp_dir(tid) / "assembled_empty.bin"
+    assert assembled.exists()
+    assert assembled.stat().st_size == 0
+    shutil.rmtree(get_temp_dir(tid), ignore_errors=True)
+
+
+def test_send_file_nonempty_multiple_of_chunk_size_no_extra_callback(manager, tmp_path):
+    """C5 회귀 가드: 정확히 CHUNK_SIZE 배수인 비어있지 않은 파일은 EOF 에서
+    빈 청크를 추가로 콜백하면 안 된다(0바이트 전용 가드가 chunk_index==0 에서만
+    발동해야 함)."""
+    from core.file_transfer import CHUNK_SIZE
+    f = tmp_path / "exact.bin"
+    f.write_bytes(b"Q" * CHUNK_SIZE)
+
+    calls = []
+    manager.send_file(str(f), lambda idx, data, h: calls.append((idx, len(data))))
+    assert calls == [(0, CHUNK_SIZE)], f"예상 밖 청크 콜백: {calls}"
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # 7. Active transfer 큐 (v2.1 단일 active invariant)
 # ═══════════════════════════════════════════════════════════════════════

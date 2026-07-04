@@ -7,6 +7,8 @@ import logging
 import platform
 import os
 import secrets
+import shutil
+import time
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from typing import Optional, List
@@ -14,6 +16,16 @@ from typing import Optional, List
 from core.protocol import generate_peer_id, is_valid_peer_id
 
 _logger = logging.getLogger(__name__)
+
+# C4: load_config() 가 손상된 settings.json 을 감지해 재생성했을 때 남기는 경고.
+# tray 가 아직 없는 시점(main() 이 load_config() 를 tray 생성보다 먼저 호출)에
+# 발생하므로, main() 이 get_last_config_warning() 으로 읽어 tray 준비 후 notify.
+_last_config_warning: Optional[str] = None
+
+
+def get_last_config_warning() -> Optional[str]:
+    """가장 최근 load_config() 호출에서 발생한 설정 파일 손상 경고 (없으면 None)."""
+    return _last_config_warning
 
 
 # v2.3: 파일 충돌 정책 화이트리스트 — file_transfer.py 가 import 해서 사용.
@@ -266,17 +278,45 @@ CONFIG_FILE = _get_config_dir() / "settings.json"
 LOG_FILE = _get_config_dir() / "infinite-clipboard.log"
 
 
+def _backup_corrupt_config() -> None:
+    """C4: 손상된 settings.json 을 타임스탬프 붙여 백업 (원본 보존, 재생성 전 안전망).
+
+    백업 자체가 실패해도(디스크 가득 참 등) 흡수하고 재생성 흐름은 계속 진행한다 —
+    백업은 안전망이지 필수 전제조건이 아니다.
+    """
+    try:
+        if CONFIG_FILE.exists():
+            backup_path = CONFIG_FILE.with_name(
+                f"{CONFIG_FILE.name}.corrupt-{int(time.time())}"
+            )
+            shutil.copy2(CONFIG_FILE, backup_path)
+            _logger.warning(f"손상된 설정 파일 백업: {backup_path}")
+    except OSError as e:
+        _logger.error(f"손상된 설정 파일 백업 실패: {e}")
+
+
 def load_config() -> AppConfig:
     """설정 파일에서 로드. 없으면 기본값 생성 후 저장."""
+    global _last_config_warning
+    _last_config_warning = None
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             return AppConfig(**{k: v for k, v in data.items() if k in AppConfig.__dataclass_fields__})
-        except (json.JSONDecodeError, TypeError) as e:
-            print(f"[경고] 설정 파일 로드 실패, 기본값 사용: {e}")
+        except (json.JSONDecodeError, TypeError, OSError) as e:
+            # C4: 과거엔 (json.JSONDecodeError, TypeError) 만 잡아 PermissionError 등
+            # OSError 계열은 아예 안 잡혀 앱이 tray 생기기도 전에 크래시했고, print()
+            # 는 windowed 빌드(콘솔 없음)에서 아무도 못 봤으며, 백업 없이 새 auth_key/
+            # peer_id 로 원본을 덮어써 그룹 동기화가 원인 불명으로 깨졌다.
+            _last_config_warning = (
+                f"설정 파일이 손상되어 기본값으로 재설정되었습니다 (원본은 "
+                f"settings.json.corrupt-* 로 백업됨). 원인: {e}"
+            )
+            _logger.warning(_last_config_warning)
+            _backup_corrupt_config()
 
-    # 설정 파일이 없으면 기본값 생성 후 즉시 저장
+    # 설정 파일이 없거나 손상되었으면 기본값 생성 후 즉시 저장
     config = AppConfig()
     save_config(config)
     return config
