@@ -303,12 +303,33 @@ class NetworkServer:
             sock.sendall(ack)
 
             client_name = payload["name"]
-            client_peer_id = payload["peer_id"]  # v3.0: 상대 peer_id 학습
+            claimed_peer_id = payload["peer_id"]  # v3.0: 상대가 자기신고한 peer_id
 
-            # 클라이언트 등록 (v3.0: name + peer_id)
+            # H1: peer_id 유일성 검증. HMAC 은 auth_key 보유만 증명할 뿐 peer_id
+            # 가 유일함을 보장하지 않는다 — 이미 다른 소켓이 같은 peer_id 로
+            # 등록돼 있으면 identity squatting(다른 peer 사칭) 또는 targeted
+            # relay(_socket_for_peer) 하이재킹 가능성이 있어 거부한다.
+            # client_peer_id(finally 의 on_client_disconnected 에 쓰임) 는
+            # 등록 성공 이후에만 채운다 — 거부된 시도의 peer_id 로 finally 가
+            # main.py 의 self.peers.pop(peer_id) 를 잘못 호출해 진짜 피해자의
+            # 등록을 지우는 것을 방지한다 (HMAC 실패 시의 기존 처리와 동일 패턴).
             with self.clients_lock:
-                self.clients[sock] = {"name": client_name, "peer_id": client_peer_id}
-                self._write_locks[sock] = threading.Lock()
+                conflict = any(
+                    s is not sock and info.get("peer_id") == claimed_peer_id
+                    for s, info in self.clients.items()
+                )
+                if not conflict:
+                    self.clients[sock] = {"name": client_name, "peer_id": claimed_peer_id}
+                    self._write_locks[sock] = threading.Lock()
+
+            if conflict:
+                logger.warning(
+                    f"핸드셰이크 거부 — peer_id {claimed_peer_id[:8]}… 이미 다른 "
+                    f"연결에서 사용 중 (identity squatting 의심): {address}"
+                )
+                return
+
+            client_peer_id = claimed_peer_id
 
             logger.info(
                 f"클라이언트 연결됨 (HMAC v{PROTOCOL_VERSION}): "

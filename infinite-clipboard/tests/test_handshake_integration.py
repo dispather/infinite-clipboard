@@ -253,3 +253,61 @@ def test_two_connections_use_different_nonces(monkeypatch):
         for c in clients:
             c.stop()
         server.stop()
+
+
+# ─── H1: peer_id 유일성 — identity squatting/라우팅 하이재킹 방어 ──────
+
+
+def test_duplicate_peer_id_second_connection_rejected(caplog):
+    """감사 High #1: auth_key 를 아는 두 번째 클라이언트가 이미 연결된 클라이언트와
+    동일한 peer_id 를 자기신고하면 거부돼야 한다. 과거엔 유일성 검증이 없어
+    identity squatting(다른 peer 사칭) → _socket_for_peer 라우팅 하이재킹이
+    가능했다 — C1(peer 신원 스푸핑) 수정을 이 경로로 우회할 수 있었다."""
+    caplog.set_level(logging.WARNING, logger="core.network")
+    port = _free_port()
+    server = NetworkServer(
+        port=port, auth_key="shared-secret",
+        tailscale_trust=False, bind_address="127.0.0.1",
+    )
+    server.start()
+
+    victim_peer = generate_peer_id()
+    victim = NetworkClient(
+        host="127.0.0.1", port=port,
+        auth_key="shared-secret", device_name="victim",
+        peer_id=victim_peer,
+    )
+    victim.start()
+
+    attacker = NetworkClient(
+        host="127.0.0.1", port=port,
+        auth_key="shared-secret", device_name="attacker",
+        peer_id=victim_peer,  # 동일한 peer_id 자기신고 — squatting 시도
+    )
+    attacker.reconnect_interval = 60  # 한 번만 시도
+
+    try:
+        assert _wait_until(lambda: victim.connected, timeout=3.0), \
+            "victim(첫 연결)은 정상 등록돼야 함"
+        assert _wait_until(lambda: len(server.clients) == 1, timeout=2.0)
+
+        attacker.start()
+        # 공격자는 handshake ACK 까지는 받아도 서버가 곧 연결을 닫음
+        _wait_until(lambda: not attacker.connected or attacker.connected, timeout=1.0)
+        time.sleep(0.5)
+
+        # 서버엔 여전히 victim 1개만 등록돼 있어야 함 (attacker 미등록)
+        with server.clients_lock:
+            assert len(server.clients) == 1, \
+                "attacker 가 victim 의 peer_id 로 추가 등록되면 안 됨"
+            registered = list(server.clients.values())[0]
+            assert registered["name"] == "victim"
+            assert registered["peer_id"] == victim_peer
+
+        warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("identity squatting" in m or "핸드셰이크 거부" in m for m in warnings), \
+            f"squatting 거부 로그가 없음: {warnings}"
+    finally:
+        attacker.stop()
+        victim.stop()
+        server.stop()
