@@ -71,6 +71,11 @@ def _make_app(mode, port, download_path) -> InfiniteClipboard:
         mode=mode, server_host="127.0.0.1", port=port, auth_key=_KEY,
         peer_id=generate_peer_id(), download_path=str(download_path),
         tailscale_trust=False, bind_address="127.0.0.1",
+        # v3.0.5 는 lazy_paste 기본 False(받기 모드) — 이 테스트는 실 X11 lazy
+        # provider round-trip 검증이 목적이므로 명시적으로 켠다. grace(기본 2.0s)
+        # 는 OS 자동 peek 과 진짜 paste 를 구분하는 가드인데, 이 테스트의 xclip
+        # paste 는 등록 직후(<1.3s) 일어나 grace 안에서 매번 거부당하므로 끈다.
+        lazy_paste=True, fetch_grace_seconds=0,
     )
     return InfiniteClipboard(cfg)
 

@@ -37,7 +37,7 @@ from core.lazy_clipboard import (
 )
 
 # python-xlib — 부재 시 ImportError → 팩토리가 잡아 None (fallback)
-from Xlib import X, display, Xatom
+from Xlib import X, display, error, Xatom
 from Xlib.protocol import event
 
 logger = logging.getLogger(__name__)
@@ -55,8 +55,11 @@ class X11LazyProvider(LazyClipboardProvider):
     """CLIPBOARD selection 을 소유하고 paste(ConvertSelection) 에 lazy 응답."""
 
     def __init__(self):
-        # Display 연결 — DISPLAY 미설정/연결 실패 시 예외 (팩토리가 잡음)
-        self._dpy = display.Display()
+        # Display 연결 — DISPLAY 미설정/연결 실패 시 예외 (팩토리가 잡음).
+        # 직전 연결이 방금 닫힌 직후라 X 서버가 정리 중이면 최초 handshake 에서
+        # 드물게 연결이 리셋된다 (CI Xvfb 관찰) — OpenClipboard 재시도
+        # (core/lazy_win.py _open_clipboard_retry) 와 동일한 이유로 짧게 재시도.
+        self._dpy = self._connect_retry()
         self._screen = self._dpy.screen()
         self._win = self._screen.root.create_window(
             0, 0, 1, 1, 0, self._screen.root_depth,
@@ -81,6 +84,17 @@ class X11LazyProvider(LazyClipboardProvider):
 
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+
+    @staticmethod
+    def _connect_retry(retries: int = 5, delay: float = 0.1):
+        last: Optional[Exception] = None
+        for _ in range(retries):
+            try:
+                return display.Display()
+            except (OSError, error.ConnectionClosedError, error.DisplayConnectionError) as e:
+                last = e
+                time.sleep(delay)
+        raise last if last is not None else OSError("X11 Display 연결 실패")
 
     # ── LazyClipboardProvider 인터페이스 ──────────────────────────────
 
