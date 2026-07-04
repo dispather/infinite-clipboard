@@ -1013,8 +1013,20 @@ class FileTransferManager:
 
     @staticmethod
     def _unique_path(path: Path) -> Path:
-        """중복되지 않는 파일 경로를 반환한다."""
-        if not path.exists():
+        """중복되지 않는 파일 경로를 반환한다.
+
+        exists() 판단 자체가 OSError 로 실패하면 판단 불가를 빈 자리로 오판해
+        기존 파일을 덮어쓰지 않도록, "존재한다"고 가정하고 다음 후보로 넘어간다.
+        """
+
+        def _exists_or_assume(p: Path) -> bool:
+            try:
+                return p.exists()
+            except OSError as e:
+                logger.warning(f"_unique_path exists 확인 실패 ({p.name}): {e}")
+                return True
+
+        if not _exists_or_assume(path):
             return path
 
         stem = path.stem
@@ -1023,7 +1035,7 @@ class FileTransferManager:
         counter = 1
         while True:
             new_path = parent / f"{stem} ({counter}){suffix}"
-            if not new_path.exists():
+            if not _exists_or_assume(new_path):
                 return new_path
             counter += 1
 
@@ -1123,7 +1135,14 @@ class FileTransferManager:
             ts = time.strftime("%Y%m%d-%H%M%S", time.localtime())
             renamed = final_path.parent / f"{final_path.stem}.{ts}{final_path.suffix}"
             # 1초 내 중복 시 counter 폴백 (timestamp 충돌 방지).
-            if renamed.exists():
+            try:
+                renamed_exists = renamed.exists()
+            except OSError as e:
+                logger.warning(
+                    f"[{transfer_id}] rename_with_timestamp exists 확인 실패 ({renamed.name}): {e}"
+                )
+                renamed_exists = True
+            if renamed_exists:
                 renamed = self._unique_path(renamed)
             return renamed
 
