@@ -29,7 +29,7 @@ from config import AppConfig
 from core.file_transfer import Checkpoint, CHUNK_SIZE
 from core.network import NetworkClient, NetworkServer
 from core.protocol import generate_peer_id
-from main import InfiniteClipboard
+from main import FetchFailure, InfiniteClipboard
 
 
 def _free_port() -> int:
@@ -217,7 +217,7 @@ def test_fetch_fail_expired_orchestration(tmp_path):
         with server_app._offer_lock:
             server_app.current_offer["created_at"] = time.time() - 3600 * 48
 
-        with pytest.raises((RuntimeError, TimeoutError)) as exc:
+        with pytest.raises(FetchFailure) as exc:
             fetch_cb(offer["offer_id"])
         assert "expired" in str(exc.value).lower(), f"실패 사유에 expired 없음: {exc.value}"
     finally:
@@ -303,7 +303,7 @@ def test_connection_drop_mid_transfer_does_not_hang(tmp_path):
         offer, fetch_cb = stub.captured
 
         start = time.time()
-        with pytest.raises((RuntimeError, TimeoutError)):
+        with pytest.raises(FetchFailure):
             fetch_cb(offer["offer_id"])
         elapsed = time.time() - start
         assert killed.is_set(), "첫 청크를 받기 전에 fetch 가 끝남 (재현 실패)"

@@ -11,6 +11,8 @@
 
 import os
 import sys
+import platform
+import subprocess
 
 _parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _parent not in sys.path:
@@ -36,6 +38,22 @@ def _format_eta(seconds: float) -> str:
     if seconds < 3600:
         return f"{int(seconds // 60)}분 {int(seconds % 60)}초 남음"
     return f"{int(seconds // 3600)}시간 남음"
+
+
+def _open_folder(path: str) -> None:
+    """다운로드 폴더를 OS 파일 매니저로 연다 (ui/tray.py:_view_log 의 OS 분기 차용,
+    대상이 파일이 아닌 디렉토리라는 점만 다름 — Linux 는 kate 필요 없이 xdg-open 하나면 됨).
+    """
+    try:
+        system = platform.system()
+        if system == "Linux":
+            subprocess.Popen(["xdg-open", path])
+        elif system == "Darwin":
+            subprocess.Popen(["open", path])
+        elif system == "Windows":
+            os.startfile(path)
+    except Exception:
+        pass
 
 
 class TransferWindow(customtkinter.CTkToplevel):
@@ -193,6 +211,8 @@ class TransferWindow(customtkinter.CTkToplevel):
             recv_ids.add(oid)
             if oid not in self._receivable_widgets:
                 self._add_receivable_widget(entry)
+            else:
+                self._sync_receivable_widget(oid, entry)
         for oid in list(self._receivable_widgets):
             if oid not in recv_ids:
                 self._remove_receivable_widget(oid)
@@ -408,7 +428,55 @@ class TransferWindow(customtkinter.CTkToplevel):
             font=t.FONT_META, text_color=t.spool_dim,
         ).pack(side="right", padx=(0, t.SP[2]))
 
-        self._receivable_widgets[oid] = {"frame": frame, "btn": recv_btn, "requested": False}
+        reason_label = customtkinter.CTkLabel(
+            frame, text="", font=t.FONT_META, text_color=t.signal_fail, anchor="w",
+        )
+
+        w = {
+            "frame": frame, "btn": recv_btn, "requested": False,
+            "reason_label": reason_label, "last_failure_at": None,
+        }
+        self._receivable_widgets[oid] = w
+
+        # 앱 재시작 등으로 이미 last_failure 가 실려 도착한 entry — 바로 재시도 상태로.
+        failure = entry.get("last_failure")
+        if failure:
+            self._set_receivable_retry_state(w, failure)
+
+    def _set_receivable_retry_state(self, w: dict, failure: dict) -> None:
+        """받기 실패(재시도 가능) 상태로 위젯 갱신.
+
+        M6: 실패해도 위젯을 재사용하는 한 "requested" 플래그가 리셋 안 되면
+        버튼이 영구 고장된다. 여기선 main.py 가 보낸 last_failure 타임스탬프
+        (서버 쪽 실제 상태 변화)를 근거로만 리셋하므로 그 회귀를 재도입하지 않는다.
+        """
+        w["requested"] = False
+        w["last_failure_at"] = failure.get("failed_at")
+        try:
+            w["btn"].configure(text="재시도", state="normal")
+        except Exception:
+            pass
+        label = w.get("reason_label")
+        if label is not None:
+            try:
+                label.configure(text=failure.get("message", "실패 — 재시도 가능"))
+                if not label.winfo_ismapped():
+                    label.pack(fill="x", padx=t.SP[3], pady=(0, t.SP[2]))
+            except Exception:
+                pass
+
+    def _sync_receivable_widget(self, offer_id: str, entry: dict) -> None:
+        """이미 있는 받기 위젯을 최신 entry 와 맞춘다 — last_failure 가 새로 생기면
+        (또는 다른 사유로 갱신되면) 재시도 상태로 전환."""
+        w = self._receivable_widgets.get(offer_id)
+        if not w:
+            return
+        failure = entry.get("last_failure")
+        if not failure:
+            return
+        failed_at = failure.get("failed_at")
+        if failed_at and failed_at != w.get("last_failure_at"):
+            self._set_receivable_retry_state(w, failure)
 
     def _remove_receivable_widget(self, offer_id: str) -> None:
         w = self._receivable_widgets.pop(offer_id, None)
@@ -419,7 +487,7 @@ class TransferWindow(customtkinter.CTkToplevel):
                 pass
 
     def _on_receive_click(self, offer_id: str) -> None:
-        """받기 버튼 → receive_requests.json 에 offer_id append (main 폴링 처리)."""
+        """받기/재시도 버튼 → receive_requests.json 에 offer_id append (main 폴링 처리)."""
         w = self._receivable_widgets.get(offer_id)
         if not w or w.get("requested"):
             return
@@ -442,6 +510,12 @@ class TransferWindow(customtkinter.CTkToplevel):
         # 즉시 UI 피드백 (완료되면 main 이 state 에서 제거 → 위젯 사라짐)
         w["requested"] = True
         w["btn"].configure(state="disabled", text="받는 중")
+        label = w.get("reason_label")
+        if label is not None and label.winfo_ismapped():
+            try:
+                label.pack_forget()
+            except Exception:
+                pass
 
     def _update_active_widget(self, transfer_id: str, info: dict) -> None:
         w = self._active_widgets.get(transfer_id)
@@ -515,6 +589,17 @@ class TransferWindow(customtkinter.CTkToplevel):
             frame, text=f"{_format_size(total_size)}  ·  {_format_time(completed_at)}",
             font=t.FONT_META, text_color=t.spool_dim,
         ).pack(side="right", padx=(t.SP[2], t.SP[3]))
+
+        # 받기 버튼으로 저장된 항목만 최종 위치가 있음(config.download_path) — lazy-paste
+        # 는 임시 스테이징으로 가서 "폴더 열기" 개념 자체가 없다.
+        saved_dir = entry.get("path")
+        if entry.get("via_receive_button") and saved_dir:
+            customtkinter.CTkButton(
+                frame, text="폴더 열기", width=68, height=24,
+                corner_radius=t.RADIUS["sm"], fg_color=t.relay_raised,
+                hover_color=t.signal_ok, text_color=t.terminal_text, font=t.FONT_META,
+                command=lambda p=saved_dir: _open_folder(p),
+            ).pack(side="right", padx=(t.SP[1], 0))
 
         # 중앙: 파일명
         customtkinter.CTkLabel(

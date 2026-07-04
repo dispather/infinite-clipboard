@@ -104,6 +104,40 @@ class _GracePeek(Exception):
     """
 
 
+class FetchFailure(Exception):
+    """_fetch_offer 실패 시 원인 코드(reason)를 담아 던진다 (이어받기 재시도 UI 용).
+
+    reason 은 FAIL_REASON_INFO 의 키와 일치 — 네트워크 FETCH_FAIL 5종(core.protocol)
+    이거나, 로컬 전용 사유(unknown_offer/no_space/timeout/fetch_empty/save_error) 중 하나.
+    """
+
+    def __init__(self, reason: str, detail: str = ""):
+        self.reason = reason
+        super().__init__(detail or reason)
+
+
+# 받기(_receive_offer) 실패 원인 → (사용자 메시지, 재시도 가능 여부).
+# terminal(False): 같은 offer_id 로 재시도해도 동일하게 실패할 게 확실 — receivable
+#   목록에서 제거(기존 M6 동작 그대로). retryable(True): 일시적 원인으로 간주 —
+#   receivable 엔트리를 살려두고 전송창에 "재시도" 버튼을 남긴다.
+FAIL_REASON_INFO = {
+    FETCH_FAIL_SUPERSEDED: ("원본에서 새로 복사됨 — 이전 파일은 받을 수 없음", False),
+    FETCH_FAIL_EXPIRED: ("전송 유효시간 만료 — 원본에서 다시 복사해주세요", False),
+    FETCH_FAIL_MISSING: ("원본 파일이 삭제/이동됨", False),
+    "unknown_offer": ("전송 정보가 만료됨 — 원본에서 다시 복사해주세요", False),
+    FETCH_FAIL_OFFLINE: ("원본 PC 연결 끊김", True),
+    FETCH_FAIL_ERROR: ("전송 중 오류 발생", True),
+    "cancelled": ("전송이 취소됨", True),
+    "chunk_hash_mismatch": ("데이터 손상 감지", True),
+    "assemble_failed": ("파일 조립 실패", True),
+    "source_error": ("원본 측 오류", True),
+    "timeout": ("응답 시간 초과", True),
+    "no_space": ("저장 공간 부족", True),
+    "save_error": ("저장 중 오류(권한/디스크)", True),
+    "fetch_empty": ("알 수 없는 오류", True),
+}
+
+
 class InfiniteClipboard:
     """앱 핵심 로직 — 네트워크 + 클립보드 + 파일전송 조립"""
 
@@ -1042,7 +1076,7 @@ class InfiniteClipboard:
             with self._offer_lock:
                 offer = self.received_offers.get(offer_id)
             if offer is None:
-                raise RuntimeError(f"알 수 없는 offer: {offer_id}")
+                raise FetchFailure("unknown_offer", f"알 수 없는 offer: {offer_id}")
             source_peer = offer["source_peer"]
             # 리뷰 발견: received_offers 는 최신 offer 1개만 유지하는 supersede
             # 캐시라, 이 fetch 가 끝나기 전에 다른 offer(다른 peer 포함)가 도착
@@ -1053,7 +1087,7 @@ class InfiniteClipboard:
             total = int(offer.get("total_size", 0))
             # Rec 3: requester 가 fetch 전에 저장 공간 검사 (실제 저장 위치 근사)
             if not self.file_manager.check_disk_space(total):
-                raise RuntimeError("저장 공간 부족")
+                raise FetchFailure("no_space", "저장 공간 부족")
             event = threading.Event()
             with self._active_fetch_lock:
                 self._active_fetch = {
@@ -1069,15 +1103,15 @@ class InfiniteClipboard:
                 self._send_raw_to(raw, source_peer)
                 timeout = self._fetch_timeout(total)
                 if not event.wait(timeout=timeout):
-                    raise TimeoutError(f"fetch 타임아웃 ({timeout:.0f}s)")
+                    raise FetchFailure("timeout", f"fetch 타임아웃 ({timeout:.0f}s)")
                 with self._active_fetch_lock:
                     af = self._active_fetch or {}
                     fail = af.get("fail")
                     paths = af.get("paths")
                 if fail:
-                    raise RuntimeError(f"fetch 실패: {fail}")
+                    raise FetchFailure(fail, f"fetch 실패: {fail}")
                 if not paths:
-                    raise RuntimeError("fetch 결과 없음")
+                    raise FetchFailure("fetch_empty", "fetch 결과 없음")
                 # v3.0 S3: 이미지는 조립된 단일 파일을 바이트로 읽어 data 로 반환
                 # (provider 가 image/png 으로 OS 클립보드에 제공). 파일은 paths 그대로.
                 if offer.get("kind") == CLIP_OFFER_KIND_IMAGE:
@@ -1261,6 +1295,54 @@ class InfiniteClipboard:
         if existed:
             self._save_transfer_state(force=True)
 
+    def _mark_receivable_failed(self, offer_id, reason) -> None:
+        """받기 실패(재시도 가능) — receivable 목록에서 지우지 않고 사유만 기록.
+
+        M6 은 실패 시 무조건 clear 해 위젯의 requested 플래그가 리셋 안 되는
+        문제를 고쳤다(_handle_receive_failure 의 terminal 분기는 그 동작 그대로
+        유지). retryable 원인은 대신 entry 를 살려두고 last_failure 타임스탬프를
+        남긴다 — 전송창이 이 타임스탬프 변화를 보고 requested 를 명시적으로
+        리셋해 "재시도" 버튼을 다시 활성화한다(M6 재발 없이 재시도 허용).
+        """
+        message, _retryable = FAIL_REASON_INFO.get(reason, FAIL_REASON_INFO["error"])
+        with self._offer_lock:
+            entry = self.receivable_offers.get(offer_id)
+            if entry is None:
+                return
+            entry["last_failure"] = {
+                "reason": reason, "message": message, "failed_at": time.time(),
+            }
+        self._save_transfer_state(force=True)
+
+    def _handle_receive_failure(self, offer_id, name, reason) -> None:
+        """[받기] 실패 분기 — terminal 은 목록 제거, retryable 은 재시도 가능하게 보존."""
+        message, retryable = FAIL_REASON_INFO.get(reason, FAIL_REASON_INFO["error"])
+        logger.warning(f"[받기] 실패: offer={offer_id[:8]}… reason={reason} retryable={retryable}")
+        if retryable:
+            self._mark_receivable_failed(offer_id, reason)
+            self._notify("받기 실패", f"{name} — {message} (재시도 가능)")
+        else:
+            self._clear_receivable(offer_id)
+            self._notify("받기 실패", f"{name} — {message}")
+
+    def _annotate_completed_transfer(self, transfer_id, **fields) -> None:
+        """완료 목록의 기존 엔트리에 필드 추가 (예: 받기 버튼 저장 경로).
+
+        _finish_transfer 가 만드는 엔트리는 fetch 완료 시점 기준이라 아직
+        로컬 저장 위치를 모른다 — _receive_offer 가 download_path 복사에
+        성공한 뒤 사후 보강한다. entry 가 20건 cap 으로 이미 evict 됐으면
+        조용히 무시(폴더 열기 버튼만 안 뜨는 낮은 영향).
+        """
+        updated = False
+        with self._progress_lock:
+            for entry in self._completed_transfers:
+                if entry.get("transfer_id") == transfer_id:
+                    entry.update(fields)
+                    updated = True
+                    break
+        if updated:
+            self._save_transfer_state(force=True)
+
     def _notify(self, title, message) -> None:
         """일반 OS 알림 (크기 무관). tray 우선, 없으면 plyer (비동기).
 
@@ -1300,14 +1382,14 @@ class InfiniteClipboard:
         name = info.get("name", "파일") if info else "파일"
         try:
             fetched = self._fetch_offer(offer_id)  # staging 경로 (메커니즘 재사용)
+        except FetchFailure as e:
+            self._handle_receive_failure(offer_id, name, e.reason)
+            return
         except Exception as e:
-            logger.warning(f"[받기] fetch 실패: {e}")
-            # M6: clear 안 하면 이 offer_id 가 receivable_offers 에 영원히 남고,
-            # 전송창은 같은 위젯을 재사용하므로 최초 클릭 때 세운 "requested"
-            # 플래그가 리셋 안 돼 받기 버튼이 영구 고장(재시도 불가)된다. 실패는
-            # 이 offer 를 포기한다는 뜻이므로 목록에서 제거 — 필요하면 재복사 요청.
-            self._clear_receivable(offer_id)
-            self._notify("받기 실패", f"{name} — 원본에서 받을 수 없음")
+            # _fetch_offer 가 FetchFailure 로 감싸지 않은 미분류 예외(네트워크 전송 등) —
+            # 일시적일 가능성이 높다고 보고 retryable 로 취급.
+            logger.warning(f"[받기] fetch 실패(미분류): {e}")
+            self._handle_receive_failure(offer_id, name, "error")
             return
 
         import shutil
@@ -1325,13 +1407,14 @@ class InfiniteClipboard:
                 saved += 1
         except Exception as e:
             logger.error(f"[받기] 저장 실패: {e}")
-            # M6: fetch 는 성공했지만 로컬 저장 실패(권한/디스크 등)도 동일하게
-            # clear — 안 하면 위와 같은 이유로 받기 버튼이 영구 고장된다.
-            self._clear_receivable(offer_id)
-            self._notify("받기 실패", f"{name} — 저장 오류")
+            # fetch 자체는 성공했으니 offer_id 는 여전히 유효 — save_error 는
+            # retryable 로 분류되어 receivable 목록에 남는다(재시도는 재fetch
+            # 부터 처음부터 다시, 스테이징 바이트 재사용 안 함 — 단순성 우선).
+            self._handle_receive_failure(offer_id, name, "save_error")
             return
 
         self._clear_receivable(offer_id)
+        self._annotate_completed_transfer(offer_id, path=dest_dir, via_receive_button=True)
         self._notify("받기 완료", f"{name} — {saved}개 → {dest_dir}")
         logger.info(f"[받기] 완료: {saved}개 → {dest_dir}")
 

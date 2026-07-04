@@ -22,7 +22,7 @@ import pytest
 
 from config import AppConfig
 from core.protocol import generate_peer_id
-from main import InfiniteClipboard
+from main import FetchFailure, InfiniteClipboard
 
 
 def _free_port() -> int:
@@ -246,7 +246,7 @@ def test_lazy_fetch_missing_files_graceful(tmp_path):
         # 원본 삭제 → source 의 _handle_clip_fetch 가 missing 으로 거부
         f1.unlink()
 
-        with pytest.raises((RuntimeError, TimeoutError)) as exc:
+        with pytest.raises(FetchFailure) as exc:
             fetch_cb(offer["offer_id"])
         # FETCH_FAIL 사유가 전달됐는지 (missing) — graceful 실패
         assert "missing" in str(exc.value).lower() or "fail" in str(exc.value).lower()
@@ -260,7 +260,7 @@ def test_lazy_unknown_offer_raises(tmp_path):
     server_app, client_app, _server_stub, _client_stub = _setup_pair(tmp_path)
     try:
         import uuid
-        with pytest.raises(RuntimeError):
+        with pytest.raises(FetchFailure):
             client_app._fetch_offer(str(uuid.uuid4()))
     finally:
         client_app.stop()

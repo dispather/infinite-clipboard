@@ -46,8 +46,8 @@ def gui_root():
         pass
 
 
-def _write_state(path, receivable):
-    state = {"active": {}, "completed": [], "receivable": receivable}
+def _write_state(path, receivable, completed=None):
+    state = {"active": {}, "completed": completed or [], "receivable": receivable}
     with open(path, "w", encoding="utf-8") as f:
         json.dump(state, f)
 
@@ -150,6 +150,87 @@ def test_poll_state_does_not_perform_file_io_directly(gui_root, tmp_path, monkey
 
         assert not calls, (
             f"M15 회귀 — _poll_state 가 메인스레드에서 직접 파일을 읽음 (호출 {len(calls)}회)"
+        )
+    finally:
+        win.destroy()
+
+
+def test_receivable_widget_becomes_retryable_on_last_failure(gui_root, tmp_path):
+    """2026-07-04: retryable 실패(last_failure)가 entry 에 실리면 위젯이 "재시도"
+    상태로 전환되고 requested 가 명시적으로 리셋되는지 (M6 회귀 방지 핵심 동작)."""
+    state_file = tmp_path / "transfer_state.json"
+    entry = _make_receivable("clip.png", 555, "image")
+    oid = entry["offer_id"]
+    _write_state(state_file, [entry])
+    win = _make_window(gui_root, state_file)
+    try:
+        # 사용자가 받기 클릭 → 응답 대기 중 상태를 시뮬레이션.
+        w = win._receivable_widgets[oid]
+        w["requested"] = True
+        w["btn"].configure(state="disabled", text="받는 중")
+
+        # main.py 가 retryable 실패로 last_failure 를 채운 상태를 흉내.
+        entry_failed = dict(entry)
+        entry_failed["last_failure"] = {
+            "reason": "offline", "message": "원본 PC 연결 끊김", "failed_at": 123.0,
+        }
+        with win._state_lock:
+            win._latest_state = {"active": {}, "completed": [], "receivable": [entry_failed]}
+        win._poll_state()
+        win.update()
+
+        assert w["requested"] is False, "M6 회귀 — last_failure 갱신 후 requested 가 리셋 안 됨"
+        assert w["btn"].cget("text") == "재시도"
+        assert w["btn"].cget("state") == "normal"
+        assert w["reason_label"].cget("text") == "원본 PC 연결 끊김"
+        assert w["reason_label"].winfo_ismapped()
+    finally:
+        win.destroy()
+
+
+def _find_completed_row(container, filename):
+    """완료 섹션(CTkScrollableFrame) 안에서 filename 라벨을 가진 행 프레임을 찾는다."""
+    import customtkinter
+    for frame in container.winfo_children():
+        for child in frame.winfo_children():
+            if isinstance(child, customtkinter.CTkLabel) and child.cget("text") == filename:
+                return frame
+    return None
+
+
+def _has_open_folder_button(frame):
+    import customtkinter
+    return any(
+        isinstance(child, customtkinter.CTkButton) and child.cget("text") == "폴더 열기"
+        for child in frame.winfo_children()
+    )
+
+
+def test_completed_widget_shows_open_folder_button_only_for_receive_flow(gui_root, tmp_path):
+    """2026-07-04: via_receive_button+path 가 있는 완료 항목만 '폴더 열기' 버튼이
+    떠야 한다 — lazy-paste 완료 항목(그 필드 없음)엔 버튼이 없어야 한다."""
+    state_file = tmp_path / "transfer_state.json"
+    receive_entry = {
+        "transfer_id": "t-receive", "filename": "photo.png", "total_size": 100,
+        "direction": "receive", "completed_at": 1.0,
+        "path": str(tmp_path / "downloads"), "via_receive_button": True,
+    }
+    lazy_entry = {
+        "transfer_id": "t-lazy", "filename": "clip.png", "total_size": 50,
+        "direction": "receive", "completed_at": 2.0,
+    }
+    _write_state(state_file, [], completed=[receive_entry, lazy_entry])
+    win = _make_window(gui_root, state_file)
+    try:
+        receive_frame = _find_completed_row(win._completed_frame, "photo.png")
+        lazy_frame = _find_completed_row(win._completed_frame, "clip.png")
+        assert receive_frame is not None and lazy_frame is not None
+
+        assert _has_open_folder_button(receive_frame), (
+            "받기 완료 항목에 '폴더 열기' 버튼이 없음"
+        )
+        assert not _has_open_folder_button(lazy_frame), (
+            "lazy-paste 완료 항목에 '폴더 열기' 버튼이 잘못 뜸"
         )
     finally:
         win.destroy()
