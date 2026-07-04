@@ -5,7 +5,7 @@ description = "Tailscale VPN으로 연결된 PC 간 클립보드/파일 실시�
 requires-python = ">=3.10"
 
 dependencies = [
-    "pillow>=10.0.0",
+    "pillow>=12.2.0",  # Dependabot #1-5 (2026-07): PSD/FITS/PDF OOB·DoS CVE, 12.2.0 에서 패치
     "pystray>=0.19.0",
     "customtkinter>=5.2.0",
     "plyer>=2.1.0",
