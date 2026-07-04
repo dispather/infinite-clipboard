@@ -50,6 +50,30 @@ def test_save_config_sets_0600(isolated_config):
     assert mode == 0o600, f"settings.json 권한이 0o{mode:o} (기대: 0o600)"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX 파일 권한만 검증")
+def test_save_config_no_toctou_loose_permission_window(isolated_config, monkeypatch):
+    """L6: open() 후 chmod() 로 조이던 옛 방식은 그 사이 잠깐 기본 umask 권한
+    (예: 0o644)으로 auth_key 가 노출될 여지가 있었다. 쓰기가 진행되는 그
+    순간(json.dump 호출 시점)에도 이미 0o600 이어야 TOCTOU 창이 없는 것."""
+    import config as cfg
+
+    observed_modes = []
+    original_dump = json.dump
+
+    def spying_dump(obj, fp, **kwargs):
+        mode = os.stat(fp.fileno()).st_mode & 0o777
+        observed_modes.append(mode)
+        return original_dump(obj, fp, **kwargs)
+
+    monkeypatch.setattr(cfg.json, "dump", spying_dump)
+    save_config(AppConfig())
+
+    assert observed_modes == [0o600], (
+        f"L6 회귀 — 쓰기 도중 파일 권한이 0o600 이 아님: "
+        f"{[format(m, 'o') for m in observed_modes]}"
+    )
+
+
 def test_save_load_roundtrip(isolated_config):
     c = AppConfig(mode="server", port=12345)
     save_config(c)
@@ -104,6 +128,118 @@ def test_unreadable_config_file_does_not_crash(isolated_config, monkeypatch):
     monkeypatch.setattr(builtins, "open", failing_open)
     loaded = load_config()  # 여기서 예외가 새면 테스트가 실패한다
     assert loaded.mode == "client"
+
+
+def test_weak_auth_key_correction_is_persisted(isolated_config):
+    """H4: settings.json 에 약한 auth_key(숫자 PIN)가 있으면 load_config() 가
+    강한 키로 교정할 뿐 아니라 그 교정값을 디스크에도 즉시 저장해야 한다.
+    저장 안 하면 재시작마다 다시 감지→'다른' 랜덤 키로 재교정이 반복돼
+    그룹 공유 auth_key 가 계속 어긋난다."""
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    isolated_config.write_text(
+        json.dumps({"mode": "client", "auth_key": "123456"}), encoding="utf-8"
+    )
+
+    first = load_config()
+    assert first.auth_key != "123456"
+
+    # 디스크에 교정값이 반영됐는지 — 원본 약한 값이 남아있으면 회귀
+    on_disk = json.loads(isolated_config.read_text(encoding="utf-8"))
+    assert on_disk["auth_key"] == first.auth_key
+
+    # 재시작(재로드) 해도 같은 키 유지 — 저장 안 되면 매번 다른 랜덤 키가 나옴
+    second = load_config()
+    assert second.auth_key == first.auth_key
+
+
+def test_missing_peer_id_field_is_persisted(isolated_config):
+    """H4: peer_id 필드가 아예 없는 구버전 settings.json(v3.0 이전 업그레이드
+    시나리오)을 로드하면 자동 생성된 peer_id 가 즉시 저장되어야 한다 — 안 그러면
+    재시작마다 다른 peer_id 가 생겨 '재연결해도 같은 id' invariant 가 깨진다."""
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    isolated_config.write_text(
+        json.dumps({"mode": "client", "port": 9999}), encoding="utf-8"
+    )
+
+    first = load_config()
+    assert first.peer_id
+
+    on_disk = json.loads(isolated_config.read_text(encoding="utf-8"))
+    assert on_disk.get("peer_id") == first.peer_id
+
+    second = load_config()
+    assert second.peer_id == first.peer_id
+
+
+def test_valid_config_does_not_rewrite_file(isolated_config, monkeypatch):
+    """H4 부작용 가드: 이미 유효한 설정은 매 load_config() 마다 불필요하게
+    재저장되면 안 된다(잦은 디스크 쓰기/atomic replace 노이즈)."""
+    c = AppConfig(mode="server", port=23456)
+    save_config(c)
+
+    import config as cfg
+    calls = []
+    monkeypatch.setattr(cfg, "save_config", lambda cfg_obj: calls.append(cfg_obj))
+
+    load_config()
+    assert calls == [], "변경 없는 유효한 설정인데 save_config 가 호출됨"
+
+
+def test_transient_save_failure_during_autocorrect_does_not_corrupt_original(
+    isolated_config, monkeypatch,
+):
+    """리뷰 발견: H4 자동교정 저장(save_config)이 원본 읽기/파싱과 같은 try 안에
+    있으면, 저장 자체가 (디스크 가득/AV 락 등으로) OSError 를 던졌을 때 "파일이
+    손상됐다"고 오판해 방금 읽은 *유효한* 원본을 손상 취급으로 백업하고 새
+    auth_key/peer_id 로 덮어썼다 — H4 가 막으려던 정체성 교체 버그를 다른
+    경로로 재현하는 것. 저장 실패는 원본을 건드리지 않고 조용히 재시도 대상으로만
+    남아야 한다."""
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    original_text = json.dumps({"mode": "client", "auth_key": "123456"})  # 약함 → 교정 유발
+    isolated_config.write_text(original_text, encoding="utf-8")
+
+    from config import get_last_config_warning
+    import config as cfg
+
+    def failing_save(_config):
+        raise OSError("simulated transient disk-full during auto-correct save")
+
+    monkeypatch.setattr(cfg, "save_config", failing_save)
+
+    loaded = load_config()  # 예외가 새면 테스트 실패
+
+    # 원본 파일은 그대로(손상 백업이 생기면 안 됨) — 저장이 실패했을 뿐 원본은 유효했음
+    assert isolated_config.read_text(encoding="utf-8") == original_text, (
+        "저장 실패인데 원본 settings.json 이 변경됨(손상 처리로 오인됐을 위험)"
+    )
+    backups = list(isolated_config.parent.glob(f"{isolated_config.name}.corrupt-*"))
+    assert not backups, f"저장 실패를 손상으로 오인해 백업이 생김: {backups}"
+
+    # 메모리상으로는 여전히 교정된(강한) 값을 반환해야 함
+    assert loaded.auth_key != "123456"
+
+    # 이 상황을 "손상"으로 취급하지 않았으므로 손상 경고도 없어야 함
+    assert get_last_config_warning() is None
+
+
+def test_persist_corrections_false_skips_autosave(isolated_config, monkeypatch):
+    """리뷰 발견(레이스 완화): persist_corrections=False 로 호출하면 교정이
+    필요해도 save_config 를 호출하지 않아야 한다 — 짧게 사는 --window 서브
+    프로세스가 메인 프로세스와 동시에 저장을 시도해 서로 다른 랜덤 identity
+    를 쓰는 레이스를 피하기 위함."""
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    isolated_config.write_text(
+        json.dumps({"mode": "client", "auth_key": "123456"}), encoding="utf-8"
+    )
+
+    import config as cfg
+    calls = []
+    monkeypatch.setattr(cfg, "save_config", lambda cfg_obj: calls.append(cfg_obj))
+
+    loaded = load_config(persist_corrections=False)
+
+    assert loaded.auth_key != "123456"  # 메모리상 교정은 여전히 적용됨
+    assert calls == [], "persist_corrections=False 인데 save_config 가 호출됨"
 
 
 def test_load_config_clears_stale_warning_on_success(isolated_config):

@@ -134,8 +134,10 @@ class InfiniteClipboard:
         self._progress_lock = threading.Lock()
         self._last_state_save = 0.0    # 마지막 상태 저장 시각 (스로틀링용)
 
-        # 클립보드 이력 (최근 N개)
+        # 클립보드 이력 (최근 N개). H2: 로컬 클립보드 모니터 스레드와 네트워크
+        # 수신 스레드가 동시에 mutate 할 수 있어 락으로 보호.
         self.clipboard_history = []
+        self._history_lock = threading.Lock()
 
         # 네트워크 (모드에 따라 서버 또는 클라이언트)
         self.server = None
@@ -175,6 +177,13 @@ class InfiniteClipboard:
         # _active_fetch 필드 접근 가드 — 네트워크 스레드(시그널)와 fetch 스레드(대기)가
         # 공유하므로 _fetch_lock(=fetch 가 점유 중) 과 별개 짧은 락으로 보호 (deadlock 회피).
         self._active_fetch_lock = threading.Lock()
+        # [receiver 측] 리뷰 발견: H7 의 _source_peer_for_transfer 가 received_offers
+        # (offer_id 1개만 유지하는 supersede 캐시) 를 조회했는데, 무관한 다른 peer 의
+        # 새 offer 가 broadcast 되기만 해도 그 캐시가 통째로 교체돼 진행 중이던 전송의
+        # source_peer 조회가 실패했다(→ MSG_FILE_ERROR 가 broadcast 로 새서 H7 이 막던
+        # 정보 노출이 재현). offer 수명과 무관하게 transfer_id 별로 source_peer 를
+        # 별도 보관 — _transfers_lock 으로 보호(다른 전송 상태 dict 와 동일 락 재사용).
+        self._transfer_source_peers = {}
 
         # 상태 변경 콜백 (UI 갱신용, TrayApp에서 설정)
         self.on_state_changed = None
@@ -334,18 +343,25 @@ class InfiniteClipboard:
         - receiver_peer == 다른 peer → relay only (로컬 처리 안 함)
         - receiver_peer 없음("") → 로컬 처리 + broadcast (eager 호환)
         폴더 규칙 #3: 바이너리 chunk 는 별도(_raw) 경로, 이건 JSON 메시지용.
+
+        Returns:
+            Optional[bool]: relay-only 경로에서 send_to_peer 의 성공 여부
+                (M7 — 호출자가 대상 부재를 감지해 반응할 수 있게). 로컬 처리/
+                broadcast 경로는 판단할 대상이 없어 None.
         """
         receiver = data.get("receiver_peer") if isinstance(data, dict) else None
         if receiver:
             if receiver == self.config.peer_id:
                 if local_handler:
                     local_handler(data)
+                return None
             else:
-                self.server.send_to_peer(receiver, msg_type, data)
+                return self.server.send_to_peer(receiver, msg_type, data)
         else:
             if local_handler:
                 local_handler(data)
             self.server.broadcast(msg_type, data, exclude_sock=sock)
+            return None
 
     def _on_server_message(self, sock, message):
         """서버: 클라이언트로부터 메시지 수신"""
@@ -375,7 +391,16 @@ class InfiniteClipboard:
                 logger.warning(f"[보안] MSG_CLIP_FETCH requester_peer 위조 의심 — drop ({sock})")
             else:
                 # paste 요청 — receiver_peer(=source) 로 routed
-                self._server_route(MSG_CLIP_FETCH, data, sock, self._handle_clip_fetch)
+                relayed = self._server_route(MSG_CLIP_FETCH, data, sock, self._handle_clip_fetch)
+                if relayed is False:
+                    # M7: send_to_peer 반환값을 버리면 source 가 오프라인일 때
+                    # requester 는 응답을 영원히 못 받고 최대 600초(하드 타임아웃)
+                    # 대기한다. FETCH_FAIL_OFFLINE 으로 즉시 알린다.
+                    parsed = self.protocol.parse_clip_fetch(data)
+                    if parsed:
+                        self._send_fetch_fail(
+                            parsed["offer_id"], FETCH_FAIL_OFFLINE, parsed["requester_peer"],
+                        )
 
         elif msg_type == MSG_CLIP_FETCH_FAIL:
             # fetch 실패 — receiver_peer(=requester) 로 routed
@@ -469,10 +494,22 @@ class InfiniteClipboard:
         )
         self._notify_state_changed()
 
-    def _on_client_disconnected(self):
-        """서버 연결 끊김"""
+    def _on_client_disconnected(self, reason: str = ""):
+        """서버 연결 끊김
+
+        M9: handshake 단계에서 프로토콜 버전 불일치(hard break)로 끊긴 거라면
+        사용자에게 구체적으로 알린다 — 과거엔 이 상세 사유가 로그에만 남고
+        UI/알림은 "연결 끊김"이라는 일반 문구뿐이라, 다른 PC 가 구버전이라
+        영영 동기화가 안 되는 상황을 사용자가 원인조차 알 수 없었다.
+        """
         self.connected = False
-        logger.info("[클라이언트] 서버 연결 끊김")
+        logger.info(f"[클라이언트] 서버 연결 끊김{f' ({reason})' if reason else ''}")
+        if "version mismatch" in reason or "hard break" in reason:
+            self._notify(
+                "버전 불일치로 연결 실패",
+                "상대 PC 의 Infinite Clipboard 버전이 다릅니다 — 양쪽 모두 "
+                "최신 버전으로 업그레이드하세요",
+            )
         self._notify_state_changed()
 
     def _on_client_message(self, message):
@@ -613,10 +650,15 @@ class InfiniteClipboard:
             "preview": self._make_preview(content_type, content),
             "timestamp": time.time(),
         }
-        self.clipboard_history.insert(0, entry)
-        if len(self.clipboard_history) > self.config.clipboard_history_size:
-            self.clipboard_history.pop()
-        self._save_history_file()
+        # H2: 로컬 모니터 스레드(_monitor_clipboard)와 네트워크 수신 스레드가
+        # 동시에 호출할 수 있어 mutate+trim+저장을 한 크리티컬 섹션으로 묶는다.
+        # 안 그러면 두 insert 사이에 length 체크가 끼어들어 trim 이 틀어지거나,
+        # 파일 쓰기 도중 리스트가 바뀌어 json.dump 가 일관되지 않은 스냅샷을 볼 수 있다.
+        with self._history_lock:
+            self.clipboard_history.insert(0, entry)
+            if len(self.clipboard_history) > self.config.clipboard_history_size:
+                self.clipboard_history.pop()
+            self._save_history_file()
 
     def _save_history_file(self):
         """이력을 JSON 파일에 저장 (별도 프로세스 History 창 공유용, 원자적 쓰기).
@@ -624,6 +666,9 @@ class InfiniteClipboard:
         v2.2 R1: POSIX 0o600 권한 적용. history 에는 텍스트 클립보드 내용이
         그대로 들어갈 수 있어 (multi-user 시스템에서) 다른 사용자 읽기 차단.
         Windows 는 user 폴더 ACL 기본이라 별도 처리 불필요.
+
+        H2: 호출자(_add_to_history)가 이미 self._history_lock 을 보유한 상태에서
+        호출해야 한다 — self.clipboard_history 를 락 없이 읽지 않기 위함.
         """
         try:
             import json
@@ -829,14 +874,22 @@ class InfiniteClipboard:
         return d
 
     def _cleanup_offer_image(self):
-        """현재 offer 가 이미지면 그 스냅샷 temp 파일 삭제 (supersede/종료 시)."""
+        """현재 offer 가 이미지면 그 스냅샷 temp 파일 삭제 (supersede/종료 시).
+
+        M5: 삭제를 _outgoing_fetch_lock 없이 하면, 마침 다른 peer 가 이 offer 를
+        paste 해 _serve_fetch(같은 락을 잡고 파일을 스트리밍)가 진행 중일 때
+        동시에 os.remove 가 실행될 수 있다. Windows 는 열려 있는 파일을 삭제
+        못해(PermissionError, OSError 로 잡혀 조용히 무시됨) temp 파일이 계속
+        쌓인다. 같은 락을 잡아 _serve_fetch 가 끝난 뒤에만 삭제되도록 직렬화.
+        """
         with self._offer_lock:
             prev = self.current_offer
         if prev and prev.get("_image_temp"):
-            try:
-                os.remove(prev["_image_temp"])
-            except OSError:
-                pass
+            with self._outgoing_fetch_lock:
+                try:
+                    os.remove(prev["_image_temp"])
+                except OSError as e:
+                    logger.debug(f"이미지 offer 스냅샷 삭제 실패 (무시): {e}")
 
     def _announce_image_offer(self, b64_data):
         """[source] 이미지 복사 → 바이트를 임시 파일로 스냅샷 + MSG_CLIP_OFFER(kind=image).
@@ -964,6 +1017,12 @@ class InfiniteClipboard:
             if offer is None:
                 raise RuntimeError(f"알 수 없는 offer: {offer_id}")
             source_peer = offer["source_peer"]
+            # 리뷰 발견: received_offers 는 최신 offer 1개만 유지하는 supersede
+            # 캐시라, 이 fetch 가 끝나기 전에 다른 offer(다른 peer 포함)가 도착
+            # 하면 evict 된다. transfer_id(==offer_id) 별로 source_peer 를 별도
+            # 보관해 이 fetch 진행 중엔 H7 타겟 라우팅이 항상 조회 가능하게 함.
+            with self._transfers_lock:
+                self._transfer_source_peers[offer_id] = source_peer
             total = int(offer.get("total_size", 0))
             # Rec 3: requester 가 fetch 전에 저장 공간 검사 (실제 저장 위치 근사)
             if not self.file_manager.check_disk_space(total):
@@ -1012,6 +1071,27 @@ class InfiniteClipboard:
                 af["paths"] = paths
             af["event"].set()
             return True
+
+    def _source_peer_for_transfer(self, transfer_id) -> str:
+        """[receiver] H7: transfer_id(==offer_id)로 이 전송의 source peer 조회.
+
+        MSG_FILE_ERROR 를 broadcast 하면 무관한 피어에게 전송 실패 상세(파일 경로 등)
+        가 노출된다 — 그 peer 에게만 targeted 전송하기 위해 조회한다.
+
+        리뷰 발견: 원래 received_offers(offer_id 1개만 유지하는 supersede 캐시)
+        를 봤는데, 무관한 다른 peer 의 새 offer 가 broadcast 되기만 해도 그
+        캐시가 통째로 교체돼 이 전송의 source_peer 조회가 실패했다(→ 실패 시
+        broadcast 로 새서 H7 이 막던 정보 노출이 재현). _fetch_offer 가 채우는
+        transfer_id 전용 `_transfer_source_peers` 를 우선 조회하고, 없으면
+        received_offers 로 폴백한다(예: "받기" 흐름 등 다른 경로 대비).
+        둘 다 없으면 빈 문자열(호출부가 broadcast 로 graceful degrade)."""
+        with self._transfers_lock:
+            source_peer = self._transfer_source_peers.get(transfer_id, "")
+        if source_peer:
+            return source_peer
+        with self._offer_lock:
+            offer = self.received_offers.get(transfer_id)
+        return offer.get("source_peer", "") if offer else ""
 
     def _handle_clip_fetch(self, data):
         """[source] MSG_CLIP_FETCH 수신 → offer 검증 후 requester 에게만 전송 시작."""
@@ -1142,14 +1222,21 @@ class InfiniteClipboard:
             self._save_transfer_state(force=True)
 
     def _notify(self, title, message) -> None:
-        """일반 OS 알림 (크기 무관). tray 우선, 없으면 plyer (비동기)."""
+        """일반 OS 알림 (크기 무관). tray 우선, 없으면 plyer (비동기).
+
+        M12: 두 경로 모두 실패하면 사용자는 "받기 실패"/"덮어쓰기 실패"/
+        "버전 불일치" 같은 중요한 알림을 영영 못 본다. tray 실패는 완전
+        무로그, plyer 최종 실패도 DEBUG(기본 콘솔엔 안 보임)에 묻혀 이
+        상황 자체를 아무도 눈치챌 수 없었다. tray 실패는 최소 DEBUG 로,
+        양쪽 다 실패하면 WARNING(기본 콘솔에 보임)으로 올린다.
+        """
         tray = self.tray
         if tray is not None:
             try:
                 tray.notify(title, message)
                 return
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"tray 알림 실패, plyer 로 폴백: {e}")
 
         def _do():
             try:
@@ -1159,7 +1246,10 @@ class InfiniteClipboard:
                     app_name="Infinite Clipboard",
                 )
             except Exception as e:
-                logger.debug(f"알림 실패 (무시): {e}")
+                logger.warning(
+                    f"알림 전송 완전 실패(tray+plyer 둘 다) — 사용자가 '{title}' "
+                    f"알림을 못 봤을 수 있음: {e}"
+                )
 
         threading.Thread(target=_do, daemon=True).start()
 
@@ -1172,6 +1262,11 @@ class InfiniteClipboard:
             fetched = self._fetch_offer(offer_id)  # staging 경로 (메커니즘 재사용)
         except Exception as e:
             logger.warning(f"[받기] fetch 실패: {e}")
+            # M6: clear 안 하면 이 offer_id 가 receivable_offers 에 영원히 남고,
+            # 전송창은 같은 위젯을 재사용하므로 최초 클릭 때 세운 "requested"
+            # 플래그가 리셋 안 돼 받기 버튼이 영구 고장(재시도 불가)된다. 실패는
+            # 이 offer 를 포기한다는 뜻이므로 목록에서 제거 — 필요하면 재복사 요청.
+            self._clear_receivable(offer_id)
             self._notify("받기 실패", f"{name} — 원본에서 받을 수 없음")
             return
 
@@ -1190,6 +1285,9 @@ class InfiniteClipboard:
                 saved += 1
         except Exception as e:
             logger.error(f"[받기] 저장 실패: {e}")
+            # M6: fetch 는 성공했지만 로컬 저장 실패(권한/디스크 등)도 동일하게
+            # clear — 안 하면 위와 같은 이유로 받기 버튼이 영구 고장된다.
+            self._clear_receivable(offer_id)
             self._notify("받기 실패", f"{name} — 저장 오류")
             return
 
@@ -1301,6 +1399,27 @@ class InfiniteClipboard:
 
             if not self.file_manager.check_disk_space(metadata.total_size):
                 logger.warning(f"[파일] 디스크 공간 부족: {metadata.transfer_id}")
+                # H5: 여기서 pending_transfers/active incoming 슬롯을 정리하지
+                # 않으면, source 는 이 실패를 모른 채 chunk 를 계속 보내고 그
+                # "방치된" 전송이 나중에 조립 완료되어 사용자가 이미 실패 알림을
+                # 본 뒤에도 클립보드를 무단으로 덮어쓴다 (_handle_file_cancel 의
+                # incoming cleanup 과 동일 패턴 + source 에게 CANCEL 통지).
+                self.file_manager.cancel_incoming(metadata.transfer_id, reason="disk_full")
+                self.file_manager.cleanup_incoming_artifacts(metadata.transfer_id)
+                self.file_manager.end_incoming(metadata.transfer_id)
+                with self._transfers_lock:
+                    self.pending_transfers.pop(metadata.transfer_id, None)
+                # source_peer 조회는 _cancel_transfer_tracking(아래에서
+                # _transfer_source_peers 를 정리함) 보다 반드시 먼저 — 순서가
+                # 바뀌면 조회할 때 이미 지워진 뒤라 매번 broadcast 로 샌다.
+                cancel_data = {"transfer_id": metadata.transfer_id, "reason": "error"}
+                source_peer = self._source_peer_for_transfer(metadata.transfer_id)
+                self._cancel_transfer_tracking(metadata.transfer_id)
+                if source_peer:
+                    cancel_data["receiver_peer"] = source_peer
+                    self._send_msg_to(MSG_FILE_CANCEL, cancel_data, source_peer)
+                else:
+                    self._send_msg(MSG_FILE_CANCEL, cancel_data)
                 # v3.0: 진행 중 fetch 가 있으면 실패 신호 → 받기 fallback (Task 8)
                 self._signal_fetch(metadata.transfer_id, fail=FETCH_FAIL_ERROR)
                 return
@@ -1444,10 +1563,14 @@ class InfiniteClipboard:
             with self._transfers_lock:
                 self.outgoing_files.pop(transfer_id, None)
             self._cancel_transfer_tracking(transfer_id)
-            self._send_msg(MSG_FILE_ERROR, {
-                "transfer_id": transfer_id,
-                "error": str(e),
-            })
+            # H7: MSG_FILE_ERROR 는 이 전송의 상대(receiver_peer)에게만 targeted —
+            # broadcast 하면 무관 피어에게 전송 실패 상세(파일 경로 등)가 노출된다.
+            error_data = {"transfer_id": transfer_id, "error": str(e)}
+            if receiver_peer:
+                error_data["receiver_peer"] = receiver_peer
+                self._send_msg_to(MSG_FILE_ERROR, error_data, receiver_peer)
+            else:
+                self._send_msg(MSG_FILE_ERROR, error_data)
         finally:
             self._cancelled_transfers.discard(transfer_id)
             # v2.1: manager active state 정리 (transfer_id 매칭 시에만)
@@ -1496,11 +1619,20 @@ class InfiniteClipboard:
                 f"[파일] 청크 해시 불일치 → 전송 중단: "
                 f"{data.get('file_path')}#{data.get('chunk_index')}"
             )
-            self._cancel_transfer_tracking(transfer_id)
-            self._send_msg(MSG_FILE_ERROR, {
+            # H7: source peer 에게만 targeted (broadcast 시 무관 피어에 상세 노출).
+            # 조회는 _cancel_transfer_tracking(_transfer_source_peers 를 정리함)
+            # 보다 반드시 먼저 — 순서가 바뀌면 매번 broadcast 로 샌다.
+            error_data = {
                 "transfer_id": transfer_id,
                 "error": f"청크 해시 불일치: {data.get('file_path')}#{data.get('chunk_index')}",
-            })
+            }
+            source_peer = self._source_peer_for_transfer(transfer_id)
+            self._cancel_transfer_tracking(transfer_id)
+            if source_peer:
+                error_data["receiver_peer"] = source_peer
+                self._send_msg_to(MSG_FILE_ERROR, error_data, source_peer)
+            else:
+                self._send_msg(MSG_FILE_ERROR, error_data)
             with self._transfers_lock:
                 self.pending_transfers.pop(transfer_id, None)
             # C2: 이 전송을 기다리는 _active_fetch 가 있으면 즉시 깨움 (hang 방지)
@@ -1537,11 +1669,20 @@ class InfiniteClipboard:
                             break
         else:
             logger.error(f"[파일] 조립 실패 → 전송 중단: {file_path}")
-            self._cancel_transfer_tracking(transfer_id)
-            self._send_msg(MSG_FILE_ERROR, {
+            # H7: source peer 에게만 targeted (broadcast 시 무관 피어에 상세 노출).
+            # 조회는 _cancel_transfer_tracking(_transfer_source_peers 를 정리함)
+            # 보다 반드시 먼저 — 순서가 바뀌면 매번 broadcast 로 샌다.
+            error_data = {
                 "transfer_id": transfer_id,
                 "error": f"파일 조립 실패: {file_path}",
-            })
+            }
+            source_peer = self._source_peer_for_transfer(transfer_id)
+            self._cancel_transfer_tracking(transfer_id)
+            if source_peer:
+                error_data["receiver_peer"] = source_peer
+                self._send_msg_to(MSG_FILE_ERROR, error_data, source_peer)
+            else:
+                self._send_msg(MSG_FILE_ERROR, error_data)
             # C2: 이 전송을 기다리는 _active_fetch 가 있으면 즉시 깨움 (hang 방지)
             self._signal_fetch(transfer_id, fail="assemble_failed")
             with self._transfers_lock:
@@ -1560,12 +1701,23 @@ class InfiniteClipboard:
             # v2.3 audit #10: conflict_policy 전달 — 동일 파일명 재수신 시
             # SHA-256 dedup short-circuit + 4 정책 분기. 사용자 사고 (numbering 누적) 차단.
             staging_dir = self._staging_dir()
-            restored_paths = self.file_manager.restore_folder(
+            restored_paths, failed_overwrites = self.file_manager.restore_folder(
                 transfer_id, metadata, dest_dir=staging_dir,
                 conflict_policy=self.config.file_conflict_policy,
             )
             self._finish_transfer(transfer_id)
             logger.info(f"[파일] 전체 완료, 임시 저장: {len(restored_paths)}개 파일")
+
+            # H8: overwrite 정책을 선택했는데 기존 파일 unlink 실패로 skip 강등된
+            # 경우, 사용자는 자신의 파일이 교체됐다고 오인할 수 있어 명시적으로 알린다.
+            if failed_overwrites:
+                names = ", ".join(failed_overwrites[:3])
+                if len(failed_overwrites) > 3:
+                    names += f" 외 {len(failed_overwrites) - 3}개"
+                self._notify(
+                    "덮어쓰기 실패",
+                    f"{names} — 기존 파일 유지됨 (교체 안 됨, 사용 중이거나 권한 문제)",
+                )
 
             if restored_paths:
                 # 폴더 전송이면 폴더 경로를, 파일이면 개별 경로를 클립보드에 설정
@@ -1593,6 +1745,7 @@ class InfiniteClipboard:
             self.file_manager.end_incoming(transfer_id)
             with self._transfers_lock:
                 self.pending_transfers.pop(transfer_id, None)
+                self._transfer_source_peers.pop(transfer_id, None)
 
     @staticmethod
     def _resolve_abs_path(metadata, file_paths, rel_path):
@@ -1847,6 +2000,8 @@ class InfiniteClipboard:
         """전송 에러/취소 시 추적 제거 + 임시 파일 정리"""
         with self._progress_lock:
             self._transfer_progress.pop(transfer_id, None)
+        with self._transfers_lock:
+            self._transfer_source_peers.pop(transfer_id, None)
         self._save_transfer_state(force=True)
         # v2.2.1 B3: 트레이 갱신
         self._notify_state_changed()
@@ -1898,6 +2053,39 @@ def _watch_config_for_restart(app, tray=None):
             pass
 
 
+def _load_clipboard_history_file(history_file) -> tuple:
+    """clipboard_history.json 을 읽어 (history: list, corrupted: bool) 반환.
+
+    M13: 과거엔 `except Exception: pass` 로 완전히 무음이라, 사용자는 이력이
+    손상돼서 비어있는 건지 원래 없는 건지 구분할 수 없었다. config.py C4 와
+    동일 패턴(백업 + 로그) 으로 흔적을 남기고, corrupted 플래그로 UI 가 구분되는
+    메시지를 보여줄 수 있게 한다.
+    """
+    import json
+    import shutil
+
+    if not history_file.exists():
+        return [], False
+
+    try:
+        with open(history_file, "r", encoding="utf-8") as hf:
+            loaded = json.load(hf)
+        if not isinstance(loaded, list):
+            raise ValueError(f"unexpected history format: {type(loaded).__name__}")
+        return loaded, False
+    except (json.JSONDecodeError, OSError, ValueError) as e:
+        logger.warning(f"[history] clipboard_history.json 손상 — 초기화: {e}")
+        try:
+            backup_path = history_file.with_name(
+                f"{history_file.name}.corrupt-{int(time.time())}"
+            )
+            shutil.copy2(history_file, backup_path)
+            logger.info(f"[history] 손상된 이력 파일 백업: {backup_path}")
+        except OSError as backup_err:
+            logger.error(f"[history] 손상 파일 백업 실패: {backup_err}")
+        return [], True
+
+
 def _run_window_only(window_type: str) -> None:
     """트레이 메뉴가 자기 자신을 `--window <type>` 으로 재호출했을 때의 경로.
 
@@ -1932,23 +2120,20 @@ def _run_window_only(window_type: str) -> None:
     if window_type == "settings":
         from config import load_config
         from ui.settings_window import SettingsWindow
-        config = load_config()
+        # 리뷰 발견: 이 짧게 사는 창 프로세스가 메인 프로세스와 거의 동시에
+        # load_config() 를 호출하면(둘 다 교정이 필요한 상태일 때) 각자 다른
+        # 랜덤 auth_key/peer_id 로 저장을 시도해 레이스가 난다. 자동교정 저장은
+        # 오래 사는 메인 프로세스에게만 맡긴다.
+        config = load_config(persist_corrections=False)
         win = SettingsWindow(config)
     elif window_type == "history":
-        import json
         from config import _get_config_dir
         from core.clipboard_manager import ClipboardManager
         from ui.history_window import HistoryWindow
-        history = []
         history_file = _get_config_dir() / "clipboard_history.json"
-        if history_file.exists():
-            try:
-                with open(history_file, "r", encoding="utf-8") as hf:
-                    history = json.load(hf)
-            except Exception:
-                pass
+        history, corrupted = _load_clipboard_history_file(history_file)
         cm = ClipboardManager()
-        win = HistoryWindow(history, cm)
+        win = HistoryWindow(history, cm, corrupted=corrupted)
     elif window_type == "transfers":
         from config import _get_config_dir
         from ui.transfer_window import TransferWindow

@@ -513,6 +513,13 @@ class Protocol:
                 return self._parse_binary_frame(data)
             json_data = data.decode("utf-8")
             message = json.loads(json_data)
+            # M8: JSON 은 dict 가 아닌 값(문자열/숫자/리스트/null 등)도 유효하게
+            # 파싱된다. 호출부(core/network.py)는 message["_raw"]=... 로 바로
+            # mutate 하므로, dict 가 아니면 TypeError 가 나 그 연결의 수신 루프
+            # 전체가 죽는다 — 다른 실패와 동일하게 조용히 None 반환해야 한다.
+            if not isinstance(message, dict):
+                logger.error(f"메시지 파싱 오류: 최상위가 dict 아님 ({type(message).__name__})")
+                return None
             return message
         except Exception as e:
             logger.error(f"메시지 파싱 오류: {e}")

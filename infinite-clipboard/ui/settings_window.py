@@ -19,6 +19,7 @@ if _parent_dir not in sys.path:
 import platform
 import shutil
 import subprocess
+import threading
 import customtkinter
 
 from config import AppConfig, save_config
@@ -95,7 +96,14 @@ class SettingsWindow(customtkinter.CTkToplevel):
 
         self._config = config
         self._on_save_callback = on_save_callback
-        self._tailscale_ip = _detect_tailscale_ip()
+        # H3: Tailscale CLI 조회는 후보가 여러 개면 각 5초 timeout 이 누적돼 최대
+        # 10초(macOS)까지 걸릴 수 있다. 창 생성을 막지 않도록 백그라운드 스레드로
+        # 조회하고, 메인 스레드는 after() 폴링으로 결과를 받아 위젯을 갱신한다
+        # (Tk 는 스레드 안전하지 않음 — transfer_window.py 의 상태파일 폴링과
+        # 동일하게, 백그라운드 스레드는 위젯을 직접 건드리지 않는다).
+        self._tailscale_ip = ""
+        self._tailscale_ip_ready = False
+        threading.Thread(target=self._detect_tailscale_bg, daemon=True).start()
 
         self.title("Infinite Clipboard · 설정")
         # 4섹션 + 헤더 + 버튼 바가 한 화면에 모두 들어가는 높이.
@@ -138,12 +146,9 @@ class SettingsWindow(customtkinter.CTkToplevel):
             anchor="w",
         ).pack(side="left")
 
-        if self._tailscale_ip:
-            Badge(header, text=f"● Tailscale {self._tailscale_ip}",
-                  variant="ok").pack(side="right")
-        else:
-            Badge(header, text="Tailscale 미연결",
-                  variant="muted").pack(side="right")
+        # H3: 초기엔 "확인 중" — 조회가 끝나면 _poll_tailscale_result 가 갱신
+        self._ts_badge = Badge(header, text="Tailscale 확인 중…", variant="muted")
+        self._ts_badge.pack(side="right")
 
         # ── 섹션 1. 연결 ──
         sec_conn = SectionCard(container)
@@ -167,6 +172,36 @@ class SettingsWindow(customtkinter.CTkToplevel):
 
         # 초기 모드 상태 반영
         self._on_mode_changed(self._MODE_TO_KR.get(config.mode, "클라이언트"))
+
+        # H3: 위젯 구성이 끝난 뒤 폴링 시작 (백그라운드 스레드는 이미 위에서 시작됨)
+        self.after(100, self._poll_tailscale_result)
+
+    def _detect_tailscale_bg(self) -> None:
+        """백그라운드 스레드 — Tk 위젯을 직접 건드리지 않고 결과만 저장."""
+        self._tailscale_ip = _detect_tailscale_ip()
+        self._tailscale_ip_ready = True
+
+    def _poll_tailscale_result(self) -> None:
+        """메인 스레드 폴링 — 백그라운드 조회가 끝나면 배지/버튼을 갱신."""
+        if not self._tailscale_ip_ready:
+            self.after(150, self._poll_tailscale_result)
+            return
+
+        ip = self._tailscale_ip
+        # 리뷰 발견: Badge._VARIANTS(private) 를 직접 읽는 대신 공개 메서드 사용
+        # — Badge 내부 색상표가 바뀌어도 이 호출부는 영향받지 않음.
+        self._ts_badge.set_variant(
+            "ok" if ip else "muted",
+            text=f"● Tailscale {ip}" if ip else "Tailscale 미연결",
+        )
+        # 자동 버튼 — 서버 모드로 전환돼 disabled 상태면 그대로 둔다
+        # (_on_mode_changed 의 disabled 색을 덮어쓰지 않기 위함)
+        if self._detect_btn.cget("state") != "disabled":
+            self._detect_btn.configure(
+                fg_color=t.signal_ok if ip else t.relay_raised,
+                hover_color=t.signal_ok_hi if ip else t.whisper_line_hi,
+                text_color=t.tray_bg if ip else t.spool_label,
+            )
 
     # ─── 섹션 빌더 ──────────────────────────────────────────────────
 
@@ -236,9 +271,18 @@ class SettingsWindow(customtkinter.CTkToplevel):
             text_color=t.terminal_text,
             text_color_disabled=t.spool_mute,
             font=(t.FAMILY, 11, "bold"),
+            command=self._update_bind_warning,
         )
         self._bind_seg.pack(side="left", fill="x", expand=True)
         row_bind.pack(fill="x")
+
+        # M1: "모든 인터페이스" 선택 시 평문 프로토콜 스니핑 위험을 opt-in
+        # 시점에 바로 보여준다 (로그만으로는 사용자가 결정 전에 못 봄).
+        self._bind_warning = customtkinter.CTkLabel(
+            inner, text="⚠ 프로토콜은 평문 — 같은 물리 LAN 의 제3자가 스니핑 가능",
+            font=t.FONT_META, text_color=t.signal_wait, anchor="w",
+        )
+        self._update_bind_warning(initial_bind)
 
     def _build_section_auth(self, parent, config):
         inner = self._section_inner(parent)
@@ -258,7 +302,10 @@ class SettingsWindow(customtkinter.CTkToplevel):
         self._eye_btn.pack(side="left")
         row_key.pack(fill="x", pady=(0, t.SP[2]))
 
-        # Tailscale 자동 인증
+        # M4: 과거 라벨 "Tailscale 자동 인증"은 이 설정이 실제로는 인증을
+        # 우회/완화하지 않는데도(HMAC 은 항상 필수) 그렇게 암시해 혼동을 줬다.
+        # 실제 효과는 접속 peer 가 Tailscale IP 대역이면 로그 한 줄을 남기는
+        # 것뿐 — 라벨/캡션으로 정확히 표기.
         self._trust_var = customtkinter.BooleanVar(value=config.tailscale_trust)
         trust_row = customtkinter.CTkFrame(inner, fg_color="transparent")
         icon_lbl = load_icon("shield-check", size=16, color="dim")
@@ -266,7 +313,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
             customtkinter.CTkLabel(trust_row, text="", image=icon_lbl).pack(side="left", padx=(0, t.SP[2] - 2))
         customtkinter.CTkSwitch(
             trust_row,
-            text="Tailscale 자동 인증",
+            text="Tailscale 피어 로그 표시",
             variable=self._trust_var, onvalue=True, offvalue=False,
             text_color=t.terminal_text,
             font=t.FONT_BODY,
@@ -276,6 +323,10 @@ class SettingsWindow(customtkinter.CTkToplevel):
             fg_color=t.relay_raised,
         ).pack(side="left", fill="x", expand=True)
         trust_row.pack(fill="x")
+        customtkinter.CTkLabel(
+            inner, text="인증에는 영향 없음 — HMAC 은 항상 필수",
+            font=t.FONT_META, text_color=t.spool_dim, anchor="w",
+        ).pack(fill="x", pady=(0, t.SP[2]))
 
     def _build_section_device(self, parent, config):
         inner = self._section_inner(parent)
@@ -435,11 +486,36 @@ class SettingsWindow(customtkinter.CTkToplevel):
             # client 모드: bind 옵션 비활성 (의미 없음)
             self._bind_seg.configure(state="disabled")
 
+    def _update_bind_warning(self, selected: str) -> None:
+        """M1: "모든 인터페이스" 선택 시에만 평문 프로토콜 경고 캡션 표시."""
+        if selected == "모든 인터페이스":
+            self._bind_warning.pack(fill="x", pady=(t.SP[1], 0))
+        else:
+            self._bind_warning.pack_forget()
+
     def _auto_detect_ip(self) -> None:
-        ip = _detect_tailscale_ip()
+        """"자동" 버튼 클릭 — H3: 같은 CLI 조회라 최대 10초 걸릴 수 있어
+        버튼을 잠그고 백그라운드 스레드 + 폴링으로 비동기 처리."""
+        self._detect_btn.configure(state="disabled")
+        self._auto_detect_ip_ready = False
+        threading.Thread(target=self._auto_detect_ip_bg, daemon=True).start()
+        self.after(100, self._poll_auto_detect_ip)
+
+    def _auto_detect_ip_bg(self) -> None:
+        self._auto_detect_ip_result = _detect_tailscale_ip()
+        self._auto_detect_ip_ready = True
+
+    def _poll_auto_detect_ip(self) -> None:
+        if not self._auto_detect_ip_ready:
+            self.after(150, self._poll_auto_detect_ip)
+            return
+
+        ip = self._auto_detect_ip_result
+        self._detect_btn.configure(state="normal")
         if ip:
             self._host_entry.delete(0, "end")
             self._host_entry.insert(0, ip)
+            self._detect_btn.configure(fg_color=t.signal_ok)
         else:
             self._detect_btn.configure(fg_color=t.signal_fail)
 
@@ -514,6 +590,10 @@ class SettingsWindow(customtkinter.CTkToplevel):
 if __name__ == "__main__":
     customtkinter.set_appearance_mode("System")
     root = customtkinter.CTk()
+    # L5: 신규 CTk 루트 생성 시 CLAUDE.md 규칙 #7 — Cmd+V/우클릭 붙여넣기 활성화.
+    # (개발자 단독 실행 전용 블록 — 실사용 경로는 main.py 가 이미 호출)
+    from ui.components import enable_mac_clipboard_shortcuts
+    enable_mac_clipboard_shortcuts(root)
     root.withdraw()
     root.after(50, root.deiconify)
     root.after(100, root.withdraw)

@@ -230,8 +230,9 @@ def test_assemble_file_rejects_invalid_transfer_id(manager):
 def test_restore_folder_rejects_invalid_transfer_id(manager):
     md = FileMetadata.from_dict(_good_metadata_dict())
     # transfer_id 를 직접 invalid 로 — restore_folder 가 인자로 받음
-    result = manager.restore_folder(transfer_id="../escape", metadata=md)
-    assert result == []
+    restored, failed_overwrites = manager.restore_folder(transfer_id="../escape", metadata=md)
+    assert restored == []
+    assert failed_overwrites == []
 
 
 # ═══════════════════════════════════════════════════════════════════════

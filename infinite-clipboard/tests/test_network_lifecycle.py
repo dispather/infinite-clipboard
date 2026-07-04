@@ -16,6 +16,7 @@ import time
 import pytest
 
 from core.network import NetworkServer, NetworkClient
+from core.protocol import MSG_PING
 
 
 def _free_port() -> int:
@@ -158,3 +159,51 @@ def test_server_stop_with_pending_client_silent(caplog):
         f"OS 레벨 race 에러 발생: "
         f"{[r.getMessage() for r in os_level_errors]}"
     )
+
+
+def test_send_to_peer_failure_after_stop_is_debug_not_error(caplog):
+    """L3: 종료 중(running=False) 인 send_to_peer 실패는 ERROR 가 아닌 DEBUG
+    로 남아야 한다 — 정상 종료의 자연스러운 결과인데 과거엔 running 여부와
+    무관하게 항상 ERROR 로 찍혀 로그 노이즈였다."""
+    caplog.set_level(logging.DEBUG, logger="core.network")
+    port = _free_port()
+
+    server = NetworkServer(
+        port=port, auth_key="k", tailscale_trust=False, bind_address="127.0.0.1",
+    )
+    server.start()
+    client = NetworkClient(host="127.0.0.1", port=port, auth_key="k", device_name="dev")
+    client.start()
+
+    assert _wait_until(lambda: client.connected, timeout=3.0)
+    assert _wait_until(lambda: len(server.clients) == 1, timeout=3.0)
+
+    with server.clients_lock:
+        sock, info = next(iter(server.clients.items()))
+        peer_id = info["peer_id"]
+
+    # stop() 이 하는 것과 동일한 첫 단계(running=False)를 흉내낸 뒤, 소켓을
+    # 직접 닫아 sendall 이 실패하도록 유도.
+    server.running = False
+    try:
+        sock.close()
+    except OSError:
+        pass
+
+    marker = len(caplog.records)
+    ok = server.send_to_peer(peer_id, MSG_PING)
+    assert ok is False
+
+    new_records = caplog.records[marker:]
+    errors = [
+        r for r in new_records
+        if r.levelno == logging.ERROR and "send_to_peer" in r.getMessage()
+    ]
+    assert not errors, (
+        f"L3 회귀 — 종료 중(running=False)인데 ERROR 로 찍힘: "
+        f"{[r.getMessage() for r in errors]}"
+    )
+
+    server.running = True  # 정상 stop() 흐름으로 정리
+    client.stop()
+    server.stop()

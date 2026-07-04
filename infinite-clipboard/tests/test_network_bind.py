@@ -50,6 +50,9 @@ def test_explicit_all_interfaces_bind(caplog):
         warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
         assert any("0.0.0.0" in m or "노출" in m for m in warnings), \
             f"Expected explicit-0.0.0.0 warning, got {warnings}"
+        # M1: 프로토콜이 평문이라 물리 LAN 스니핑 위험이 있다는 점도 명시해야 함
+        assert any("평문" in m or "스니핑" in m for m in warnings), \
+            f"M1 회귀 — 평문/스니핑 위험 경고가 없음: {warnings}"
     finally:
         server.stop()
 

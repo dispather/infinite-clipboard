@@ -899,14 +899,69 @@ class LinuxClipboard:
             logger.error(f"이미지 가져오기 오류: {e}")
         return None
 
+    def _xclip_targets(self) -> Optional[set]:
+        """M2: xclip 이 현재 제공 가능한 TARGETS(mime type) 목록을 한 번만 조회.
+
+        X11 폴백 폴링(watch 없음)은 유휴 상태에서도 매 폴링(기본 0.5초)마다
+        files→image→text 순서로 최대 3개 subprocess 를 시도했다. 대부분의 폴링은
+        "변화 없음"이라 이 중 최소 2개는 항상 헛수고(대상이 없어 빈 결과만 받음)
+        였다.
+
+        트레이드오프(리뷰에서 지적됨, 의도된 설계): TARGETS 조회는 항상
+        subprocess 1개를 추가로 쓰므로, "파일이 클립보드에 계속 남아있는"
+        이 앱의 핵심 시나리오는 오히려 1→2 로 늘어난다. 대신 "텍스트 복사/
+        유휴"(일반 클립보드 동기화에서 압도적으로 흔한 케이스) 는 3→2 로
+        줄어든다. 즉 모든 경우에 더 나은 건 아니고, 실사용 분포(텍스트 >
+        파일 > 이미지 가정)에서 평균적으로 더 낫다는 판단 — 파일 전송이
+        압도적으로 잦은 환경이라면 이 트레이드오프가 역전될 수 있다.
+
+        리뷰 발견: 조회 자체가 실패(timeout/예외/비정상 종료)했을 때 빈 set()
+        을 반환하면, 호출부가 "정말로 아무 타입도 없음"과 구분을 못 해 실제로
+        파일/이미지가 있는데도 두 읽기를 모두 건너뛰고 조용히 놓쳤다(다음
+        폴링에 자연 회복되지만, 그 사이 복사가 유실됨). 조회 실패는 None 으로
+        구분해, 호출부가 "모르겠으니 둘 다 시도"로 안전하게 폴백하게 한다.
+
+        Returns:
+            Optional[set]: 정상 조회된 타겟 집합(비어있을 수 있음 — 진짜 없음),
+                또는 조회 자체가 실패했으면 None(불확실 — 폴백 트리거).
+        """
+        try:
+            result = subprocess.run(
+                ["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+            logger.debug(f"TARGETS 조회 rc={result.returncode} — 순차 시도로 폴백")
+            return None
+        except Exception as e:
+            logger.debug(f"TARGETS 조회 실패 (기존 순차 시도로 폴백): {e}")
+            return None
+
     def _read_content_via_cli(self) -> Tuple[str, Any]:
         """subprocess로 클립보드 내용을 읽는다 (이미지/파일 포함)."""
         try:
-            files = self.get_files()
+            if self.tool == "xclip":
+                # M2: TARGETS 로 실제 있는 타입만 시도 — 없으면 해당 subprocess 생략.
+                # 리뷰 발견: targets 가 None(조회 자체 실패)이면 "타입 없음"과
+                # 혼동하지 않고 안전하게 기존 순차 시도(둘 다 True)로 폴백한다.
+                targets = self._xclip_targets()
+                if targets is None:
+                    has_files = has_image = True
+                else:
+                    has_files = "text/uri-list" in targets
+                    has_image = "image/png" in targets
+            else:
+                # wl-paste(대개 --watch 이벤트 기반)/xsel(get_files/이미지 자체가
+                # 이미 tool 불일치로 subprocess 없이 None) 은 기존 순차 시도 유지 —
+                # 변경 시 회귀 위험 대비 최소 범위로 유지.
+                has_files = has_image = True
+
+            files = self.get_files() if has_files else None
             if files:
                 return ("files", files)
 
-            image = self._get_image_from_clipboard()
+            image = self._get_image_from_clipboard() if has_image else None
             if image:
                 buffer = io.BytesIO()
                 image.save(buffer, format="PNG")

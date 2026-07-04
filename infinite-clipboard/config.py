@@ -83,7 +83,9 @@ class AppConfig:
     server_host: str = ""                   # 빈 문자열이면 Tailscale IP 자동 감지
     port: int = 9999
     auth_key: str = ""                      # 빈 문자열이면 PIN 자동 생성
-    tailscale_trust: bool = True            # Tailscale 네트워크에서 인증 없이 허용
+    # M4: HMAC handshake 는 이 값과 무관하게 항상 필수 — 인증을 우회/완화하지
+    # 않는다. 실제 효과는 접속 peer 가 Tailscale IP 대역이면 로그 한 줄만 남김.
+    tailscale_trust: bool = True
     device_name: str = ""                   # 빈 문자열이면 platform.node() 사용
     download_path: str = ""                 # 빈 문자열이면 ~/Downloads 사용
     clipboard_history_size: int = 20
@@ -295,15 +297,26 @@ def _backup_corrupt_config() -> None:
         _logger.error(f"손상된 설정 파일 백업 실패: {e}")
 
 
-def load_config() -> AppConfig:
-    """설정 파일에서 로드. 없으면 기본값 생성 후 저장."""
+def load_config(persist_corrections: bool = True) -> AppConfig:
+    """설정 파일에서 로드. 없으면 기본값 생성 후 저장.
+
+    Args:
+        persist_corrections: H4 자동교정 저장을 이 호출에서 시도할지. 오래 사는
+            메인 프로세스(서버/클라이언트)만 True 로 둬야 한다 — 리뷰에서 발견된
+            레이스: `--window settings/history/transfers` 처럼 짧게 뜨는 별도
+            프로세스가 메인과 거의 동시에 로드하며 각자 다른 랜덤 auth_key/peer_id
+            로 교정해 저장하면, 늦게 쓴 쪽이 이기고 먼저 쓴 프로세스의 메모리 상태가
+            디스크와 어긋난다. 짧게 사는 하위 창은 False 로 호출해 저장을 메인
+            프로세스에게만 맡긴다.
+    """
     global _last_config_warning
     _last_config_warning = None
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            return AppConfig(**{k: v for k, v in data.items() if k in AppConfig.__dataclass_fields__})
+            filtered = {k: v for k, v in data.items() if k in AppConfig.__dataclass_fields__}
+            config = AppConfig(**filtered)
         except (json.JSONDecodeError, TypeError, OSError) as e:
             # C4: 과거엔 (json.JSONDecodeError, TypeError) 만 잡아 PermissionError 등
             # OSError 계열은 아예 안 잡혀 앱이 tray 생기기도 전에 크래시했고, print()
@@ -316,7 +329,45 @@ def load_config() -> AppConfig:
             _logger.warning(_last_config_warning)
             _backup_corrupt_config()
 
-    # 설정 파일이 없거나 손상되었으면 기본값 생성 후 즉시 저장
+            # 설정 파일이 손상되었으면 기본값 생성 후 즉시 저장
+            config = AppConfig()
+            save_config(config)
+            return config
+
+        # H4: __post_init__/_validate_and_clamp 가 로드된 값을 교정했거나(약한
+        # auth_key, 잘못된 peer_id, 범위 밖 값) 신규 필드가 누락돼 기본값을
+        # 채웠다면 즉시 저장한다. 저장하지 않으면 디스크엔 원래 값이 남아 재시작
+        # 마다 재교정이 반복되는데, auth_key/peer_id 는 교정마다 "다른" 랜덤값이
+        # 나오므로(secrets.token_urlsafe/generate_peer_id) 매 재시작 값이 바뀐다
+        # — auth_key 는 그룹 간 공유 키가 어긋나고, peer_id 는 "재연결해도 같은
+        # id" invariant 가 깨져 identity squatting 가드(H1)/dedup/targeted relay
+        # 가 오작동한다.
+        #
+        # 리뷰 발견: 이 저장 시도를 위 읽기/파싱 try 안에 두면, 저장 자체가
+        # (디스크 가득/AV 락 등으로) OSError 를 던졌을 때 위 except 가 "파일이
+        # 손상됐다"고 오판해 방금 읽은 *유효한* 설정을 손상 취급으로 백업하고
+        # 새 auth_key/peer_id 로 덮어썼다 — H4 가 막으려던 바로 그 정체성 교체
+        # 버그를 다른 경로로 재현하는 셈이었다. 그래서 별도 try 로 분리해
+        # 저장 실패는 "교정을 다음 기회에 재시도" 정도로만 다룬다.
+        corrected = asdict(config)
+        needs_save = any(
+            field_name not in filtered or filtered[field_name] != corrected[field_name]
+            for field_name in AppConfig.__dataclass_fields__
+        )
+        if needs_save and persist_corrections:
+            try:
+                _logger.info("설정 파일 자동 교정/신규 필드 반영 — settings.json 갱신")
+                save_config(config)
+            except OSError as e:
+                _logger.warning(
+                    f"설정 자동 교정 저장 실패 (다음 로드에 재시도, 원본은 그대로): {e}"
+                )
+
+        return config
+
+    # 설정 파일이 없으면 기본값 생성 후 즉시 저장 — 최초 부트스트랩은
+    # persist_corrections 와 무관하게 항상 저장한다(그렇지 않으면 하위 창
+    # 프로세스가 우연히 먼저 뜬 경우 설정 파일 자체가 영영 안 생길 수 있음).
     config = AppConfig()
     save_config(config)
     return config
@@ -327,12 +378,18 @@ def save_config(config: AppConfig) -> None:
     CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     # 원자적 쓰기: 임시 파일에 기록 후 교체
     tmp_path = CONFIG_FILE.with_suffix(".json.tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(asdict(config), f, indent=2, ensure_ascii=False)
-    # POSIX 시스템에서만 chmod 적용 (Windows는 ACL 기반이라 무시됨)
+
+    # L6 (TOCTOU): 기존엔 open() 으로 만든 뒤 chmod() 로 권한을 조였는데, 그
+    # 사이 파일이 잠깐 기본 umask 권한(예: 0o644)으로 존재해 auth_key 가 담긴
+    # 내용이 노출될 여지가 있었다. POSIX 는 os.open 의 mode 인자로 생성
+    # 시점부터 0o600 을 강제해 그 창을 아예 없앤다.
     if os.name == "posix":
-        try:
-            os.chmod(tmp_path, 0o600)
-        except OSError:
-            pass
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        f = os.fdopen(fd, "w", encoding="utf-8")
+    else:
+        # Windows는 ACL 기반이라 POSIX mode 무시됨 — 기존 open() 그대로.
+        f = open(tmp_path, "w", encoding="utf-8")
+    with f:
+        json.dump(asdict(config), f, indent=2, ensure_ascii=False)
+
     os.replace(tmp_path, CONFIG_FILE)

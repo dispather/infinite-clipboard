@@ -10,12 +10,16 @@
 import logging
 import socket
 import struct
+import threading
 import time
 
 import pytest
 
 from core.network import NetworkClient, NetworkServer
-from core.protocol import Protocol, MSG_HANDSHAKE, generate_peer_id, is_valid_peer_id
+from core.protocol import (
+    Protocol, MSG_HANDSHAKE, MSG_HANDSHAKE_CHALLENGE,
+    generate_peer_id, generate_nonce, is_valid_peer_id,
+)
 
 
 def _free_port() -> int:
@@ -311,3 +315,184 @@ def test_duplicate_peer_id_second_connection_rejected(caplog):
         attacker.stop()
         victim.stop()
         server.stop()
+
+
+# ─── M9: 버전 불일치 disconnect 사유가 콜백으로 전달되는지 ─────────────
+
+def test_client_disconnected_reason_reports_version_mismatch():
+    """M9: 정상 연결됐던 client 가 재연결 시 호환되지 않는 프로토콜 버전의
+    서버를 만나면, on_disconnected 콜백이 그 사유(reason)를 받아야 한다 —
+    과거엔 상세 사유가 로그에만 남고 콜백은 인자가 없어(`on_disconnected()`)
+    UI 는 "연결 끊김"이라는 일반 문구만 보여줄 수 있었다. 흔한 실사용 시나리오:
+    한쪽 PC 만 먼저 업그레이드해 기존에 잘 붙던 페어링이 갑자기 깨지는데,
+    사용자는 원인(버전 불일치)조차 알 수 없었다.
+
+    (재연결 시나리오 — "한 번도 연결된 적 없는" 첫 페어링 시도에서도 통지가
+    나가야 하는 건 test_client_disconnected_reason_fires_on_first_ever_attempt
+    가 별도로 검증한다. 리뷰에서 was_connected 게이트가 그 경우를 막고 있던
+    걸 발견해 hard break 사유는 게이트를 우회하도록 수정했다.)"""
+    port = _free_port()
+    real_server = NetworkServer(
+        port=port, auth_key="shared", tailscale_trust=False, bind_address="127.0.0.1",
+    )
+    real_server.start()
+
+    reasons = []
+    client = NetworkClient(
+        host="127.0.0.1", port=port, auth_key="shared", device_name="testdev",
+    )
+    client.reconnect_interval = 0.3
+    client.on_disconnected = lambda reason="": reasons.append(reason)
+    client.start()
+
+    listener = None
+    server_thread = None
+    stop_fake = threading.Event()
+    try:
+        assert _wait_until(lambda: client.connected, timeout=3.0), "최초 연결 실패"
+
+        # 실서버 종료 → 같은 포트에 "다른 버전" 가짜 서버로 교체
+        real_server.stop()
+
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", port))
+        listener.listen(5)
+        listener.settimeout(0.5)
+
+        def fake_incompatible_server():
+            while not stop_fake.is_set():
+                try:
+                    conn, _ = listener.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    return
+                proto = Protocol("shared")
+                # 형식은 유효하지만(nonce/peer_id 정상) 버전만 비호환
+                fake_challenge = proto.create_message(MSG_HANDSHAKE_CHALLENGE, {
+                    "server_nonce": generate_nonce(),
+                    "server_version": "1.0",
+                    "server_peer_id": generate_peer_id(),
+                })
+                try:
+                    conn.sendall(fake_challenge)
+                except OSError:
+                    pass
+                finally:
+                    conn.close()
+
+        server_thread = threading.Thread(target=fake_incompatible_server, daemon=True)
+        server_thread.start()
+
+        assert _wait_until(
+            lambda: any("version mismatch" in r or "hard break" in r for r in reasons),
+            timeout=5.0,
+        ), f"버전 불일치 사유가 reason 에 없음: {reasons}"
+    finally:
+        stop_fake.set()
+        client.stop()
+        if listener is not None:
+            try:
+                listener.close()
+            except OSError:
+                pass
+        if server_thread is not None:
+            server_thread.join(timeout=2)
+
+
+def _run_fake_incompatible_server(port, stop_event):
+    """비호환 버전 challenge 만 보내는 가짜 서버 — 리스너 소켓과 스레드를 반환."""
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", port))
+    listener.listen(5)
+    listener.settimeout(0.5)
+
+    def loop():
+        while not stop_event.is_set():
+            try:
+                conn, _ = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            proto = Protocol("shared")
+            fake_challenge = proto.create_message(MSG_HANDSHAKE_CHALLENGE, {
+                "server_nonce": generate_nonce(),
+                "server_version": "1.0",
+                "server_peer_id": generate_peer_id(),
+            })
+            try:
+                conn.sendall(fake_challenge)
+            except OSError:
+                pass
+            finally:
+                conn.close()
+
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
+    return listener, thread
+
+
+def test_client_disconnected_reason_fires_on_first_ever_attempt():
+    """리뷰 발견: on_disconnected(reason=...) 가 was_connected(=_ever_connected)
+    게이트에 막혀, "한 번도 연결된 적 없는" 첫 페어링 시도에서 버전 불일치가
+    나도 콜백이 전혀 안 불렸다 — 신규 페어링/한쪽만 업그레이드가 가장 흔한
+    실사용 트리거인데 그 경우를 놓치는 것이었다. hard break 사유는
+    was_connected 여부와 무관하게 통지돼야 한다."""
+    port = _free_port()
+    stop_fake = threading.Event()
+    listener, server_thread = _run_fake_incompatible_server(port, stop_fake)
+
+    reasons = []
+    client = NetworkClient(
+        host="127.0.0.1", port=port, auth_key="shared", device_name="testdev",
+    )
+    client.reconnect_interval = 0.3
+    client.on_disconnected = lambda reason="": reasons.append(reason)
+    try:
+        client.start()  # 이 프로세스에서 이 client 는 한 번도 연결된 적 없음
+        assert _wait_until(
+            lambda: any("version mismatch" in r or "hard break" in r for r in reasons),
+            timeout=3.0,
+        ), f"첫 연결 시도(한 번도 연결된 적 없음)에서 통지가 안 옴: {reasons}"
+    finally:
+        stop_fake.set()
+        client.stop()
+        try:
+            listener.close()
+        except OSError:
+            pass
+        server_thread.join(timeout=2)
+
+
+def test_client_disconnected_reason_does_not_spam_on_repeated_retries():
+    """동일 사유(버전 불일치)로 재연결 루프가 여러 번 돌아도 on_disconnected
+    는 1회만 불려야 한다 — 매번 통지하면 5초(테스트는 더 짧게)마다 스팸이 된다."""
+    port = _free_port()
+    stop_fake = threading.Event()
+    listener, server_thread = _run_fake_incompatible_server(port, stop_fake)
+
+    reasons = []
+    client = NetworkClient(
+        host="127.0.0.1", port=port, auth_key="shared", device_name="testdev",
+    )
+    client.reconnect_interval = 0.2
+    client.on_disconnected = lambda reason="": reasons.append(reason)
+    try:
+        client.start()
+        assert _wait_until(lambda: len(reasons) >= 1, timeout=3.0)
+        # 재연결 루프가 여러 번 더 돌 시간을 준다 — 스팸이면 여기서 늘어남
+        time.sleep(1.5)
+        assert len(reasons) == 1, (
+            f"동일 사유로 재연결마다 반복 통지됨 (스팸): {reasons}"
+        )
+    finally:
+        stop_fake.set()
+        client.stop()
+        try:
+            listener.close()
+        except OSError:
+            pass
+        server_thread.join(timeout=2)

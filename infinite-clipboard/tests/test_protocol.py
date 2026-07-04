@@ -95,6 +95,19 @@ def test_parse_garbage_returns_none():
     assert p.parse_message(b"") is None
 
 
+def test_parse_non_dict_json_top_level_returns_none():
+    """M8: JSON 은 문자열/숫자/리스트/null 도 유효하게 파싱된다. 최상위가 dict
+    가 아니면 None 을 반환해야 한다 — 안 그러면 core/network.py 가
+    message["_raw"]=... 로 mutate 하려다 TypeError 로 그 연결의 수신 루프가
+    죽는다."""
+    p = Protocol()
+    assert p.parse_message(b'"just a string"') is None
+    assert p.parse_message(b"42") is None
+    assert p.parse_message(b"[1, 2, 3]") is None
+    assert p.parse_message(b"null") is None
+    assert p.parse_message(b"true") is None
+
+
 # ── transfer_id 형식 검증 ───────────────────────────────────────────────
 
 

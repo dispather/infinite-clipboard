@@ -398,6 +398,20 @@ class Badge(ctk.CTkLabel):
             **kwargs,
         )
 
+    def set_variant(self, variant: str, text: Optional[str] = None) -> None:
+        """색상 variant(+선택적으로 텍스트)를 갱신한다.
+
+        리뷰 발견: 호출부(settings_window.py 등)가 Badge._VARIANTS 를 직접
+        읽어 재구현하면, 이 매핑이 나중에 바뀌었을 때(이름 변경/구조 변경)
+        조용히 깨진다. variant 색상표는 Badge 안에만 있어야 하므로 공개
+        메서드로 노출한다.
+        """
+        fg, bg = self._VARIANTS.get(variant, self._VARIANTS["muted"])
+        if text is not None:
+            self.configure(text=text, text_color=fg, fg_color=bg)
+        else:
+            self.configure(text_color=fg, fg_color=bg)
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # EmptyState

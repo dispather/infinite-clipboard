@@ -423,6 +423,36 @@ def test_resolve_conflict_dedup_short_circuit(manager, tmp_path):
     assert p.read_bytes() == b"identical"
 
 
+def test_resolve_conflict_dedup_stat_failure_logs_warning(manager, tmp_path, monkeypatch, caplog):
+    """M14: dedup 의 stat() 실패도 hash 계산 실패와 동일하게 warning 로그를
+    남겨야 한다 — 과거엔 stat() 실패만 조용히 -1 로 넘어가 비일관이었다."""
+    import logging
+    from pathlib import Path
+
+    p = tmp_path / "same.txt"
+    p.write_bytes(b"identical")
+    h = _hash(b"identical")
+
+    original_stat = Path.stat
+
+    def failing_stat(self, *a, **kw):
+        if self == p:
+            raise OSError("simulated stat failure")
+        return original_stat(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "stat", failing_stat)
+    caplog.set_level(logging.WARNING, logger="core.file_transfer")
+
+    target = manager._resolve_conflict(p, 9, h, "rename_with_counter", "tx-1")
+
+    # stat 실패 → actual_size=-1 → size 불일치로 dedup 안 탐 → 정책(counter) 적용
+    assert target == tmp_path / "same (1).txt"
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("dedup stat 실패" in r.getMessage() for r in warnings), (
+        f"M14 회귀 — stat 실패가 조용히 무시됨: {[r.getMessage() for r in caplog.records]}"
+    )
+
+
 def test_resolve_conflict_size_diff_falls_through(manager, tmp_path):
     """size 다르면 dedup 안 탐 → 정책 적용."""
     p = tmp_path / "x.txt"
@@ -452,6 +482,37 @@ def test_resolve_conflict_overwrite_unlinks_existing(manager, tmp_path):
     target = manager._resolve_conflict(p, 999, None, "overwrite", "tx-1")
     assert target == p
     assert not p.exists()
+
+
+def test_resolve_conflict_overwrite_unlink_failure_records_and_skips(manager, tmp_path, monkeypatch):
+    """H8: overwrite 정책인데 unlink 가 실패하면 skip 으로 강등되지만, 조용히
+    사라지면 안 되고 failed_overwrites 로 호출자에게 알려야 한다."""
+    p = tmp_path / "x.txt"
+    p.write_bytes(b"old")
+
+    def _boom(self, *a, **k):
+        raise OSError("simulated permission error")
+    monkeypatch.setattr(Path, "unlink", _boom)
+
+    failed = []
+    target = manager._resolve_conflict(
+        p, 999, None, "overwrite", "tx-1", failed_overwrites=failed,
+    )
+    assert target is None
+    assert p.exists()  # unlink 실패 — 원본 그대로 남아야 함
+    assert failed == ["x.txt"]
+
+
+def test_resolve_conflict_overwrite_success_does_not_record_failure(manager, tmp_path):
+    """정상 overwrite 는 failed_overwrites 에 아무것도 남기지 않아야 한다."""
+    p = tmp_path / "x.txt"
+    p.write_bytes(b"old")
+    failed = []
+    target = manager._resolve_conflict(
+        p, 999, None, "overwrite", "tx-1", failed_overwrites=failed,
+    )
+    assert target == p
+    assert failed == []
 
 
 def test_resolve_conflict_skip_returns_none(manager, tmp_path):

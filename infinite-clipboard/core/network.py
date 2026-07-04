@@ -2,7 +2,8 @@
 서버/클라이언트 네트워크 계층
 
 TCP 소켓 기반 서버·클라이언트 구현.
-Protocol 모듈을 사용하여 메시지 생성/파싱, SHA-256 핸드셰이크 인증 수행.
+Protocol 모듈을 사용하여 메시지 생성/파싱, 3-step mutual HMAC 핸드셰이크 인증
+수행(v2.2 R3 hard break — 폐기된 단일 SHA-256 핸드셰이크를 대체).
 콜백 패턴으로 상위 계층에 이벤트 전달.
 """
 
@@ -25,9 +26,16 @@ logger = logging.getLogger(__name__)
 
 # ── 모듈 레벨 상수/헬퍼 ──────────────────────────────────────────────────
 
-# 단일 메시지 최대 크기 (32MB) — 1MB 청크의 base64+JSON ≈ 1.4MB가 정상 최대.
+# 단일 메시지 최대 크기 (32MB) — v3.0 부터 파일 청크는 base64 없이 원시 바이너리
+# 프레임(marker+meta_len+meta+raw bytes)으로 전송돼(Protocol.create_binary_chunk),
+# 1MB 청크의 정상 최대는 메타 JSON 몇백 바이트를 더한 ~1MB 수준. 32MB 상한은
 # 비정상 패킷(버그/악의적)으로 인한 메모리 폭발 방어용 상한.
 MAX_MESSAGE_SIZE = 32 * 1024 * 1024
+
+# 동시 연결(accept~_handle_client 스레드 종료 전) 상한 — LAN 환경에서 실사용
+# 기기 수(수 대~십수 대)보다 넉넉하되, handshake 를 완료하지 않고 연결만 열어
+# 스레드/fd 를 고갈시키는 slow-loris 류 공격을 차단 (H6).
+MAX_PENDING_CONNECTIONS = 32
 
 
 def _recv_all(sock: socket.socket, length: int) -> bytes:
@@ -88,7 +96,9 @@ class NetworkServer:
         Args:
             port: 바인드할 포트 번호
             auth_key: 클라이언트 인증에 사용할 공유 키
-            tailscale_trust: Tailscale 네트워크에서 인증 없이 허용
+            tailscale_trust: M4 — 인증을 우회/완화하지 않는다(HMAC 은 항상
+                필수). True 면 접속 peer 가 Tailscale IP 대역일 때 진단용
+                로그 한 줄만 남긴다.
             bind_address: bind 할 IP 주소. 빈 문자열이면 v2.2 R2 자동 모드
                 (Tailscale IP 우선, 미감지 시 0.0.0.0 fallback). 명시적
                 "0.0.0.0" 은 모든 인터페이스 노출 (opt-in).
@@ -109,6 +119,12 @@ class NetworkServer:
         self.clients: Dict[socket.socket, Dict[str, str]] = {}
         self.clients_lock = threading.Lock()
         self._write_locks: Dict[socket.socket, threading.Lock] = {}  # 소켓별 write 직렬화
+
+        # H6: accept 됐으나 아직 _handle_client 스레드가 안 끝난 연결 수.
+        # clients_lock 과 별개 — pending 은 handshake 미완료 연결도 포함해야 함
+        # (clients dict 는 handshake 성공 후에만 채워짐).
+        self._pending_lock = threading.Lock()
+        self._pending_count = 0
 
         self.server_socket: Optional[socket.socket] = None
         self.running = False
@@ -149,9 +165,15 @@ class NetworkServer:
         # 명시적 값 (validation 통과한 IP)
         if self.bind_address:
             if self.bind_address == "0.0.0.0":
+                # M1: 프로토콜은 HMAC 인증만 하고 페이로드 자체는 암호화하지 않는
+                # 평문 JSON — 0.0.0.0 은 물리 LAN(공유 Wi-Fi 등)의 다른 기기도
+                # 접속을 "시도"할 수 있게 하고, auth_key 를 모르는 제3자도 패킷을
+                # 스니핑하면 클립보드 내용을 그대로 읽을 수 있다.
                 logger.warning(
                     "서버가 0.0.0.0 으로 bind — 모든 인터페이스 노출 (opt-in). "
-                    "Tailscale 외 노출이 의도되지 않았다면 설정창에서 'Tailscale 자동' 으로 변경"
+                    "프로토콜은 평문(암호화 없음)이라 같은 물리 LAN 의 제3자가 "
+                    "클립보드 내용을 스니핑할 수 있음. Tailscale 외 노출이 "
+                    "의도되지 않았다면 설정창에서 'Tailscale 자동' 으로 변경"
                 )
             return self.bind_address
 
@@ -195,6 +217,9 @@ class NetworkServer:
             self.clients.clear()
             self._write_locks.clear()
 
+        with self._pending_lock:
+            self._pending_count = 0
+
         # 서버 소켓 종료
         if self.server_socket:
             try:
@@ -219,6 +244,21 @@ class NetworkServer:
             try:
                 client_socket, address = self.server_socket.accept()
                 client_socket.settimeout(30)
+
+                # H6: handshake 미완료 연결이 스레드/fd 를 무한히 점유하는
+                # slow-loris 방어 — 상한 초과 시 스레드를 만들지 않고 즉시 거부.
+                with self._pending_lock:
+                    if self._pending_count >= MAX_PENDING_CONNECTIONS:
+                        logger.warning(
+                            f"동시 연결 상한({MAX_PENDING_CONNECTIONS}) 초과 — "
+                            f"연결 거부(slow-loris 방어): {address}"
+                        )
+                        try:
+                            client_socket.close()
+                        except OSError:
+                            pass
+                        continue
+                    self._pending_count += 1
 
                 logger.info(f"새 연결 시도: {address}")
 
@@ -290,6 +330,9 @@ class NetworkServer:
                 sock.close()
                 return
 
+            # M4: 여기 도달했다는 건 위 HMAC 검증을 이미 통과했다는 뜻 — 즉 이
+            # 블록은 인증 여부에 영향을 주지 않는 진단용 로그일 뿐이다(과거엔
+            # "Tailscale 이면 인증 완화" 로 오인되기 쉬운 이름/문서였음).
             if self.tailscale_trust:
                 from core.tailscale import is_tailscale_ip
                 if is_tailscale_ip(client_ip):
@@ -369,7 +412,7 @@ class NetworkServer:
                 except socket.timeout:
                     # 타임아웃(30초) 시 PING 전송하여 연결 유지 확인
                     try:
-                        wl = self._write_locks.get(sock)
+                        wl = self._get_write_lock(sock)
                         ping = self.protocol.create_message(MSG_PING)
                         if wl:
                             with wl:
@@ -387,6 +430,10 @@ class NetworkServer:
                 logger.debug(f"종료 중 client recv 정리: {client_name}")
 
         finally:
+            # H6: 이 연결이 점유하던 pending 슬롯 반환 (성공/실패 무관 1회)
+            with self._pending_lock:
+                self._pending_count = max(0, self._pending_count - 1)
+
             # 클라이언트 제거 및 정리
             with self.clients_lock:
                 if sock in self.clients:
@@ -406,6 +453,14 @@ class NetworkServer:
                     self.on_client_disconnected(sock, address, client_name, client_peer_id)
                 except Exception as e:
                     logger.error(f"on_client_disconnected 콜백 오류: {e}")
+
+    def _get_write_lock(self, sock: socket.socket) -> Optional[threading.Lock]:
+        """소켓별 write lock 을 clients_lock 보호 하에 조회 (M3 — dict 자체 조회를
+        lock 밖에서 하면 등록/제거와 레이스). 조회만 락 안에서 하고, 반환된 Lock
+        으로 실제 sendall 을 감싸는 건 호출부가 락 밖에서 수행 — 느린 클라이언트가
+        clients_lock 을 붙잡는 것은 방지."""
+        with self.clients_lock:
+            return self._write_locks.get(sock)
 
     def broadcast(self, msg_type: str, data: Any = None, exclude_sock: socket.socket = None):
         """
@@ -432,14 +487,19 @@ class NetworkServer:
         failed = []
         for client_socket in targets:
             try:
-                wl = self._write_locks.get(client_socket)
+                wl = self._get_write_lock(client_socket)
                 if wl:
                     with wl:
                         client_socket.sendall(message_bytes)
                 else:
                     client_socket.sendall(message_bytes)
             except Exception as e:
-                logger.error(f"브로드캐스트 전송 오류: {e}")
+                # L3: stop() 이 소켓을 닫는 중이면 이 실패는 정상 종료의
+                # 자연스러운 결과 — self.running 이 False 인 그 경우만 debug 로.
+                if self.running:
+                    logger.error(f"브로드캐스트 전송 오류: {e}")
+                else:
+                    logger.debug(f"종료 중 브로드캐스트 정리: {e}")
                 failed.append(client_socket)
 
         # 전송 실패한 소켓 정리
@@ -463,14 +523,17 @@ class NetworkServer:
         failed = []
         for client_socket in targets:
             try:
-                wl = self._write_locks.get(client_socket)
+                wl = self._get_write_lock(client_socket)
                 if wl:
                     with wl:
                         client_socket.sendall(raw_message)
                 else:
                     client_socket.sendall(raw_message)
             except Exception as e:
-                logger.error(f"브로드캐스트(raw) 전송 오류: {e}")
+                if self.running:
+                    logger.error(f"브로드캐스트(raw) 전송 오류: {e}")
+                else:
+                    logger.debug(f"종료 중 브로드캐스트(raw) 정리: {e}")
                 failed.append(client_socket)
 
         if failed:
@@ -493,14 +556,17 @@ class NetworkServer:
         """
         try:
             message_bytes = self.protocol.create_message(msg_type, data)
-            wl = self._write_locks.get(sock)
+            wl = self._get_write_lock(sock)
             if wl:
                 with wl:
                     sock.sendall(message_bytes)
             else:
                 sock.sendall(message_bytes)
         except Exception as e:
-            logger.error(f"메시지 전송 오류: {e}")
+            if self.running:
+                logger.error(f"메시지 전송 오류: {e}")
+            else:
+                logger.debug(f"종료 중 메시지 전송 정리: {e}")
 
     # ── v3.0: targeted relay (peer_id → 특정 소켓) ─────────────────────
     # 별-토폴로지에서 서버가 receiver_peer 가진 메시지를 broadcast 대신 해당
@@ -538,7 +604,7 @@ class NetworkServer:
             return False
         try:
             message_bytes = self.protocol.create_message(msg_type, data)
-            wl = self._write_locks.get(sock)
+            wl = self._get_write_lock(sock)
             if wl:
                 with wl:
                     sock.sendall(message_bytes)
@@ -546,7 +612,10 @@ class NetworkServer:
                 sock.sendall(message_bytes)
             return True
         except Exception as e:
-            logger.error(f"send_to_peer 전송 오류 ({peer_id[:8]}…): {e}")
+            if self.running:
+                logger.error(f"send_to_peer 전송 오류 ({peer_id[:8]}…): {e}")
+            else:
+                logger.debug(f"종료 중 send_to_peer 정리 ({peer_id[:8]}…): {e}")
             self._drop_socket(sock)
             return False
 
@@ -563,7 +632,7 @@ class NetworkServer:
             logger.warning(f"send_raw_to_peer: peer {peer_id[:8]}… 없음 — drop")
             return False
         try:
-            wl = self._write_locks.get(sock)
+            wl = self._get_write_lock(sock)
             if wl:
                 with wl:
                     sock.sendall(raw_message)
@@ -571,7 +640,10 @@ class NetworkServer:
                 sock.sendall(raw_message)
             return True
         except Exception as e:
-            logger.error(f"send_raw_to_peer 전송 오류 ({peer_id[:8]}…): {e}")
+            if self.running:
+                logger.error(f"send_raw_to_peer 전송 오류 ({peer_id[:8]}…): {e}")
+            else:
+                logger.debug(f"종료 중 send_raw_to_peer 정리 ({peer_id[:8]}…): {e}")
             self._drop_socket(sock)
             return False
 
@@ -615,10 +687,22 @@ class NetworkClient:
         self._conn_lock = threading.Lock()  # connected/socket 접근 보호
         self._write_lock = threading.Lock()  # sendall 직렬화
         self._ever_connected = False  # 한 번이라도 연결 성공한 적 있는지
+        # 리뷰 발견: on_disconnected 콜백은 원래 was_connected(=_ever_connected)
+        # 가 True 일 때만 불렸는데, 이러면 "한 번도 연결된 적 없는" 첫 페어링
+        # 시도에서 버전 불일치(hard break)가 나도 M9 의 reason 통지가 영영 안
+        # 불린다 — 신규 페어링/한쪽만 업그레이드가 가장 흔한 실사용 트리거인데
+        # 그 경우를 놓침. hard break 사유는 재시도해도 스스로 해소 안 되는
+        # 정적인 문제라 was_connected 게이트를 우회하되, 5초마다 재시도하며
+        # 매번 알리면 스팸이 되므로 동일 사유는 1회만 통지한다.
+        self._last_notified_disconnect_reason: Optional[str] = None
 
         # 콜백 속성 (상위 계층에서 설정)
         self.on_connected: Optional[Callable] = None           # ()
-        self.on_disconnected: Optional[Callable] = None        # ()
+        # M9: reason(str, 기본 "") — handshake 실패(버전 불일치 등)처럼 원인이
+        # 있으면 채워서 전달. main.py 가 하드브레이크/버전 불일치를 사용자에게
+        # 구분해 알릴 수 있게 함 (과거엔 상세 사유가 로그에만 남고 UI 는
+        # "연결 끊김"이라는 일반 문구뿐이었음).
+        self.on_disconnected: Optional[Callable] = None        # (reason: str = "")
         self.on_message_received: Optional[Callable] = None    # (message)
 
     def start(self):
@@ -761,6 +845,9 @@ class NetworkClient:
                 self.connected = True
                 self._ever_connected = True
                 self.socket.settimeout(30)  # 수신 타임아웃 설정
+            # 성공했으니 이전에 억눌렀던 disconnect 사유를 초기화 — 나중에
+            # 다시 같은(또는 다른) hard break 가 나면 다시 1회 통지해야 하므로.
+            self._last_notified_disconnect_reason = None
 
             logger.info(
                 f"서버 연결 성공 (HMAC v{PROTOCOL_VERSION}): {self.host}:{self.port} "
@@ -790,10 +877,22 @@ class NetworkClient:
                         pass
                     self.socket = None
 
-            # 한 번이라도 연결된 적 있을 때 + 의식적 종료가 아닐 때만 콜백
-            if was_connected and self.running and self.on_disconnected:
+            # 한 번이라도 연결된 적 있을 때 + 의식적 종료가 아닐 때만 콜백 —
+            # 단, 리뷰 발견: hard break(버전 불일치)는 재시도해도 스스로 안
+            # 풀리는 정적인 문제라 was_connected 게이트를 우회한다(가장 흔한
+            # 실사용 트리거인 "한 번도 연결된 적 없는 첫 페어링"을 놓치지
+            # 않기 위함). 대신 5초 재시도 루프가 매번 알리는 스팸을 막기 위해
+            # 동일 사유는 1회만 통지.
+            reason = str(e)
+            is_hard_break = "hard break" in reason or "version mismatch" in reason
+            should_notify = was_connected or (
+                is_hard_break and reason != self._last_notified_disconnect_reason
+            )
+            if should_notify and self.running and self.on_disconnected:
+                if is_hard_break:
+                    self._last_notified_disconnect_reason = reason
                 try:
-                    self.on_disconnected()
+                    self.on_disconnected(reason=reason)
                 except Exception as cb_err:
                     logger.error(f"on_disconnected 콜백 오류: {cb_err}")
 
@@ -870,7 +969,10 @@ class NetworkClient:
             with self._write_lock:
                 sock.sendall(message_bytes)
         except Exception as e:
-            logger.error(f"메시지 전송 오류: {e}")
+            if self.running:
+                logger.error(f"메시지 전송 오류: {e}")
+            else:
+                logger.debug(f"종료 중 메시지 전송 정리: {e}")
 
     def send_raw(self, raw_message: bytes):
         """이미 직렬화된 메시지 바이트를 서버에 전송합니다."""
@@ -883,6 +985,9 @@ class NetworkClient:
             with self._write_lock:
                 sock.sendall(raw_message)
         except Exception as e:
-            logger.error(f"메시지(raw) 전송 오류: {e}")
+            if self.running:
+                logger.error(f"메시지(raw) 전송 오류: {e}")
+            else:
+                logger.debug(f"종료 중 메시지(raw) 전송 정리: {e}")
             with self._conn_lock:
                 self.connected = False

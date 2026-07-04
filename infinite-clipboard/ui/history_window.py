@@ -72,11 +72,14 @@ def _prepare_preview(entry: dict) -> str:
 
 
 class HistoryWindow(customtkinter.CTkToplevel):
-    def __init__(self, history_list: list, clipboard_manager):
+    def __init__(self, history_list: list, clipboard_manager, corrupted: bool = False):
         super().__init__()
 
         self.history_list = history_list
         self.clipboard_manager = clipboard_manager
+        # M13: 이력 파일이 손상되어 초기화된 경우, "원래 비어있음" 과 구분되는
+        # 안내를 보여준다 (과거엔 완전 무음이라 사용자가 구분할 수 없었음).
+        self.corrupted = corrupted
 
         self.title("클립보드 이력")
         # 가로를 넉넉히 — preview 텍스트가 잘리지 않게
@@ -130,12 +133,20 @@ class HistoryWindow(customtkinter.CTkToplevel):
         self._item_widgets.clear()
 
         if not self.history_list:
-            empty = EmptyState(
-                self._scroll,
-                icon_name="inbox",
-                title="이력이 비어 있어요",
-                desc="어느 PC에서든 복사하면 여기 쌓입니다",
-            )
+            if self.corrupted:
+                empty = EmptyState(
+                    self._scroll,
+                    icon_name="inbox",
+                    title="이력 파일이 손상되어 초기화됐어요",
+                    desc="기존 파일은 clipboard_history.json.corrupt-* 로 백업됨",
+                )
+            else:
+                empty = EmptyState(
+                    self._scroll,
+                    icon_name="inbox",
+                    title="이력이 비어 있어요",
+                    desc="어느 PC에서든 복사하면 여기 쌓입니다",
+                )
             empty.pack(expand=True, pady=t.SP[10])
             self._item_widgets.append(empty)
             return
@@ -253,6 +264,10 @@ if __name__ == "__main__":
 
     customtkinter.set_appearance_mode("System")
     root = customtkinter.CTk()
+    # L5: 신규 CTk 루트 생성 시 CLAUDE.md 규칙 #7 — Cmd+V/우클릭 붙여넣기 활성화.
+    # (개발자 단독 실행 전용 블록 — 실사용 경로는 main.py 가 이미 호출)
+    from ui.components import enable_mac_clipboard_shortcuts
+    enable_mac_clipboard_shortcuts(root)
     root.withdraw()
     root.after(50, root.deiconify)
     root.after(100, root.withdraw)

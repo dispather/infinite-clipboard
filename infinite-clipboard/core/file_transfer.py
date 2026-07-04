@@ -902,7 +902,7 @@ class FileTransferManager:
         self, transfer_id: str, metadata: FileMetadata,
         dest_dir: Optional[Path] = None,
         conflict_policy: str = "rename_with_counter",
-    ) -> list[str]:
+    ) -> Tuple[list[str], list[str]]:
         """
         모든 파일 수신/조립 완료 후 목적지에 폴더 구조를 복원한다.
 
@@ -916,18 +916,23 @@ class FileTransferManager:
                 정책 무관 자동 skip 으로 우선 적용.
 
         Returns:
-            list[str]: 복원된 파일 절대경로 목록. dedup/skip 으로 새로 쓰지 않은
-                경우에도 기존 final_path 가 그대로 들어감 (사용자가 paste 가능하도록).
+            Tuple[list[str], list[str]]:
+                - 복원된 파일 절대경로 목록. dedup/skip 으로 새로 쓰지 않은 경우에도
+                  기존 final_path 가 그대로 들어감 (사용자가 paste 가능하도록).
+                - H8: policy=="overwrite" 인데 기존 파일 unlink 가 실패해 skip 으로
+                  강등된 파일명 목록 (호출자가 사용자에게 알리는 용도). 정상 경로면
+                  항상 빈 리스트.
         """
         # Task 2.5: transfer_id 형식 검증
         if not _is_valid_transfer_id(transfer_id):
             logger.error(f"[?] restore_folder 거부 (invalid transfer_id): {transfer_id!r}")
-            return []
+            return [], []
 
         target = dest_dir or self.download_path
         temp_dir = get_temp_dir(transfer_id)
 
         restored_paths: list[str] = []
+        failed_overwrites: list[str] = []
 
         for file_entry in metadata.files:
             rel_path = file_entry["path"]
@@ -952,6 +957,7 @@ class FileTransferManager:
             # None 반환은 skip (dedup 일치 또는 skip policy) — 기존 final_path 를 그대로 사용.
             target_path = self._resolve_conflict(
                 final_path, expected_size, expected_hash, conflict_policy, transfer_id,
+                failed_overwrites=failed_overwrites,
             )
 
             if target_path is None:
@@ -975,7 +981,7 @@ class FileTransferManager:
             shutil.rmtree(temp_dir, ignore_errors=True)
             logger.info(f"[{transfer_id}] 임시 디렉토리 삭제: {temp_dir}")
 
-        return restored_paths
+        return restored_paths, failed_overwrites
 
     # ── 디스크 공간 확인 ────────────────────────────────────────────
 
@@ -1041,6 +1047,7 @@ class FileTransferManager:
         expected_hash: Optional[str],
         policy: str,
         transfer_id: str,
+        failed_overwrites: Optional[list] = None,
     ) -> Optional[Path]:
         """동일 파일명 충돌을 dedup short-circuit + 4 정책으로 해결.
 
@@ -1060,7 +1067,12 @@ class FileTransferManager:
         if expected_hash and expected_size is not None:
             try:
                 actual_size = final_path.stat().st_size
-            except OSError:
+            except OSError as e:
+                # M14: 바로 아래 hash 계산 실패는 warning 로그를 남기는데
+                # stat() 실패만 조용히 무시돼 비일관이었다 — 같은 레벨로 통일.
+                logger.warning(
+                    f"[{transfer_id}] dedup stat 실패 ({final_path.name}): {e}"
+                )
                 actual_size = -1
             if actual_size == expected_size:
                 try:
@@ -1086,6 +1098,11 @@ class FileTransferManager:
                 logger.warning(
                     f"[{transfer_id}] overwrite 실패 → skip ({final_path.name}): {e}"
                 )
+                # H8: 사용자가 명시적으로 "overwrite" 를 선택했으므로, unlink 실패로
+                # 조용히 skip 강등되면 기존 파일이 남는 게 사용자 의도와 다르다.
+                # 호출자(restore_folder)가 사용자에게 알릴 수 있도록 기록한다.
+                if failed_overwrites is not None:
+                    failed_overwrites.append(final_path.name)
                 return None
 
         if policy == "skip":

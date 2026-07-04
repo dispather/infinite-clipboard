@@ -199,7 +199,11 @@ class TrayApp:
             cmd = [sys.executable, main_py, "--window", window_type]
 
         threading.Thread(
-            target=lambda: subprocess.Popen(cmd),
+            # M11: 함정 #8 과 동일 이유 — start_new_session 없으면 이 창이 tray
+            # 프로세스와 같은 세션/프로세스 그룹에 묶여, 개발 모드에서 터미널의
+            # Ctrl+C(SIGINT) 가 그룹 전체에 가면 "독립 프로세스"여야 할 창도
+            # 함께 죽는다.
+            target=lambda: subprocess.Popen(cmd, start_new_session=True),
             daemon=True,
         ).start()
 

@@ -17,6 +17,7 @@ if _parent not in sys.path:
     sys.path.insert(0, _parent)
 
 import json
+import threading
 import time
 import customtkinter
 
@@ -42,6 +43,19 @@ class TransferWindow(customtkinter.CTkToplevel):
         super().__init__()
 
         self._state_file = state_file
+
+        # M15: state_file 읽기(json.load)는 GUI 메인스레드(after 콜백)에서
+        # 500ms 마다 동기 I/O 로 실행돼, 느린 디스크/대용량 completed 목록/
+        # 백신 스캔 등에서 창 전체가 잠깐씩 멎을 수 있었다. 백그라운드 스레드가
+        # 파일을 읽어 공유 상태만 갱신하고, 메인스레드는 그 결과를 (I/O 없이)
+        # 위젯에 반영만 한다.
+        self._state_lock = threading.Lock()
+        # 최초 1회는 동기 읽기 — 창이 뜨자마자 현재 상태를 정확히 반영해야
+        # 하므로(빈 기본값으로 그렸다가 배경 스레드 첫 결과를 기다리면 초기
+        # 렌더가 늦거나 비결정적이 됨). 이후 갱신은 배경 스레드가 전담.
+        self._latest_state: dict = self._read_state()
+        self._reader_running = True
+        threading.Thread(target=self._state_reader_loop, daemon=True).start()
 
         self.title("파일 전송")
         # 세로를 넉넉히 — 완료 항목 여러 개가 한눈에 보이도록
@@ -147,8 +161,25 @@ class TransferWindow(customtkinter.CTkToplevel):
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return {"active": {}, "completed": []}
 
+    def _state_reader_loop(self) -> None:
+        """M15: 상태 파일 읽기(동기 I/O)를 GUI 메인스레드 밖에서 수행.
+
+        메인스레드는 self._latest_state 를 락으로 보호된 채 읽기만 하므로
+        파일 I/O 지연이 창 반응성에 영향을 주지 않는다.
+        """
+        while self._reader_running:
+            state = self._read_state()
+            with self._state_lock:
+                self._latest_state = state
+            time.sleep(0.5)
+
+    def destroy(self):
+        self._reader_running = False
+        super().destroy()
+
     def _poll_state(self):
-        state = self._read_state()
+        with self._state_lock:
+            state = self._latest_state
         active = state.get("active", {})
         completed = state.get("completed", [])
         receivable = state.get("receivable", [])
@@ -495,6 +526,10 @@ class TransferWindow(customtkinter.CTkToplevel):
 if __name__ == "__main__":
     customtkinter.set_appearance_mode("System")
     root = customtkinter.CTk()
+    # L5: 신규 CTk 루트 생성 시 CLAUDE.md 규칙 #7 — Cmd+V/우클릭 붙여넣기 활성화.
+    # (개발자 단독 실행 전용 블록 — 실사용 경로는 main.py 가 이미 호출)
+    from ui.components import enable_mac_clipboard_shortcuts
+    enable_mac_clipboard_shortcuts(root)
     root.withdraw()
     root.after(50, root.deiconify)
     root.after(100, root.withdraw)

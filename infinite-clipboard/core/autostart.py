@@ -203,11 +203,16 @@ def _linux_enable(exe_path: str) -> bool:
             target.symlink_to(system_desktop)
         else:
             # 개발 모드 / AppImage 등 시스템 설치 아닌 경우 — 동적 .desktop 생성
+            # M10: exe_path 에 공백이 있으면(설치 경로에 공백 포함 등)
+            # Exec= 이 whitespace-split 인자로 갈라져 autostart 가 깨진다.
+            # _windows_enable 과 동일 패턴 — 이미 quoted(dev 모드 문자열)면
+            # 중복으로 감싸지 않는다.
+            exec_value = exe_path if exe_path.startswith('"') else f'"{exe_path}"'
             content = f"""[Desktop Entry]
 Type=Application
 Name={APP_NAME}
 Comment=Tailscale LAN 클립보드/파일 공유
-Exec={exe_path}
+Exec={exec_value}
 Icon=infinite-clipboard
 Terminal=false
 Categories=Utility;Network;

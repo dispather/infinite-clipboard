@@ -12,6 +12,7 @@
 import json
 import os
 import sys
+import time
 import uuid
 
 import pytest
@@ -111,5 +112,44 @@ def test_receive_click_writes_ipc(gui_root, tmp_path, monkeypatch):
             reqs = json.load(f)
         assert oid in reqs, f"offer_id 미기록: {reqs}"
         assert win._receivable_widgets[oid]["requested"] is True
+    finally:
+        win.destroy()
+
+
+def test_state_reader_thread_stops_on_destroy(gui_root, tmp_path):
+    """M15: state 읽기 백그라운드 스레드가 destroy() 이후 계속 돌면 안 된다
+    (창을 닫아도 파일을 계속 폴링하는 유령 스레드가 남으면 안 됨)."""
+    state_file = tmp_path / "transfer_state.json"
+    _write_state(state_file, [])
+    win = _make_window(gui_root, state_file)
+    assert win._reader_running is True
+    win.destroy()
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline and win._reader_running:
+        time.sleep(0.05)
+    assert win._reader_running is False, "M15 회귀 — destroy() 후에도 reader 스레드가 안 멈춤"
+
+
+def test_poll_state_does_not_perform_file_io_directly(gui_root, tmp_path, monkeypatch):
+    """M15: _poll_state 자체는 파일을 열지 않고 백그라운드가 채운
+    self._latest_state 만 읽어야 한다 — 메인스레드(GUI) I/O 회귀 가드."""
+    state_file = tmp_path / "transfer_state.json"
+    _write_state(state_file, [])
+    win = _make_window(gui_root, state_file)
+    try:
+        # 백그라운드 스레드는 잠시 멈추고, _read_state 호출 여부만 관찰
+        win._reader_running = False
+        time.sleep(0.6)  # 진행 중이던 마지막 sleep(0.5) 루프가 빠져나갈 시간
+
+        calls = []
+        original_read_state = win._read_state
+        win._read_state = lambda: (calls.append(1) or original_read_state())
+
+        win._poll_state()
+
+        assert not calls, (
+            f"M15 회귀 — _poll_state 가 메인스레드에서 직접 파일을 읽음 (호출 {len(calls)}회)"
+        )
     finally:
         win.destroy()
