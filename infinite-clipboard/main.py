@@ -36,9 +36,9 @@ if sys.platform.startswith("linux") and "PYSTRAY_BACKEND" not in os.environ:
 from config import AppConfig, load_config, save_config, get_last_config_warning
 from core.protocol import (
     MSG_CLIPBOARD, MSG_PING, MSG_PONG,
-    MSG_FILE_READY, MSG_FILE_REQUEST, MSG_FILE_START,
+    MSG_FILE_READY, MSG_FILE_START,
     MSG_FILE_CHUNK, MSG_FILE_END, MSG_FILE_ACK,
-    MSG_FILE_RESUME, MSG_FILE_CANCEL, MSG_FILE_CANCEL_ACK, MSG_FILE_ERROR,
+    MSG_FILE_CANCEL, MSG_FILE_CANCEL_ACK, MSG_FILE_ERROR,
     CANCEL_ACK_ROLE_SENDER, CANCEL_ACK_ROLE_RECEIVER, CANCEL_ACK_ROLE_NONE,
     CANCEL_ACK_STATUS_OK, CANCEL_ACK_STATUS_UNKNOWN,
     MSG_TRANSFER_COMPLETE,
@@ -51,7 +51,10 @@ from core.protocol import (
 from core.network import NetworkServer, NetworkClient
 from core.protocol import Protocol
 from core.clipboard_manager import ClipboardManager
-from core.file_transfer import FileTransferManager, FileMetadata, CheckpointManager, Checkpoint, format_size
+from core.file_transfer import (
+    FileTransferManager, FileMetadata, CheckpointManager, Checkpoint,
+    format_size, CHUNK_SIZE,
+)
 from core.privacy import detect_sensitive_kind
 # v3.0 lazy provider (OS 별 백엔드 팩토리 — 헤드리스/미지원 시 None graceful)
 from core.lazy_clipboard import get_lazy_provider, FetchedContent, KIND_FILE, KIND_IMAGE
@@ -410,10 +413,6 @@ class InfiniteClipboard:
             # v3.0: fetch 응답의 일부로 requester 에게만 targeted (receiver_peer 라우팅)
             self._server_route(MSG_FILE_READY, data, sock, self._handle_file_ready)
 
-        elif msg_type == MSG_FILE_REQUEST:
-            self._handle_file_request(data)
-            self.server.broadcast(MSG_FILE_REQUEST, data, exclude_sock=sock)
-
         elif msg_type == MSG_FILE_CHUNK:
             # v3.0 targeted relay: receiver_peer 가 있으면 그 peer 1 소켓에만 중계.
             #   - receiver_peer == 내 peer_id  → 내가 최종 수신자, 로컬 처리 (중계 안 함)
@@ -460,7 +459,7 @@ class InfiniteClipboard:
             # v3.0: receiver_peer 있으면 targeted (수신 측은 START 핸들러 없음 → local=None)
             self._server_route(msg_type, data, sock, None)
 
-        elif msg_type in (MSG_FILE_ACK, MSG_FILE_RESUME):
+        elif msg_type == MSG_FILE_ACK:
             self.server.broadcast(msg_type, data, exclude_sock=sock)
 
         elif msg_type == MSG_PING:
@@ -533,9 +532,6 @@ class InfiniteClipboard:
 
         elif msg_type == MSG_FILE_READY:
             self._handle_file_ready(data)
-
-        elif msg_type == MSG_FILE_REQUEST:
-            self._handle_file_request(data)
 
         elif msg_type == MSG_FILE_CHUNK:
             self._handle_file_chunk(data)
@@ -1005,6 +1001,37 @@ class InfiniteClipboard:
         """fetch 하드 타임아웃 (Rec 2). 크기 비례 + 하한/상한."""
         return max(30.0, min(600.0, total_size / (256 * 1024)))
 
+    def _load_resume_for_offer(self, offer_id, offer):
+        """[receiver] 이 offer 에 대한 이전 체크포인트가 있으면 이어받기 힌트로 변환.
+
+        transfer_id == offer_id 라 같은 offer 를 재fetch 하면 이전 시도의
+        체크포인트(core.file_transfer.CheckpointManager)를 그대로 조회할 수
+        있다. 체크포인트가 가리키는 파일이 지금 offer 의 파일 목록과 어긋나면
+        (오퍼가 그 사이 바뀌었거나 stale) 안전하게 무시하고 처음부터 fetch한다
+        — 부분 적용은 하지 않는다.
+        """
+        try:
+            checkpoint = self.checkpoint_manager.load(offer_id)
+        except Exception:
+            return None
+        if checkpoint is None:
+            return None
+        # offer["items"]["name"] 은 표시용 basename 뿐(_announce_offer 참조,
+        # 폴더 전송은 하위 경로를 포함하는 rel path 라 basename 비교로 대조).
+        offer_basenames = {item.get("name") for item in (offer.get("items") or [])}
+        candidates = list(checkpoint.completed_files)
+        if checkpoint.current_file:
+            candidates.append(checkpoint.current_file)
+        if not candidates or not all(
+            os.path.basename(c) in offer_basenames for c in candidates
+        ):
+            return None
+        return {
+            "completed_files": checkpoint.completed_files,
+            "current_file": checkpoint.current_file,
+            "last_chunk_index": checkpoint.last_chunk_index,
+        }
+
     def _fetch_offer(self, offer_id):
         """[receiver] lazy provider 콜백 — paste 시점 **동기** fetch.
 
@@ -1034,8 +1061,10 @@ class InfiniteClipboard:
                     "event": event, "paths": None, "fail": None,
                 }
             try:
+                resume = self._load_resume_for_offer(offer_id, offer)
                 raw = self.protocol.create_clip_fetch(
                     offer_id, self.config.peer_id, receiver_peer=source_peer,
+                    resume=resume,
                 )
                 self._send_raw_to(raw, source_peer)
                 timeout = self._fetch_timeout(total)
@@ -1111,12 +1140,18 @@ class InfiniteClipboard:
         if not all(os.path.exists(p) for p in offer["file_paths"]):
             self._send_fetch_fail(offer_id, FETCH_FAIL_MISSING, requester)
             return
+        resume = parsed.get("resume") or {}
         threading.Thread(
-            target=self._serve_fetch, args=(offer, requester), daemon=True,
+            target=self._serve_fetch, args=(offer, requester, resume), daemon=True,
         ).start()
 
-    def _serve_fetch(self, offer, requester):
-        """[source] fetch 응답 — requester 에게만 FILE_READY + 파일 전송. (A) 직렬화."""
+    def _serve_fetch(self, offer, requester, resume=None):
+        """[source] fetch 응답 — requester 에게만 FILE_READY + 파일 전송. (A) 직렬화.
+
+        resume: receiver 가 보낸 이어받기 힌트(completed_files/current_file/
+        last_chunk_index) — 없으면 처음부터(기존과 동일).
+        """
+        resume = resume or {}
         with self._outgoing_fetch_lock:  # invariant (A): 한 시점 1개 outgoing
             offer_id = offer["offer_id"]
             try:
@@ -1130,7 +1165,12 @@ class InfiniteClipboard:
                 self.file_manager.begin_outgoing(metadata, file_paths)
                 with self._transfers_lock:
                     self.outgoing_files[offer_id] = (metadata, file_paths)
-                self._send_files(offer_id, metadata, file_paths, receiver_peer=requester)
+                self._send_files(
+                    offer_id, metadata, file_paths, receiver_peer=requester,
+                    completed_files=set(resume.get("completed_files") or []),
+                    resume_file=resume.get("current_file", ""),
+                    resume_chunk_index=max(0, resume.get("last_chunk_index", -1) + 1),
+                )
             except Exception as e:
                 logger.error(f"[fetch] 응답 오류: {e}")
                 self._send_fetch_fail(offer_id, FETCH_FAIL_ERROR, requester)
@@ -1428,9 +1468,10 @@ class InfiniteClipboard:
             display_name = metadata.root_name or f"{metadata.file_count}개 파일"
             self._track_transfer(metadata.transfer_id, display_name, metadata.total_size, "receive")
 
-            # v3.0 S2c: **eager 자동 MSG_FILE_REQUEST 송출 제거**. 전송은 source 의
-            # fetch 응답(_serve_fetch)이 구동한다. 여기선 수신 pending 등록만 (chunk 수신
-            # 준비). FILE_READY 는 이제 fetch 응답의 일부로 requester 에게만 targeted 온다.
+            # v3.0 S2c: 전송은 source 의 fetch 응답(_serve_fetch)이 구동한다.
+            # 여기선 수신 pending 등록만 (chunk 수신 준비). FILE_READY 는 이제
+            # fetch 응답의 일부로 requester 에게만 targeted 온다. 이어받기는
+            # MSG_CLIP_FETCH 의 resume 필드로 처리(_load_resume_for_offer 참조).
             logger.info(
                 f"[파일] 수신 준비(lazy): {metadata.file_count}개, "
                 f"{format_size(metadata.total_size)}"
@@ -1438,30 +1479,17 @@ class InfiniteClipboard:
         except Exception as e:
             logger.error(f"FILE_READY 처리 오류: {e}")
 
-    def _handle_file_request(self, data):
-        """FILE_REQUEST 수신 → 파일 전송 시작 (별도 스레드, resume 정보 포함)"""
-        transfer_id = data.get("transfer_id")
-        with self._transfers_lock:
-            entry = self.outgoing_files.get(transfer_id)
-        if not entry:
-            return
-
-        metadata, file_paths = entry
-        # resume 정보 추출 (수신 측이 보낸 완료 파일 목록)
-        completed_files = set(data.get("completed_files", []))
-        threading.Thread(
-            target=self._send_files,
-            args=(transfer_id, metadata, file_paths, completed_files),
-            daemon=True,
-        ).start()
-
     def _send_files(self, transfer_id, metadata, file_paths, completed_files=None,
-                    receiver_peer=""):
+                    receiver_peer="", resume_file="", resume_chunk_index=0):
         """파일 전송 실행 (별도 스레드에서 호출)
 
         v3.0: receiver_peer 가 있으면 chunk meta 에 동봉 → 서버가 그 peer 에게만
         중계 (lazy fetch 응답). 빈 문자열이면 eager broadcast (현행 호환).
         Task 6 의 fetch 핸들러가 requester peer_id 를 주입한다.
+
+        resume_file/resume_chunk_index: 이어받기 — resume_file 과 일치하는
+        파일은 resume_chunk_index 부터만 청크를 보낸다(그 앞은 receiver 가
+        이전 시도에서 이미 받아 체크포인트로 확인된 상태).
         """
         completed_files = completed_files or set()
         bytes_sent = 0  # 전체 전송 바이트 누적
@@ -1470,6 +1498,8 @@ class InfiniteClipboard:
         for f in metadata.files:
             if f["path"] in completed_files:
                 bytes_sent += f["size"]
+            elif f["path"] == resume_file:
+                bytes_sent += min(resume_chunk_index * CHUNK_SIZE, f["size"])
 
         try:
             for file_idx, file_entry in enumerate(metadata.files):
@@ -1521,7 +1551,10 @@ class InfiniteClipboard:
                     bytes_sent += len(chunk_data)
                     self._update_transfer_bytes(_tid, bytes_sent)
 
-                sha256 = self.file_manager.send_file(abs_path, chunk_callback)
+                start_chunk_index = resume_chunk_index if rel_path == resume_file else 0
+                sha256 = self.file_manager.send_file(
+                    abs_path, chunk_callback, start_chunk_index=start_chunk_index,
+                )
 
                 # FILE_END (v3.0: receiver_peer 있으면 targeted)
                 end_data = {

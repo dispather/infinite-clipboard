@@ -11,20 +11,24 @@ test_version_compatibility 가 이미 커버 — 여기선 생략.
   #3 (중요도 8) 전송 도중 연결 끊김
   #4 (중요도 7) peer_id 재연결 레이스 (H1 트레이드오프의 self-heal 검증)
   #5 (중요도 7) dedup hash-injection 배선 통합 레벨
-  #7 (중요도 6) MSG_FILE_RESUME 흐름 — 아래 주석 참조(현재 아키텍처 caveat)
+  #7 (중요도 6) 이어받기(resume) — 2026-07-04 재설계로 MSG_CLIP_FETCH 의
+      resume 필드를 통한 실제 경로로 재구현. 아래 테스트 참조.
   #8 (중요도 5) conflict policy 4종 종단(socket)
 """
 
+import os
 import socket
 import threading
 import time
 import uuid
 
 import pytest
+import xxhash
 
 from config import AppConfig
+from core.file_transfer import Checkpoint, CHUNK_SIZE
 from core.network import NetworkClient, NetworkServer
-from core.protocol import MSG_TRANSFER_COMPLETE, generate_peer_id
+from core.protocol import generate_peer_id
 from main import InfiniteClipboard
 
 
@@ -397,44 +401,121 @@ def test_dedup_hash_injection_enables_second_transfer_skip(tmp_path):
         server_app.stop()
 
 
-# ── 갭 #7 (중요도 6): MSG_FILE_RESUME(체크포인트 재개) ───────────────────
+# ── 갭 #7 (중요도 6): 이어받기(resume) — MSG_CLIP_FETCH.resume 실경로 ─────
+# 2026-07-04 재설계: 예전엔 MSG_FILE_REQUEST/MSG_FILE_RESUME + 직접 호출로만
+# 검증되던 죽은 코드였음(송신부 자체가 없어 실제로 한 번도 안 불림). 이제는
+# _fetch_offer 가 CheckpointManager 를 직접 읽어 MSG_CLIP_FETCH.resume 필드에
+# 실어 보내고, source 가 그 힌트로 완료 파일 skip + 진행 중 파일 이어보내기를
+# 수행한다(main.py `_load_resume_for_offer`/`_serve_fetch`/`_send_files`,
+# core/file_transfer.py `FileTransferManager.send_file(start_chunk_index=...)`).
 
-def test_file_resume_skips_completed_files(tmp_path):
-    """completed_files 로 보고된 파일은 재전송하지 않고 TRANSFER_COMPLETE 로
-    바로 넘어가야 한다.
 
-    ⚠️ 발견 사항: v3.0 lazy 흐름은 MSG_FILE_REQUEST 를 어디서도 송신하지
-    않는다(grep 결과 송신부 無 — eager 자동 REQUEST 는 v3.0 S2c 에서 명시적
-    으로 제거됨). 즉 `_handle_file_request`/이어받기 스킵 로직은 현재
-    아키텍처의 실제 유저 흐름에서 호출되는 경로가 없다. 이 테스트는 그
-    코드가 "직접 호출되면" 여전히 올바르게 동작함을 보장할 뿐 — 라이브
-    경로에 연결돼 있다는 뜻은 아니다. 재도입하거나 죽은 코드로 정리할지는
-    별도 판단 필요.
-    """
-    app = _make_app("client", _free_port(), tmp_path / "dl")
-    f1 = tmp_path / "resume.bin"
-    f1.write_bytes(b"resume-content " * 2000)
-    metadata = app.file_manager.collect_metadata([str(f1)])
-    transfer_id = metadata.transfer_id
-    with app._transfers_lock:
-        app.outgoing_files[transfer_id] = (metadata, [str(f1)])
+def test_resume_skips_completed_file_and_resumes_partial_file(tmp_path, monkeypatch):
+    """이전 시도에서 한 파일은 완전히 받았고 다른 파일은 일부 청크만 받은
+    상태(체크포인트로 기록됨)에서 같은 offer 를 다시 fetch 하면: 완료 파일은
+    재전송하지 않고, 진행 중이던 파일은 저장된 last_chunk_index 다음부터만
+    전송돼야 한다."""
+    # staging(_staging_dir())은 tempfile.gettempdir()/ic_clipboard 고정 경로라
+    # 테스트 간 격리가 안 됨 — 다른 테스트들처럼 uuid 접미사로 이름 충돌(dedup/
+    # conflict-rename)을 피한다.
+    uid = uuid.uuid4().hex
+    done_name = f"resume-done-{uid}.bin"
+    partial_name = f"resume-partial-{uid}.bin"
+    src = tmp_path / "src"
+    src.mkdir()
+    done_content = b"already-fully-received-content"
+    (src / done_name).write_bytes(done_content)
+    partial_content = os.urandom(CHUNK_SIZE * 3 + CHUNK_SIZE // 2)
+    (src / partial_name).write_bytes(partial_content)
 
-    sent_types = []
-    app._send_msg = lambda msg_type, data=None: sent_types.append(msg_type)
-    app._send_raw_msg = lambda raw: sent_types.append("raw_chunk")
+    server_app, client_app, _server_stub, client_stub = _setup_pair(tmp_path)
+    try:
+        server_app._announce_offer([str(src / done_name), str(src / partial_name)])
+        assert _wait_until(lambda: client_stub.captured is not None)
+        offer, fetch_cb = client_stub.captured
+        offer_id = offer["offer_id"]
 
-    rel_path = metadata.files[0]["path"]
-    app._handle_file_request({
-        "transfer_id": transfer_id,
-        "completed_files": [rel_path],
-    })
+        rel_paths = [f["path"] for f in server_app.current_offer["metadata"].files]
+        rel_done = next(p for p in rel_paths if os.path.basename(p) == done_name)
+        rel_partial = next(p for p in rel_paths if os.path.basename(p) == partial_name)
 
-    assert _wait_until(lambda: MSG_TRANSFER_COMPLETE in sent_types, timeout=2.0), (
-        f"TRANSFER_COMPLETE 가 전송되지 않음: {sent_types}"
-    )
-    assert "raw_chunk" not in sent_types, (
-        "테스트갭 #7 회귀 — completed_files 로 보고된 파일인데 청크를 다시 보냄"
-    )
+        # 이전 시도 시뮬레이션 — done.bin 은 전부(단일 청크), partial.bin 은
+        # 앞 2청크(index 0, 1)만 실제 수신됨. restore_folder 는 완료 처리 시
+        # assembled 임시 파일의 실존 여부로 옮길지 판단하므로, done.bin 이
+        # "완료됐다"고 하려면 그 assembled 임시 파일이 실제로 있어야 한다.
+        assert client_app.file_manager.receive_chunk(
+            offer_id, rel_done, 0, done_content, xxhash.xxh64(done_content).hexdigest()
+        )
+        for idx in range(2):
+            chunk = partial_content[idx * CHUNK_SIZE:(idx + 1) * CHUNK_SIZE]
+            assert client_app.file_manager.receive_chunk(
+                offer_id, rel_partial, idx, chunk, xxhash.xxh64(chunk).hexdigest()
+            )
+        client_app.checkpoint_manager.save(Checkpoint(
+            transfer_id=offer_id,
+            completed_files=[rel_done],
+            current_file=rel_partial,
+            last_chunk_index=1,
+        ))
+
+        calls = []
+        original_send_file = server_app.file_manager.send_file
+
+        def spy_send_file(filepath, cb, start_chunk_index=0):
+            calls.append((os.path.basename(filepath), start_chunk_index))
+            return original_send_file(filepath, cb, start_chunk_index=start_chunk_index)
+
+        monkeypatch.setattr(server_app.file_manager, "send_file", spy_send_file)
+
+        fetched = fetch_cb(offer_id)
+
+        names_called = {name for name, _ in calls}
+        assert done_name not in names_called, "완료 파일을 재전송함 — 재개 skip 실패"
+        assert dict(calls).get(partial_name) == 2, (
+            f"이어받기 시작 위치가 last_chunk_index+1(=2) 이 아님: {calls}"
+        )
+
+        contents = {os.path.basename(p): open(p, "rb").read() for p in fetched.paths}
+        assert contents[done_name] == done_content
+        assert contents[partial_name] == partial_content
+        assert client_app.checkpoint_manager.load(offer_id) is None, (
+            "성공 후 체크포인트가 정리되지 않음"
+        )
+    finally:
+        client_app.stop()
+        server_app.stop()
+
+
+def test_resume_ignored_when_checkpoint_does_not_match_current_offer(tmp_path):
+    """체크포인트가 가리키는 파일이 현재 offer 의 파일 목록에 없으면(오퍼가
+    그 사이 바뀌었거나 stale) 이어받기를 시도하지 않고 처음부터 정상
+    전송돼야 한다 — 부분 적용으로 인한 오조립을 막는 안전장치."""
+    new_name = f"resume-new-{uuid.uuid4().hex}.bin"
+    src = tmp_path / "src"
+    src.mkdir()
+    content = b"fresh-offer-unrelated-to-old-checkpoint"
+    (src / new_name).write_bytes(content)
+
+    server_app, client_app, _server_stub, client_stub = _setup_pair(tmp_path)
+    try:
+        server_app._announce_offer([str(src / new_name)])
+        assert _wait_until(lambda: client_stub.captured is not None)
+        offer, fetch_cb = client_stub.captured
+        offer_id = offer["offer_id"]
+
+        # new.bin 과 무관한 stale 체크포인트 (예: 이전 오퍼가 다른 파일을 담았음).
+        client_app.checkpoint_manager.save(Checkpoint(
+            transfer_id=offer_id,
+            completed_files=["gone.bin"],
+            current_file="",
+            last_chunk_index=-1,
+        ))
+
+        fetched = fetch_cb(offer_id)
+        assert open(fetched.paths[0], "rb").read() == content
+    finally:
+        client_app.stop()
+        server_app.stop()
 
 
 # ── 갭 #8 (중요도 5): conflict policy 4종 종단(socket) ───────────────────

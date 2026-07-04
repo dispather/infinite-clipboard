@@ -686,6 +686,7 @@ class FileTransferManager:
         self,
         filepath: str,
         chunk_callback: Callable[[int, bytes, str], None],
+        start_chunk_index: int = 0,
     ) -> str:
         """
         파일을 1MB 청크로 분할하여 콜백을 통해 전송한다.
@@ -696,6 +697,11 @@ class FileTransferManager:
         Args:
             filepath: 전송할 파일 경로
             chunk_callback: chunk_callback(chunk_index, chunk_data, chunk_hash) 형태
+            start_chunk_index: 이어받기 — 이 인덱스 이상인 청크만 콜백 호출(전송).
+                SHA-256 은 이어받기 여부와 무관하게 항상 파일 전체 기준으로
+                계산한다(수신측 FILE_END 가 전체 파일 해시로 검증하므로). 앞부분을
+                다시 읽고 해시만 하는 로컬 I/O 비용은 네트워크 재전송을 아끼는
+                대가로 감수한다.
 
         Returns:
             str: 파일 전체 SHA-256 해시 (16진수)
@@ -713,7 +719,7 @@ class FileTransferManager:
                     # 실패가 전송 전체(폴더/다중 파일)를 취소시킨다(.gitkeep 등 흔한
                     # 케이스). 빈 청크를 1회 호출해 수신측 "첫 청크면 조립 파일
                     # touch" 로직을 그대로 태워 0바이트 assembled 파일을 만든다.
-                    if chunk_index == 0:
+                    if chunk_index == 0 and start_chunk_index == 0:
                         empty_hash = xxhash.xxh64(b"").hexdigest()
                         chunk_callback(0, b"", empty_hash)
                     break
@@ -721,11 +727,12 @@ class FileTransferManager:
                 # 청크별 xxHash64 해시
                 chunk_hash = xxhash.xxh64(chunk_data).hexdigest()
 
-                # 전체 파일 SHA-256 누적
+                # 전체 파일 SHA-256 누적 (이어받기 여부 무관 — 항상 전체 기준)
                 sha256.update(chunk_data)
 
-                # 콜백 호출
-                chunk_callback(chunk_index, chunk_data, chunk_hash)
+                # 콜백 호출 — start_chunk_index 이상만 실제 전송
+                if chunk_index >= start_chunk_index:
+                    chunk_callback(chunk_index, chunk_data, chunk_hash)
                 chunk_index += 1
 
         return sha256.hexdigest()

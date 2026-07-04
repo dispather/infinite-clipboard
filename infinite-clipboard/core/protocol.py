@@ -38,13 +38,11 @@ MSG_PONG = "pong"                    # 연결 유지 확인 응답
 MSG_CLIPBOARD = "clipboard"          # 클립보드 데이터 전송
 
 MSG_FILE_READY = "file_ready"        # 파일 준비됨 (메타데이터만, 전송 대기)
-MSG_FILE_REQUEST = "file_request"    # 파일 전송 요청 (붙여넣기 시)
 MSG_FILE_START = "file_start"        # 파일 전송 시작 (메타데이터)
 MSG_FILE_CHUNK = "file_chunk"        # 파일 청크 데이터
 MSG_FILE_PROGRESS = "file_progress"  # 파일 전송 진행률
 MSG_FILE_END = "file_end"            # 파일 전송 완료
 MSG_FILE_ACK = "file_ack"            # 파일/청크 수신 확인
-MSG_FILE_RESUME = "file_resume"      # 이어받기 요청
 MSG_FILE_CANCEL = "file_cancel"      # 파일 전송 취소
 MSG_FILE_CANCEL_ACK = "file_cancel_ack"  # v2.3.1: 취소 ack (peer cleanup 확인)
 MSG_FILE_ERROR = "file_error"        # 파일 전송 오류
@@ -684,11 +682,16 @@ class Protocol:
 
     def create_clip_fetch(
         self, offer_id: str, requester_peer: str, receiver_peer: str = "",
+        resume: Optional[Dict[str, Any]] = None,
     ) -> bytes:
         """paste 시점 fetch 요청.
 
         receiver_peer 는 라우팅 대상(=offer 의 source_peer)으로, main 이 offer 에서
         조회해 채운다. 빈 문자열이면 broadcast (fallback).
+
+        resume: 이어받기 힌트(선택) — {"completed_files": [...], "current_file":
+        str, "last_chunk_index": int}. 생략 시 기존과 동일(처음부터 전송) —
+        구버전 피어와 와이어 호환.
         """
         if not is_valid_transfer_id(offer_id):
             raise ValueError(f"invalid offer_id: {offer_id!r}")
@@ -696,14 +699,21 @@ class Protocol:
             raise ValueError(f"invalid requester_peer: {requester_peer!r}")
         if receiver_peer and not is_valid_peer_id(receiver_peer):
             raise ValueError(f"invalid receiver_peer: {receiver_peer!r}")
-        return self.create_message(MSG_CLIP_FETCH, {
+        payload: Dict[str, Any] = {
             "offer_id": offer_id,
             "requester_peer": requester_peer,
             "receiver_peer": receiver_peer,
-        })
+        }
+        if resume:
+            payload["resume"] = {
+                "completed_files": list(resume.get("completed_files") or []),
+                "current_file": str(resume.get("current_file") or ""),
+                "last_chunk_index": int(resume.get("last_chunk_index", -1)),
+            }
+        return self.create_message(MSG_CLIP_FETCH, payload)
 
     @staticmethod
-    def parse_clip_fetch(data: object) -> Optional[Dict[str, str]]:
+    def parse_clip_fetch(data: object) -> Optional[Dict[str, Any]]:
         if not isinstance(data, dict):
             return None
         offer_id = data.get("offer_id")
@@ -715,11 +725,30 @@ class Protocol:
             return None
         if receiver_peer != "" and not is_valid_peer_id(receiver_peer):
             return None
-        return {
+        result = {
             "offer_id": offer_id,
             "requester_peer": requester_peer,
             "receiver_peer": receiver_peer,
         }
+        # resume 은 순전히 최적화 힌트 — 형식이 어긋나도 fetch 자체는 유효하게
+        # 처리되도록(처음부터 전송) 조용히 무시한다(하드 거부 X).
+        resume = data.get("resume")
+        if isinstance(resume, dict):
+            completed = resume.get("completed_files")
+            current_file = resume.get("current_file", "")
+            last_chunk_index = resume.get("last_chunk_index", -1)
+            if (
+                isinstance(completed, list)
+                and all(isinstance(p, str) for p in completed)
+                and isinstance(current_file, str)
+                and isinstance(last_chunk_index, int)
+            ):
+                result["resume"] = {
+                    "completed_files": completed,
+                    "current_file": current_file,
+                    "last_chunk_index": last_chunk_index,
+                }
+        return result
 
     def create_clip_fetch_fail(
         self, offer_id: str, reason: str, receiver_peer: str = "",

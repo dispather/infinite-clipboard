@@ -1,6 +1,7 @@
 """파일 전송 회귀 테스트 — offset write, assemble, path traversal 방어."""
 
 import hashlib
+import os
 import shutil
 import tempfile
 import uuid
@@ -245,6 +246,51 @@ def test_send_file_nonempty_multiple_of_chunk_size_no_extra_callback(manager, tm
     calls = []
     manager.send_file(str(f), lambda idx, data, h: calls.append((idx, len(data))))
     assert calls == [(0, CHUNK_SIZE)], f"예상 밖 청크 콜백: {calls}"
+
+
+def test_send_file_start_chunk_index_skips_callback_but_hashes_whole_file(manager, tmp_path):
+    """이어받기(resume): start_chunk_index 이전 청크는 콜백(=전송)되지 않아야
+    하지만, 반환되는 SHA-256 은 항상 파일 전체 기준이어야 한다(수신측
+    FILE_END 가 전체 파일 해시로 검증하므로)."""
+    from core.file_transfer import CHUNK_SIZE
+    content = os.urandom(CHUNK_SIZE * 3 + CHUNK_SIZE // 2)
+    f = tmp_path / "big.bin"
+    f.write_bytes(content)
+
+    calls_from_zero = []
+    sha_from_zero = manager.send_file(
+        str(f), lambda idx, data, h: calls_from_zero.append((idx, len(data))),
+    )
+
+    calls_resumed = []
+    sha_resumed = manager.send_file(
+        str(f), lambda idx, data, h: calls_resumed.append((idx, len(data))),
+        start_chunk_index=2,
+    )
+
+    assert [idx for idx, _ in calls_from_zero] == [0, 1, 2, 3]
+    assert [idx for idx, _ in calls_resumed] == [2, 3], (
+        "start_chunk_index 이전 청크가 콜백(전송)됨 — 이어받기 skip 실패"
+    )
+    assert sha_resumed == sha_from_zero == hashlib.sha256(content).hexdigest(), (
+        "이어받기 시에도 SHA-256 은 항상 파일 전체 기준이어야 함"
+    )
+
+
+def test_send_file_start_chunk_index_beyond_end_sends_nothing(manager, tmp_path):
+    """체크포인트가 stale 해 start_chunk_index 가 실제 청크 수를 넘는 경우
+    (예: 소스 파일이 그 사이 작아짐) 조용히 아무 청크도 안 보내고 끝나야
+    한다(크래시/무한루프 없이) — _load_resume_for_offer 의 방어 검증과 별개로
+    send_file 자체도 안전해야 하는 안전망."""
+    f = tmp_path / "small.bin"
+    f.write_bytes(b"tiny content")
+
+    calls = []
+    sha = manager.send_file(
+        str(f), lambda idx, data, h: calls.append(idx), start_chunk_index=99,
+    )
+    assert calls == []
+    assert sha == hashlib.sha256(b"tiny content").hexdigest()
 
 
 # ═══════════════════════════════════════════════════════════════════════
