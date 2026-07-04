@@ -101,10 +101,11 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install Python deps
-        # test_lazy_win 은 core.lazy_win(+stdlib) + pywin32 만 필요 (UI deps 무관) → 경량 설치
+        # core.lazy_win 이 core.clipboard_manager.WINDOWS_CLIPBOARD_LOCK 을 import 하는데
+        # clipboard_manager 최상단이 `from PIL import Image` 라 pillow 도 필요 (2026-07-04 CI 5-fail 수정)
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest pywin32
+          python -m pip install pytest pywin32 "pillow>=12.2.0"
       - name: Run Windows lazy tests (delayed render round-trip)
         # S0 미결(대용량 GetClipboardData NULL)이 프로덕션 블로킹 PumpMessages 루프에서
         # 해소되는지 검증하는 핵심 잡 — 특히 test_win_large_payload(~1MB CF/PNG delayed render).
