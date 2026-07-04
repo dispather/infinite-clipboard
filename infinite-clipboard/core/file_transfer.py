@@ -1060,7 +1060,17 @@ class FileTransferManager:
         dedup 우선순위: 정책 분기 전에 size+SHA-256 일치 확인 → 같은 콘텐츠면
         정책 무관 자동 skip. audit #10 의 사용자 사고 (numbering 누적) 차단.
         """
-        if not final_path.exists():
+        try:
+            path_exists = final_path.exists()
+        except OSError as e:
+            # exists() 도 내부적으로 stat() 을 호출하므로 동일하게 실패할 수 있다.
+            # M14 와 같은 이유로 조용히 삼키지 않고 warning 후, 충돌 있다고 가정하고
+            # 아래 dedup/정책 분기로 진행 (판단 불가를 "파일 없음"으로 오판하지 않는다).
+            logger.warning(
+                f"[{transfer_id}] dedup exists 확인 실패 ({final_path.name}): {e}"
+            )
+            path_exists = True
+        if not path_exists:
             return final_path
 
         # 1) dedup short-circuit — size 먼저 (큰 파일 hash 비용 회피).
