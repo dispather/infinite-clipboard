@@ -64,6 +64,18 @@ def _no_real_actionable_notifications(monkeypatch):
     테스트하려는 케이스는 `app.actionable_notifier`/`app._actionable_notifier_inited`
     를 직접 주입해(tests/test_lazy_orchestration.py 의 `_StubProvider` 패턴과
     동일) 이 기본값을 우회한다.
+
+    `main` 임포트는 `core.file_transfer`(xxhash) / `core.clipboard_manager`
+    (Pillow) 를 끌어오는 무거운 체인이다 — CI 의 windows/macos 잡처럼
+    `core.lazy_win`/`core.lazy_mac` 만 테스트하려고 최소 의존성만 설치한
+    환경(2026-07-10 CI 회귀로 실측)에서는 `import main` 자체가 실패한다.
+    그 경우 애초에 그 테스트들이 `main`을 쓰지 않는다는 뜻이므로(수집은
+    이미 성공했고, 이 fixture 는 setup 시점에만 실행됨) 조용히 아무 것도
+    안 하고 넘어간다 — `_no_real_desktop_notifications`의 plyer ImportError
+    처리와 동일한 방어 패턴.
     """
-    import main
+    try:
+        import main
+    except ImportError:
+        return
     monkeypatch.setattr(main, "get_actionable_notifier", lambda: None)
