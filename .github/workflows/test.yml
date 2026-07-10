@@ -24,10 +24,6 @@ env:
   PYTHONUTF8: '1'
   PYTHONIOENCODING: 'utf-8'
 
-defaults:
-  run:
-    working-directory: infinite-clipboard
-
 jobs:
   linux:
     name: Linux pytest (Xvfb)
@@ -109,7 +105,6 @@ jobs:
       - name: Run Windows lazy tests (delayed render round-trip)
         # S0 미결(대용량 GetClipboardData NULL)이 프로덕션 블로킹 PumpMessages 루프에서
         # 해소되는지 검증하는 핵심 잡 — 특히 test_win_large_payload(~1MB CF/PNG delayed render).
-        working-directory: infinite-clipboard
         run: python -m pytest tests/test_lazy_win.py -v
 
   macos:
@@ -128,5 +123,4 @@ jobs:
       - name: Run macOS lazy tests (NSPasteboard data provider round-trip)
         # 백그라운드 런루프 스레드에서 provideDataForType 콜백이 발화하는지(프로덕션 스레딩
         # 모델) + data-lazy(이미지 public.png / 파일 public.file-url) round-trip 검증.
-        working-directory: infinite-clipboard
         run: python -m pytest tests/test_lazy_mac.py -v

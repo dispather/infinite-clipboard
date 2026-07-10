@@ -1,5 +1,10 @@
 # Infinite Clipboard
 
+**[English](README.md)** | 한국어
+
+[![GitHub release](https://img.shields.io/github/v/release/dispather/infinite-clipboard)](https://github.com/dispather/infinite-clipboard/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Tailscale VPN으로 연결된 Windows/macOS/Linux PC 간 클립보드(텍스트/이미지)와 파일/폴더를 실시간 공유하는 트레이 상주 앱.
 
 - **프로토콜**: TCP 소켓 + 4바이트 길이 헤더 + JSON/바이너리 프레임
@@ -354,7 +359,7 @@ powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 ### 2. 실행
 
 ```bash
-cd infinite-clipboard
+# 저장소 루트에서
 
 # 최초 실행 시 GUI 설정 다이얼로그가 뜸 (모드/서버 IP/포트 선택)
 python3 start.py

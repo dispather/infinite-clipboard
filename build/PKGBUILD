@@ -30,7 +30,7 @@ options=(!strip !debug)
 
 source=()
 # 로컬 빌드용 PKGBUILD — 소스 다운로드 없이 프로젝트의 dist/ 를 직접 패키징.
-# 전제: 이 PKGBUILD 파일이 있는 `build/` 의 상위 `infinite-clipboard/` 에서
+# 전제: 이 PKGBUILD 파일이 있는 `build/` 의 상위(저장소 루트)에서
 #       build_linux.sh 가 실행되어 dist/InfiniteClipboard/ 가 존재해야 함.
 
 package() {
@@ -38,9 +38,9 @@ package() {
     # 기본은 build_linux.sh 가 sync 폴더 밖 IC_BUILD_DIR 로 PKGBUILD 를 복사한 뒤
     # 그곳에서 makepkg 를 호출 → IC_PROJECT_ROOT/IC_DIST_DIR 환경변수로 실제
     # 프로젝트 위치를 명시. env 미설정 시 (직접 build/ 에서 makepkg 호출 등)
-    # 기존 동작 ($startdir/..) 으로 폴백.
+    # 기존 동작 ($startdir/..) 으로 폴백. 저장소 평탄화 이후 project_root 가
+    # 곧 저장소 루트라 별도 repo_root 구분 불필요 (LICENSE 도 여기서 찾음).
     local project_root="${IC_PROJECT_ROOT:-$startdir/..}"
-    local repo_root="${IC_REPO_ROOT:-$project_root/..}"
 
     local dist="${IC_DIST_DIR:-$project_root/dist/InfiniteClipboard}"
     if [[ ! -d "$dist" ]]; then
@@ -78,5 +78,5 @@ EOF
 
     # 5. LICENSE
     install -d "$pkgdir/usr/share/licenses/$pkgname"
-    install -m644 "$repo_root/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -m644 "$project_root/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

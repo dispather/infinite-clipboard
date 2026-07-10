@@ -95,11 +95,11 @@ echo "▶ pacman 패키지 생성 → $IC_BUILD_DIR/"
 # PKGBUILD 를 IC_BUILD_DIR 로 복사 후 그곳에서 makepkg 실행.
 # pkg/, src/, *.pkg.tar.zst 가 모두 IC_BUILD_DIR 에 생성됨 (sync 폴더 밖).
 # PKGBUILD 의 package() 는 IC_PROJECT_ROOT/IC_DIST_DIR env 로 실제 dist 위치 인지.
+# (저장소 평탄화 이후 프로젝트 루트 == 저장소 루트라 IC_REPO_ROOT 구분 불필요)
 cp "$PKGBUILD_SRC" "$IC_BUILD_DIR/PKGBUILD"
 (
     cd "$IC_BUILD_DIR"
     export IC_PROJECT_ROOT="$ROOT"
-    export IC_REPO_ROOT="$(dirname "$ROOT")"
     export IC_DIST_DIR="$DIST_DIR"
     makepkg -f
 )

@@ -34,7 +34,6 @@ jobs:
     defaults:
       run:
         shell: cmd
-        working-directory: infinite-clipboard
 
     steps:
       - name: Checkout
@@ -46,7 +45,7 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-          cache-dependency-path: infinite-clipboard/requirements_win.txt
+          cache-dependency-path: requirements_win.txt
 
       - name: Install Inno Setup
         # chocolatey 가 windows-latest 에 사전 설치되어 있음.
@@ -150,7 +149,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /home/builder/.cache/pip
-          key: pip-linux-${{ hashFiles('infinite-clipboard/requirements.txt', 'infinite-clipboard/requirements_linux.txt') }}
+          key: pip-linux-${{ hashFiles('requirements.txt', 'requirements_linux.txt') }}
           restore-keys: |
             pip-linux-
 
@@ -172,7 +171,7 @@ jobs:
           IC_BUILD_DIR: ${{ github.workspace }}/ic-build
         run: |
           sudo -u builder --preserve-env=IC_BUILD_DIR,GITHUB_WORKSPACE bash -c '
-            cd "$GITHUB_WORKSPACE/infinite-clipboard"
+            cd "$GITHUB_WORKSPACE"
             bash build/build_linux.sh
           '
 
@@ -202,7 +201,6 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: infinite-clipboard
 
     steps:
       - name: Checkout
@@ -231,7 +229,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/Library/Caches/uv
-          key: uv-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('infinite-clipboard/pyproject.toml', 'infinite-clipboard/requirements_mac.txt') }}
+          key: uv-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pyproject.toml', 'requirements_mac.txt') }}
           restore-keys: |
             uv-${{ runner.os }}-${{ runner.arch }}-
 

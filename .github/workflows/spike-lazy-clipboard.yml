@@ -2,8 +2,7 @@
 #
 # 목적: "OS 가 paste 시점에 우리 lazy provide 콜백을 부르고, 그 안에서 loopback fetch 한
 #        바이트를 내줄 수 있는가" 를 OS 별로 PASS/NEEDS-MANUAL/FAIL 판정.
-# 설계: docs/plans/2026-05-29-v3-lazy-clipboard-spike-design.md
-# 코드: infinite-clipboard/spikes/lazy-clipboard/ (throwaway PoC, 프로덕션 무수정)
+# 코드: spikes/lazy-clipboard/ (throwaway PoC, 프로덕션 무수정)
 #
 # ⚠️ release 용 build.yml 과 완전히 별개 — 이 워크플로우는 수동 실행만 하며 빌드/릴리스에 영향 없음.
 #
@@ -28,10 +27,6 @@ on:
 env:
   PYTHONUTF8: '1'
   PYTHONIOENCODING: 'utf-8'
-
-defaults:
-  run:
-    working-directory: infinite-clipboard
 
 jobs:
   linux-x11:
