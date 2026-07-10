@@ -99,13 +99,19 @@ jobs:
       - name: Install Python deps
         # core.lazy_win 이 core.clipboard_manager.WINDOWS_CLIPBOARD_LOCK 을 import 하는데
         # clipboard_manager 최상단이 `from PIL import Image` 라 pillow 도 필요 (2026-07-04 CI 5-fail 수정)
+        # Windows-Toasts: core.notify_win (알림 받기/무시 액션 버튼, 2026-07-10)
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest pywin32 "pillow>=12.2.0"
+          python -m pip install pytest pywin32 "pillow>=12.2.0" Windows-Toasts
       - name: Run Windows lazy tests (delayed render round-trip)
         # S0 미결(대용량 GetClipboardData NULL)이 프로덕션 블로킹 PumpMessages 루프에서
         # 해소되는지 검증하는 핵심 잡 — 특히 test_win_large_payload(~1MB CF/PNG delayed render).
         run: python -m pytest tests/test_lazy_win.py -v
+      - name: Run Windows actionable-notify tests (Windows-Toasts)
+        # 이 개발 환경엔 Windows 가 없어 core/notify_win.py 는 이 CI 잡이 유일한
+        # 실 Windows 검증 수단 — 실제 InteractableWindowsToaster.show_toast 호출 +
+        # on_activated 받기/무시 디스패치 로직 검증 (2026-07-10).
+        run: python -m pytest tests/test_notify_win.py -v
 
   macos:
     name: macOS (NSPasteboard data provider)
@@ -116,11 +122,19 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install Python deps
-        # test_lazy_mac 은 core.lazy_mac(+stdlib) + pyobjc-framework-Cocoa 만 필요
+        # test_lazy_mac 은 core.lazy_mac(+stdlib) + pyobjc-framework-Cocoa 만 필요.
+        # pyobjc-framework-UserNotifications: core.notify_mac (알림 받기/무시 액션
+        # 버튼, 2026-07-10) — UNUserNotificationCenter 는 코드 서명된 번들만 알림
+        # 권한을 주므로, 이 CI(서명 안 된 python3 프로세스)에선 is_supported()=False
+        # 로 저하하는 게 정상. 그래도 pyobjc 브리징 임포트/호출 자체가 깨지지
+        # 않는지, 그리고 OS 권한과 무관한 액션 디스패치 로직(_handle_action)은
+        # 여기서 결정적으로 검증된다 — tests/test_notify_mac.py 주석 참조.
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest pyobjc-framework-Cocoa
+          python -m pip install pytest pyobjc-framework-Cocoa pyobjc-framework-UserNotifications
       - name: Run macOS lazy tests (NSPasteboard data provider round-trip)
         # 백그라운드 런루프 스레드에서 provideDataForType 콜백이 발화하는지(프로덕션 스레딩
         # 모델) + data-lazy(이미지 public.png / 파일 public.file-url) round-trip 검증.
         run: python -m pytest tests/test_lazy_mac.py -v
+      - name: Run macOS actionable-notify tests (UNUserNotificationCenter)
+        run: python -m pytest tests/test_notify_mac.py -v
