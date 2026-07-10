@@ -1,5 +1,9 @@
 # Infinite Clipboard
 
+<p align="center">
+  <img src="assets/generated/icon-512.png" width="120" alt="Infinite Clipboard 아이콘">
+</p>
+
 **[English](README.md)** | 한국어
 
 [![GitHub release](https://img.shields.io/github/v/release/dispather/infinite-clipboard)](https://github.com/dispather/infinite-clipboard/releases)
