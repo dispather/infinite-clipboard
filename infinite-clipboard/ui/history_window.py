@@ -104,7 +104,7 @@ class HistoryWindow(customtkinter.CTkToplevel):
         self._count_badge.pack(side="left", padx=(t.SP[2], 0))
 
         customtkinter.CTkLabel(
-            header, text="항목을 클릭하면 다시 복사됩니다",
+            header, text="텍스트 항목을 클릭하면 다시 복사됩니다",
             font=t.FONT_META, text_color=t.spool_dim, anchor="e",
         ).pack(side="right")
 
@@ -161,20 +161,25 @@ class HistoryWindow(customtkinter.CTkToplevel):
 
     def _create_item(self, entry: dict) -> customtkinter.CTkFrame:
         content_type = entry.get("type", "text")
-        preview = entry.get("preview", "")
         timestamp = entry.get("timestamp", time.time())
+        # Critical 감사(2026-07-10): image/files 타입은 실제 바이트가 아니라
+        # "[image]" 같은 표식만 history 에 저장되어 재복사가 항상 실패한다
+        # (`_recopy` 참조). 클릭 후 무음 실패로 사용자를 속이는 대신, 애초에
+        # 클릭 가능해 "보이지" 않도록 커서/hover/클릭 바인딩 자체를 생략한다
+        # (감지 후 안내보다 예방이 우선 — Nielsen 에러 예방 원칙).
+        recopyable = content_type == "text"
+        cursor = "hand2" if recopyable else "arrow"
 
         icon_name, _type_label, icon_color = _TYPE_META.get(
             content_type, ("file-text", "텍스트", "dim")
         )
 
-        # 전체 행에 cursor=hand2 로 "클릭 가능" 신호
         frame = customtkinter.CTkFrame(
             self._scroll,
             fg_color="transparent",
             corner_radius=t.RADIUS["md"],
             height=40,
-            cursor="hand2",
+            cursor=cursor,
         )
         frame.pack_propagate(False)
 
@@ -183,7 +188,7 @@ class HistoryWindow(customtkinter.CTkToplevel):
         icon_lbl = None
         if icon_img is not None:
             icon_lbl = customtkinter.CTkLabel(
-                frame, text="", image=icon_img, cursor="hand2",
+                frame, text="", image=icon_img, cursor=cursor,
             )
             icon_lbl.pack(side="left", padx=(t.SP[3], t.SP[2] - 2))
 
@@ -193,20 +198,25 @@ class HistoryWindow(customtkinter.CTkToplevel):
             font=t.FONT_META,
             text_color=t.spool_dim,
             width=64, anchor="e",
-            cursor="hand2",
+            cursor=cursor,
         )
         time_lbl.pack(side="right", padx=(t.SP[2], t.SP[3]))
 
         # 중: 미리보기 (원본이 더 긴 경우 " …" 덧붙여 잘림을 표시)
+        # 재복사 불가 타입은 spool_label 로 dim 처리 — "클릭해도 되는 항목"과
+        # 시각적으로 구분(Refactoring UI: 비활성 요소는 de-emphasize).
         preview_text = _prepare_preview(entry)
         preview_lbl = customtkinter.CTkLabel(
             frame, text=preview_text,
             font=t.FONT_BODY,
-            text_color=t.terminal_text,
+            text_color=t.terminal_text if recopyable else t.spool_label,
             anchor="w",
-            cursor="hand2",
+            cursor=cursor,
         )
         preview_lbl.pack(side="left", fill="x", expand=True)
+
+        if not recopyable:
+            return frame
 
         # 클릭: 재복사 + 짧은 시각 피드백 (배경 잠깐 민트 계열로)
         def _on_click(_e=None, _entry=entry, _f=frame):

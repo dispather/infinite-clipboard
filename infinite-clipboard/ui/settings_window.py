@@ -27,7 +27,7 @@ from ui import theme as t
 from ui.components import (
     SectionCard, SectionHeader, FormRow,
     PrimaryButton, SecondaryButton, IconButton, Badge,
-    load_icon, apply_window_icon,
+    load_icon, apply_window_icon, enable_mousewheel_scroll,
 )
 
 customtkinter.set_appearance_mode("dark")
@@ -106,11 +106,14 @@ class SettingsWindow(customtkinter.CTkToplevel):
         threading.Thread(target=self._detect_tailscale_bg, daemon=True).start()
 
         self.title("Infinite Clipboard · 설정")
-        # 4섹션 + 헤더 + 버튼 바가 한 화면에 모두 들어가는 높이.
-        # 일반 CTkFrame 을 쓰므로 스크롤바가 뜨지 않는다.
-        # v2.3 기기 섹션에 충돌 정책 + TTL 행 2개 추가 → 800 → 950.
-        self.geometry("500x950")
-        self.resizable(False, False)
+        # Critical 감사(2026-07-10): 이전엔 950px 고정 + resizable(False,False) +
+        # 스크롤 없는 CTkFrame 이라, 세로 해상도가 낮은 화면(예: 1366x768 노트북)
+        # 에서 저장 버튼까지 도달 불가능했다. 컨테이너를 CTkScrollableFrame 으로
+        # 바꾸고 창을 리사이즈 가능하게 열어, 화면이 작아도 스크롤로 전 섹션에
+        # 도달 가능하게 한다. 버튼 바는 여전히 스크롤 밖(하단 고정)이라 항상 보임.
+        self.geometry("500x700")
+        self.minsize(420, 320)
+        self.resizable(True, True)
         self.attributes("-topmost", True)
         self.configure(fg_color=t.tray_bg)
         apply_window_icon(self)
@@ -132,8 +135,10 @@ class SettingsWindow(customtkinter.CTkToplevel):
         )
 
         # ── 섹션 컨테이너 ────────────────────────────────────────────
-        # CTkFrame: 창 크기가 4섹션 + 헤더 전부 수용하므로 스크롤 불필요.
-        container = customtkinter.CTkFrame(self, fg_color="transparent")
+        # Critical 감사(2026-07-10): CTkScrollableFrame 으로 전환 — 낮은 세로
+        # 해상도 화면에서도 4섹션 전부에 스크롤로 도달 가능. 버튼 바는 위에서
+        # 이미 self 에 직접 pack(side="bottom") 했으므로 스크롤 영역 밖에 고정.
+        container = customtkinter.CTkScrollableFrame(self, fg_color="transparent")
         container.pack(fill="both", expand=True, padx=t.SP[4], pady=(t.SP[4], 0))
 
         # ── 헤더: 창 제목 + Tailscale 상태 인디케이터 ──
@@ -172,6 +177,11 @@ class SettingsWindow(customtkinter.CTkToplevel):
 
         # 초기 모드 상태 반영
         self._on_mode_changed(self._MODE_TO_KR.get(config.mode, "클라이언트"))
+
+        # 함정 #10: CTkScrollableFrame 은 canvas 위에서만 기본으로 휠이 먹으므로
+        # 자식 위젯 트리 전체에 재귀 바인딩 필요 (창이 작아져 스크롤이 실제로
+        # 필요해졌을 때 휠로도 이동 가능하도록).
+        enable_mousewheel_scroll(container)
 
         # H3: 위젯 구성이 끝난 뒤 폴링 시작 (백그라운드 스레드는 이미 위에서 시작됨)
         self.after(100, self._poll_tailscale_result)
