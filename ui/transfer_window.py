@@ -73,6 +73,9 @@ class TransferWindow(customtkinter.CTkToplevel):
         # config 가 None 이면 get_language 가 detect_os_locale() 로 폴백하므로
         # main.py 가 아직 config 를 안 넘겨도(--window 서브모드) 안전하게 동작.
         self._lang = get_language(config)
+        # "완료" 섹션 헤더의 폴더 열기 버튼용 — 목적지가 download_path 하나뿐이라
+        # 항목마다 중복 버튼을 두는 대신 헤더에 하나만 둔다.
+        self._config = config
 
         # M15: state_file 읽기(json.load)는 GUI 메인스레드(after 콜백)에서
         # 500ms 마다 동기 I/O 로 실행돼, 느린 디스크/대용량 completed 목록/
@@ -163,6 +166,24 @@ class TransferWindow(customtkinter.CTkToplevel):
         ).pack(side="left")
         self._comp_count = Badge(comp_bar, text="0", variant="muted")
         self._comp_count.pack(side="left", padx=(t.SP[2], 0))
+
+        # 목적지가 download_path 하나뿐이라 완료 항목마다 폴더 열기 버튼을 두는
+        # 대신 섹션 헤더에 하나만 둔다(2026-07-10 제보 — 항목별 버튼은 전부 같은
+        # 폴더를 여는 중복이었음). "받기" 버튼으로 저장된 완료 항목이 실제로
+        # 하나라도 있을 때만 보인다 — lazy-paste 만 써온 사용자는 download_path
+        # 에 아무것도 없을 수 있어(파일이 어디로 붙여넣기됐는지 이 앱은 모름),
+        # 무조건 노출하면 무관한/빈 폴더를 여는 버튼처럼 오해를 산다(2026-07-10
+        # 리뷰 발견 — 처음엔 download_path 존재 여부로만 게이팅했었음).
+        self._open_folder_btn = None
+        download_path = getattr(self._config, "download_path", None)
+        if download_path:
+            self._open_folder_btn = customtkinter.CTkButton(
+                comp_bar, text=tr("폴더 열기", self._lang), width=68, height=24,
+                corner_radius=t.RADIUS["sm"], fg_color=t.relay_raised,
+                hover_color=t.signal_ok, text_color=t.terminal_text, font=t.FONT_META,
+                command=lambda p=download_path: _open_folder(p),
+            )
+        self._open_folder_btn_shown = False
 
         self._completed_frame = customtkinter.CTkScrollableFrame(
             self, fg_color=t.relay_surface,
@@ -605,16 +626,17 @@ class TransferWindow(customtkinter.CTkToplevel):
             font=t.FONT_META, text_color=t.spool_dim,
         ).pack(side="right", padx=(t.SP[2], t.SP[3]))
 
-        # 받기 버튼으로 저장된 항목만 최종 위치가 있음(config.download_path) — lazy-paste
-        # 는 임시 스테이징으로 가서 "폴더 열기" 개념 자체가 없다.
-        saved_dir = entry.get("path")
-        if entry.get("via_receive_button") and saved_dir:
-            customtkinter.CTkButton(
-                frame, text=tr("폴더 열기", self._lang), width=68, height=24,
-                corner_radius=t.RADIUS["sm"], fg_color=t.relay_raised,
-                hover_color=t.signal_ok, text_color=t.terminal_text, font=t.FONT_META,
-                command=lambda p=saved_dir: _open_folder(p),
-            ).pack(side="right", padx=(t.SP[1], 0))
+        # 목적지가 download_path 하나뿐이라 항목별 "폴더 열기" 버튼은 전부 같은
+        # 폴더를 여는 중복이었다(2026-07-10 제보) — 완료 섹션 헤더의 버튼 1개로 통합.
+        # 단, 그 버튼은 "받기" 버튼으로 저장된 완료 항목이 실제로 하나라도 있을
+        # 때만 보인다(lazy-paste 만 써온 사용자에겐 무관한 폴더를 여는 버튼으로
+        # 오해를 살 수 있어서) — 한 번 나타나면 계속 유효하므로 숨기진 않는다.
+        if (
+            entry.get("via_receive_button") and self._open_folder_btn is not None
+            and not self._open_folder_btn_shown
+        ):
+            self._open_folder_btn.pack(side="right")
+            self._open_folder_btn_shown = True
 
         # 중앙: 파일명
         customtkinter.CTkLabel(

@@ -205,16 +205,41 @@ def _find_completed_row(container, filename):
 
 
 def _has_open_folder_button(frame):
+    """실제로 화면에 배치된(mapped) 버튼만 센다.
+
+    CTkButton(parent, ...) 는 pack()/grid() 를 호출하지 않아도 이미 parent 의
+    winfo_children() 에 나타난다(Tk 위젯은 생성 시점에 부모의 자식이 되고,
+    지오메트리 매니저가 실제 화면 배치를 결정) — 그래서 존재 여부만 보면
+    "만들어놓고 숨긴" 버튼과 "실제로 보이는" 버튼을 구분 못 한다(2026-07-10
+    리뷰에서 실측 — 숨김 로직이 맞는데도 테스트가 통과하지 못하는 원인이었음).
+    """
     import customtkinter
     return any(
         isinstance(child, customtkinter.CTkButton) and child.cget("text") == "폴더 열기"
+        and child.winfo_ismapped()
         for child in frame.winfo_children()
     )
 
 
-def test_completed_widget_shows_open_folder_button_only_for_receive_flow(gui_root, tmp_path):
-    """2026-07-04: via_receive_button+path 가 있는 완료 항목만 '폴더 열기' 버튼이
-    떠야 한다 — lazy-paste 완료 항목(그 필드 없음)엔 버튼이 없어야 한다."""
+def _count_open_folder_buttons(widget):
+    """widget 이하 전체 트리에서 실제로 화면에 배치된(mapped) '폴더 열기' 버튼 개수."""
+    import customtkinter
+    count = 0
+    for child in widget.winfo_children():
+        if (
+            isinstance(child, customtkinter.CTkButton) and child.cget("text") == "폴더 열기"
+            and child.winfo_ismapped()
+        ):
+            count += 1
+        count += _count_open_folder_buttons(child)
+    return count
+
+
+def test_completed_widgets_have_no_per_row_open_folder_button(gui_root, tmp_path):
+    """2026-07-10: 목적지가 download_path 하나뿐이라 완료 항목마다 '폴더 열기'
+    버튼을 두는 건 전부 같은 폴더를 여는 중복이었다 — 항목 행에는 더 이상
+    버튼이 없어야 하고(via_receive_button 여부 무관), 완료 섹션 헤더에 딱
+    하나만 있어야 한다."""
     state_file = tmp_path / "transfer_state.json"
     receive_entry = {
         "transfer_id": "t-receive", "filename": "photo.png", "total_size": 100,
@@ -232,11 +257,35 @@ def test_completed_widget_shows_open_folder_button_only_for_receive_flow(gui_roo
         lazy_frame = _find_completed_row(win._completed_frame, "clip.png")
         assert receive_frame is not None and lazy_frame is not None
 
-        assert _has_open_folder_button(receive_frame), (
-            "받기 완료 항목에 '폴더 열기' 버튼이 없음"
+        assert not _has_open_folder_button(receive_frame), (
+            "받기 완료 항목 행에 '폴더 열기' 버튼이 남아있음 (헤더로 통합됐어야 함)"
         )
         assert not _has_open_folder_button(lazy_frame), (
-            "lazy-paste 완료 항목에 '폴더 열기' 버튼이 잘못 뜸"
+            "lazy-paste 완료 항목 행에 '폴더 열기' 버튼이 잘못 뜸"
+        )
+        assert _count_open_folder_buttons(win) == 1, (
+            "완료 섹션 헤더에 '폴더 열기' 버튼이 정확히 1개여야 함"
+        )
+    finally:
+        win.destroy()
+
+
+def test_open_folder_header_button_hidden_when_no_receive_flow_completed(gui_root, tmp_path):
+    """2026-07-10 리뷰 발견: 헤더 버튼을 config.download_path 존재만으로 노출하면,
+    lazy-paste 만 써온 사용자(받기 버튼 완료 항목이 하나도 없음)에게 실제 파일과
+    무관한 download_path 를 여는 버튼이 뜬다 — via_receive_button 완료 항목이
+    하나도 없으면 숨겨져 있어야 한다."""
+    state_file = tmp_path / "transfer_state.json"
+    lazy_entry = {
+        "transfer_id": "t-lazy-only", "filename": "clip.png", "total_size": 50,
+        "direction": "receive", "completed_at": 1.0,
+    }
+    _write_state(state_file, [], completed=[lazy_entry])
+    win = _make_window(gui_root, state_file)
+    try:
+        assert _count_open_folder_buttons(win) == 0, (
+            "받기 버튼 완료 항목이 없는데 '폴더 열기' 버튼이 보임 — download_path 와 "
+            "무관한 lazy-paste 사용자에게 오해를 줌"
         )
     finally:
         win.destroy()
