@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING
 import pystray
 from PIL import Image, ImageDraw
 
+from ui import theme as t
+
 if TYPE_CHECKING:
     from main import InfiniteClipboard
 
@@ -80,9 +82,12 @@ def create_icon_image(color: str = "green") -> Image.Image:
         image = Image.open(path).convert("RGBA")
     except Exception as e:
         logger.warning(f"아이콘 로드 실패 ({path}): {e} — 폴백 단색 아이콘 사용")
+        # Medium #6 (2026-07-10 감사): theme.py 값을 손으로 베껴 쓰면 나중에
+        # theme 쪽만 바뀌었을 때 조용히 드리프트한다(실제로 "gray" 가 이미
+        # signal_idle 과 다른 회색으로 어긋나 있었음) — 토큰을 직접 참조.
         fallbacks = {
-            "green": "#10b981", "amber": "#f59e0b", "yellow": "#f59e0b",
-            "red": "#ef4444", "gray": "#9ca3af",
+            "green": t.signal_ok, "amber": t.signal_wait, "yellow": t.signal_wait,
+            "red": t.signal_fail, "gray": t.signal_idle,
         }
         image = _fallback_icon(fallbacks.get(color, fallbacks["gray"]))
 

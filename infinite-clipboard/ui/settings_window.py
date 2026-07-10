@@ -308,6 +308,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
         self._eye_btn = IconButton(
             row_key, icon_name="eye",
             command=self._toggle_pin_visibility,
+            tooltip="인증 키 표시/숨기기",
         )
         self._eye_btn.pack(side="left")
         row_key.pack(fill="x", pady=(0, t.SP[2]))
@@ -329,7 +330,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
             font=t.FONT_BODY,
             progress_color=t.signal_ok,
             button_color=t.terminal_text,
-            button_hover_color="#fafafa",
+            button_hover_color=t.ZINC[50],
             fg_color=t.relay_raised,
         ).pack(side="left", fill="x", expand=True)
         trust_row.pack(fill="x")
@@ -357,6 +358,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
         IconButton(
             row_path, icon_name="folder-open",
             command=self._browse_directory,
+            tooltip="폴더 선택",
         ).pack(side="left")
         row_path.pack(fill="x", pady=(0, t.SP[2]))
 

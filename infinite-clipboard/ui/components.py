@@ -356,10 +356,10 @@ class SecondaryButton(ctk.CTkButton):
 
 
 class IconButton(ctk.CTkButton):
-    """정사각 아이콘 전용 버튼 (32x32). tooltip 은 아직 미구현."""
+    """정사각 아이콘 전용 버튼 (32x32). tooltip 인자로 hover 라벨 지정 가능."""
 
     def __init__(self, master, icon_name: str, command: Optional[Callable] = None,
-                 icon_color: str = "text", **kwargs):
+                 icon_color: str = "text", tooltip: Optional[str] = None, **kwargs):
         cfg = t.BTN["icon"]
         img = load_icon(icon_name, size=20, color=icon_color)
         super().__init__(
@@ -370,6 +370,8 @@ class IconButton(ctk.CTkButton):
             hover_color=cfg["hover_color"],
             **kwargs,
         )
+        if tooltip:
+            add_tooltip(self, tooltip)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -381,9 +383,9 @@ class Badge(ctk.CTkLabel):
 
     _VARIANTS = {
         "muted": (t.spool_label, t.relay_raised),
-        "ok":    (t.signal_ok,   "#0a3d2b"),  # dim mint bg
-        "wait":  (t.signal_wait, "#3d2a0a"),
-        "fail":  (t.signal_fail, "#3d0a0a"),
+        "ok":    (t.signal_ok,   t.badge_bg_ok),
+        "wait":  (t.signal_wait, t.badge_bg_wait),
+        "fail":  (t.signal_fail, t.badge_bg_fail),
         "info":  (t.terminal_text, t.relay_raised),
     }
 
@@ -513,6 +515,63 @@ def bind_focus_ring(
 
     widget.bind("<FocusIn>", _on_focus_in, add="+")
     widget.bind("<FocusOut>", _on_focus_out, add="+")
+
+
+def add_tooltip(widget, text: str, delay_ms: int = 500) -> None:
+    """위젯에 hover 툴팁을 붙인다 (Medium #8, 2026-07-10 감사).
+
+    아이콘 전용 버튼(눈/폴더 아이콘 등)은 텍스트 라벨이 없어 접근 가능한
+    이름이 없었다 — 짧은 지연(기본 500ms) 후 위젯 아래에 라벨을 띄운다.
+    """
+    import tkinter as tk
+
+    state = {"after_id": None, "tip": None}
+
+    def _hide(_e=None):
+        after_id = state["after_id"]
+        if after_id is not None:
+            try:
+                widget.after_cancel(after_id)
+            except Exception:
+                pass
+            state["after_id"] = None
+        tip = state["tip"]
+        if tip is not None:
+            try:
+                tip.destroy()
+            except Exception:
+                pass
+            state["tip"] = None
+
+    def _show():
+        if state["tip"] is not None:
+            return
+        try:
+            x = widget.winfo_rootx() + widget.winfo_width() // 2
+            y = widget.winfo_rooty() + widget.winfo_height() + 4
+        except Exception:
+            return
+        tip = tk.Toplevel(widget)
+        tip.wm_overrideredirect(True)
+        tip.wm_geometry(f"+{x}+{y}")
+        try:
+            tip.attributes("-topmost", True)
+        except Exception:
+            pass
+        tk.Label(
+            tip, text=text, font=t.FONT_META,
+            bg=t.relay_raised, fg=t.terminal_text,
+            bd=1, relief="solid", padx=6, pady=2,
+        ).pack()
+        state["tip"] = tip
+
+    def _schedule(_e=None):
+        _hide()
+        state["after_id"] = widget.after(delay_ms, _show)
+
+    widget.bind("<Enter>", _schedule, add="+")
+    widget.bind("<Leave>", _hide, add="+")
+    widget.bind("<Button-1>", _hide, add="+")
 
 
 def enable_tab_focus(widget) -> None:

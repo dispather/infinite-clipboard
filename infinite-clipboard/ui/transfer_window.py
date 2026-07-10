@@ -25,7 +25,10 @@ import customtkinter
 
 from core.file_transfer import format_size as _format_size
 from ui import theme as t
-from ui.components import load_icon, EmptyState, Badge, apply_window_icon, enable_mousewheel_scroll
+from ui.components import (
+    load_icon, EmptyState, Badge, apply_window_icon,
+    enable_mousewheel_scroll, add_tooltip,
+)
 
 
 def _format_time(timestamp: float) -> str:
@@ -281,8 +284,10 @@ class TransferWindow(customtkinter.CTkToplevel):
         ).pack(side="left", fill="x", expand=True)
 
         # v2.2.1 B2: 취소 버튼 (오른쪽 끝)
+        # Medium #7 (2026-07-10 감사): 24x24 는 앱 내 다른 아이콘 버튼(32x32,
+        # theme.BTN["icon"])보다도 작았다 — 클릭 영역을 그 규격에 맞춤.
         cancel_btn = customtkinter.CTkButton(
-            row1, text="X", width=24, height=24,
+            row1, text="X", width=32, height=32,
             corner_radius=t.RADIUS["sm"],
             fg_color="transparent",
             hover_color=t.signal_fail,
@@ -290,6 +295,7 @@ class TransferWindow(customtkinter.CTkToplevel):
             font=(t.FAMILY, 11, "bold"),
             command=lambda tid=transfer_id: self._on_cancel_click(tid),
         )
+        add_tooltip(cancel_btn, "전송 취소")
         cancel_btn.pack(side="right", padx=(t.SP[1], 0))
 
         customtkinter.CTkLabel(

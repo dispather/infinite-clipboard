@@ -85,6 +85,13 @@ focus_ring      = MINT[500]      # focus 외곽선 (2px)
 hover_surface   = ZINC[800]      # 리스트 아이템 hover
 press_surface  = ZINC[700]
 
+# Badge 배경 (dim variant) — Medium #6 (2026-07-10 감사): components.py 가
+# 이 값들을 하드코딩 리터럴로 들고 있어 자기 모듈 docstring의 "하드코딩 금지"
+# 원칙을 스스로 어기고 있었다. semantic 토큰으로 승격.
+badge_bg_ok     = "#0a3d2b"      # dim mint bg
+badge_bg_wait   = "#3d2a0a"      # dim amber bg
+badge_bg_fail   = "#3d0a0a"      # dim red bg
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # LAYER 3 — COMPONENT 기본값
