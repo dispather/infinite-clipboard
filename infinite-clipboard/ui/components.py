@@ -15,6 +15,7 @@ Settings/History/Transfers 에서 일관되게 쓰이는 조각들.
 - Badge               : 상태 뱃지 (색상 variant 4종)
 - EmptyState          : 빈 상태 (아이콘 + 제목 + 설명)
 - IconLabel           : 아이콘 + 텍스트 한 줄 (광학 정렬)
+- bind_focus_ring()   : <FocusIn>/<FocusOut> 로 키보드 포커스 시각화
 """
 
 from __future__ import annotations
@@ -469,3 +470,64 @@ class IconLabel(ctk.CTkFrame):
             text_color=text_color or t.terminal_text,
             anchor="w",
         ).pack(side="left", fill="x", expand=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 키보드 포커스 시각화 (High #3, 2026-07-10 디자인 감사)
+# ═══════════════════════════════════════════════════════════════════════
+
+def bind_focus_ring(
+    widget,
+    base_border_color: str,
+    focus_color: Optional[str] = None,
+    base_border_width: Optional[int] = None,
+    focus_border_width: Optional[int] = None,
+) -> None:
+    """<FocusIn>/<FocusOut> 로 border_color(+선택적으로 border_width)를 토글.
+
+    theme.INPUT["border_color_focus"](focus_ring) 토큰이 정의만 되고 어디에도
+    배선되지 않아, Tab 으로 이동해도 현재 포커스가 어느 위젯인지 시각적으로
+    알 수 없었다. border_width 인자는 기본 테두리가 없는 위젯(예: 카드형
+    프레임)에서 포커스 시에만 테두리를 드러낼 때 사용 — 둘 다 생략하면
+    border_color 만 토글(Entry 등 이미 테두리가 있는 위젯용).
+    """
+    ring = focus_color or t.focus_ring
+
+    def _on_focus_in(_e=None):
+        try:
+            cfg = {"border_color": ring}
+            if focus_border_width is not None:
+                cfg["border_width"] = focus_border_width
+            widget.configure(**cfg)
+        except Exception:
+            pass
+
+    def _on_focus_out(_e=None):
+        try:
+            cfg = {"border_color": base_border_color}
+            if base_border_width is not None:
+                cfg["border_width"] = base_border_width
+            widget.configure(**cfg)
+        except Exception:
+            pass
+
+    widget.bind("<FocusIn>", _on_focus_in, add="+")
+    widget.bind("<FocusOut>", _on_focus_out, add="+")
+
+
+def enable_tab_focus(widget) -> None:
+    """CTk 위젯이 Tab 순회로 포커스를 받도록 허용한다(예: 클릭 가능한 CTkFrame).
+
+    CTk*.configure() 는 자체 인자 화이트리스트만 통과시켜 표준 tkinter 옵션인
+    `takefocus` 를 거부한다(customtkinter 자체 제약) — 표준 tkinter.Widget.configure
+    로 그 검사를 우회해서 설정한다.
+
+    CTkFrame 은 클릭/키 이벤트 바인딩을 내부 `_canvas` 로 위임한다
+    (`CTkFrame.bind()` 소스 참조 — "called on the tkinter.Canvas"). 포커스를
+    프레임 자체에 주면 Tab 으로 도달은 되지만 Return/Space/FocusIn 이벤트가
+    실제로는 `_canvas` 로 바인딩돼 있어 전달되지 않는다(2026-07-10 감사 High #4
+    구현 중 실측 확인) — 그래서 `_canvas` 가 있으면 그쪽에 포커스를 준다.
+    """
+    import tkinter as tk
+    target = getattr(widget, "_canvas", widget)
+    tk.Widget.configure(target, takefocus=1)

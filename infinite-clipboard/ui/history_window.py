@@ -19,7 +19,10 @@ import time
 import customtkinter
 
 from ui import theme as t
-from ui.components import load_icon, EmptyState, Badge, apply_window_icon, enable_mousewheel_scroll
+from ui.components import (
+    load_icon, EmptyState, Badge, apply_window_icon,
+    enable_mousewheel_scroll, bind_focus_ring, enable_tab_focus,
+)
 
 
 # 타입 → (아이콘명, 한국어 라벨, 컬러키)
@@ -180,6 +183,7 @@ class HistoryWindow(customtkinter.CTkToplevel):
             corner_radius=t.RADIUS["md"],
             height=40,
             cursor=cursor,
+            border_width=0,
         )
         frame.pack_propagate(False)
 
@@ -218,21 +222,40 @@ class HistoryWindow(customtkinter.CTkToplevel):
         if not recopyable:
             return frame
 
-        # 클릭: 재복사 + 짧은 시각 피드백 (배경 잠깐 민트 계열로)
-        def _on_click(_e=None, _entry=entry, _f=frame):
+        # High #4 (2026-07-10 감사): hover(마우스)와 focus(키보드)가 같은 배경
+        # 강조(hover_surface)를 공유하되, 어느 한쪽이 풀려도 다른 쪽이 살아있으면
+        # 강조를 유지해야 한다 — 그래서 상태를 따로 추적한다.
+        state = {"hover": False, "focus": False}
+
+        def _sync_visual():
+            frame.configure(fg_color=t.hover_surface if (state["hover"] or state["focus"]) else "transparent")
+
+        # 클릭/Enter/Space 공통: 재복사 + 짧은 시각 피드백 (배경 잠깐 민트 계열로)
+        def _on_click(_e=None, _entry=entry):
             self._recopy(_entry)
             try:
-                _f.configure(fg_color=t.signal_ok_lo)
-                _f.after(140, lambda: _f.configure(fg_color=t.hover_surface))
+                frame.configure(fg_color=t.signal_ok_lo)
+                frame.after(140, _sync_visual)
             except Exception:
                 pass
+            return "break"
 
         # hover: 배경 밝아짐
-        def _on_enter(_e=None, _f=frame):
-            _f.configure(fg_color=t.hover_surface)
+        def _on_enter(_e=None):
+            state["hover"] = True
+            _sync_visual()
 
-        def _on_leave(_e=None, _f=frame):
-            _f.configure(fg_color="transparent")
+        def _on_leave(_e=None):
+            state["hover"] = False
+            _sync_visual()
+
+        def _on_focus_in(_e=None):
+            state["focus"] = True
+            _sync_visual()
+
+        def _on_focus_out(_e=None):
+            state["focus"] = False
+            _sync_visual()
 
         # 모든 자식 위젯에 동일 바인딩 (아이콘 Label 포함)
         widgets = [frame, time_lbl, preview_lbl]
@@ -242,6 +265,19 @@ class HistoryWindow(customtkinter.CTkToplevel):
             w.bind("<Button-1>", _on_click)
             w.bind("<Enter>", _on_enter)
             w.bind("<Leave>", _on_leave)
+
+        # Tab 으로 도달 가능하게 하고 Enter/Space 로 재복사 실행. 포커스 시엔
+        # hover 와 동일한 배경 강조 + focus_ring 테두리로 위치를 표시(High #3
+        # 과 동일 메커니즘 재사용).
+        enable_tab_focus(frame)
+        frame.bind("<FocusIn>", _on_focus_in)
+        frame.bind("<FocusOut>", _on_focus_out)
+        frame.bind("<Return>", _on_click)
+        frame.bind("<space>", _on_click)
+        bind_focus_ring(
+            frame, base_border_color=t.whisper_line, focus_color=t.focus_ring,
+            base_border_width=0, focus_border_width=1,
+        )
 
         return frame
 

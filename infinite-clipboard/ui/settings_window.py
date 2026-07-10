@@ -27,7 +27,7 @@ from ui import theme as t
 from ui.components import (
     SectionCard, SectionHeader, FormRow,
     PrimaryButton, SecondaryButton, IconButton, Badge,
-    load_icon, apply_window_icon, enable_mousewheel_scroll,
+    load_icon, apply_window_icon, enable_mousewheel_scroll, bind_focus_ring,
 )
 
 customtkinter.set_appearance_mode("dark")
@@ -467,7 +467,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
         return inner
 
     def _make_entry(self, parent, font=None):
-        return customtkinter.CTkEntry(
+        entry = customtkinter.CTkEntry(
             parent,
             height=t.INPUT["height"],
             corner_radius=t.INPUT["radius"],
@@ -478,6 +478,10 @@ class SettingsWindow(customtkinter.CTkToplevel):
             placeholder_text_color=t.INPUT["placeholder_color"],
             font=font or t.FONT_BODY,
         )
+        # High #3 (2026-07-10 감사): border_color_focus 토큰이 정의만 되고
+        # 미배선이라 Tab 이동 시 포커스 위치가 안 보였다 — 여기서 실제 배선.
+        bind_focus_ring(entry, t.INPUT["border_color"], t.INPUT["border_color_focus"])
+        return entry
 
     # ─── 동작 ──────────────────────────────────────────────────
 

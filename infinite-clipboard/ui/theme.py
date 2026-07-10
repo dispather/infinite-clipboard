@@ -65,7 +65,11 @@ whisper_line_hi = "#3a3a42"      # hover 시
 # 텍스트 — 3단계 dim
 terminal_text   = ZINC[100]      # primary body
 spool_label     = ZINC[400]      # secondary / label
-spool_dim       = ZINC[500]      # muted metadata (timestamp 등)
+# High #5 (2026-07-10 감사): ZINC[500](#71717a) 그대로였을 땐 실사용 배경
+# (relay_surface/relay_raised) 기준 WCAG AA 대비율 3.08~3.67:1로 미달(4.5:1 기준).
+# zinc-400/500 사이 커스텀 값으로 상향해 4.5:1 이상 확보(relay_raised 4.71:1,
+# relay_surface 5.60:1) 하면서도 spool_label 과는 구분되는 3단계 위계 유지.
+spool_dim       = "#909099"      # muted metadata (timestamp 등)
 spool_mute      = ZINC[600]      # disabled
 
 # 신호 (상태색) — Signature 의 핵심
