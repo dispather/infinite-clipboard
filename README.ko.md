@@ -142,6 +142,12 @@ infinite-clipboard --version
 
 직접 네이티브 패키지를 빌드하거나, 개발자 모드로 실행하거나, 코드에 기여하고 싶다면 **[CONTRIBUTING.ko.md](CONTRIBUTING.ko.md)**를 참고한다.
 
+## 후원
+
+Infinite Clipboard 가 복사-붙여넣기 번거로움을 덜어줬다면, 커피 한 잔으로 후원할 수 있다 — 유지보수에 도움이 된다.
+
+[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/dispather)
+
 ## 라이선스
 
 MIT License — 자세한 내용은 `LICENSE` 파일 참조.

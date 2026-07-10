@@ -142,6 +142,12 @@ infinite-clipboard --version
 
 Want to build a native package yourself, run in developer mode, or contribute code? See **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
+## Support
+
+If Infinite Clipboard saves you some copy-pasting hassle, consider buying me a coffee — it helps keep this maintained.
+
+[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/dispather)
+
 ## License
 
 MIT License — see the `LICENSE` file for details.
