@@ -79,6 +79,11 @@ ChangesEnvironment=no
 CloseApplications=force
 RestartApplications=no
 
+; Always ask — otherwise Inno Setup silently auto-picks the language
+; matching the Windows locale and never shows the chooser (this is why
+; installs on Korean Windows always silently defaulted to Korean).
+ShowLanguageDialog=yes
+
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "korean";  MessagesFile: "compiler:Languages\Korean.isl"

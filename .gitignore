@@ -45,6 +45,9 @@ settings.json
 # 개발 방법론/함정 노트 — 로컬 전용 자산, public repo엔 미공개(2026-07-10)
 /CLAUDE.md
 /phase-gates.md
+# brainstorming/writing-plans 산출 설계 문서 — 과거 docs/ 전체 삭제(2026-07-10)와
+# 같은 이유로 로컬 전용 유지, public repo에는 미공개
+/docs/plans/
 
 # Serena agent local state
 .serena/

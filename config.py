@@ -124,6 +124,9 @@ class AppConfig:
     # 자동 생성 후 영속. 같은 PC 는 재연결해도 같은 id. 32-char lowercase hex.
     # 형식 정의/검증은 core.protocol.is_valid_peer_id 가 SSOT.
     peer_id: str = ""
+    # UI 표시 언어. 빈 문자열이면 OS 로케일 자동감지("en"/"ko" 명시 가능).
+    # server_host/bind_address 등과 동일한 "빈 문자열=자동" 컨벤션.
+    language: str = ""
 
     def __post_init__(self):
         if not self.device_name:
@@ -150,6 +153,11 @@ class AppConfig:
         if self.mode not in ("server", "client"):
             _logger.warning(f"mode={self.mode!r} invalid, reset to 'client'")
             self.mode = "client"
+
+        # language: 빈 문자열(자동감지)이거나 지원 언어("en"/"ko")만 허용
+        if self.language and self.language not in ("en", "ko"):
+            _logger.warning(f"language={self.language!r} invalid, reset to 'en'")
+            self.language = "en"
 
         # port: 1~65535
         if not isinstance(self.port, int) or not (1 <= self.port <= 65535):

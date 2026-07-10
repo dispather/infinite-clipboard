@@ -22,6 +22,7 @@ import customtkinter
 from version import __app_name__, __author__, __license__, __url__, __version__
 from ui import theme as t
 from ui.components import PrimaryButton, SecondaryButton, apply_window_icon
+from ui.i18n import get_language, t as _t
 
 
 def _resolve_icon_path() -> Path:
@@ -36,10 +37,13 @@ def _resolve_icon_path() -> Path:
 class AboutWindow(customtkinter.CTkToplevel):
     """About 창 — 정적 정보(이름/버전/저자/라이선스/URL) 표시."""
 
-    def __init__(self):
+    def __init__(self, config=None):
         super().__init__()
 
-        self.title(f"{__app_name__} · 정보")
+        # config 가 없으면 get_language 가 OS 로케일 자동감지로 폴백 (방어적).
+        self._lang = get_language(config)
+
+        self.title(f"{__app_name__} · {_t('정보', self._lang)}")
         self.resizable(False, False)
         self.attributes("-topmost", True)
         self.configure(fg_color=t.tray_bg)
@@ -84,7 +88,7 @@ class AboutWindow(customtkinter.CTkToplevel):
         # ── 한 줄 설명 ──────────────────────────────────────────
         customtkinter.CTkLabel(
             container,
-            text="Tailscale LAN 클립보드/파일 공유",
+            text=_t("Tailscale LAN 클립보드/파일 공유", self._lang),
             font=t.FONT_BODY,
             text_color=t.spool_label,
         ).pack(pady=(0, t.SP[4]))
@@ -102,7 +106,7 @@ class AboutWindow(customtkinter.CTkToplevel):
         btn_bar.pack(fill="x", pady=(t.SP[4], 0))
 
         PrimaryButton(
-            btn_bar, text="닫기", command=self.destroy
+            btn_bar, text=_t("닫기", self._lang), command=self.destroy
         ).pack(side="right")
         SecondaryButton(
             btn_bar, text="GitHub", command=self._open_url

@@ -29,18 +29,23 @@ from ui.components import (
     load_icon, EmptyState, Badge, apply_window_icon,
     enable_mousewheel_scroll, add_tooltip,
 )
+# 주의: 이 파일은 theme 를 `t` 로 alias 하므로(위) i18n 의 번역 함수는
+# `tr` 로 받아 충돌을 피한다. (get_language 는 config 없으면 OS 로케일 폴백)
+from ui.i18n import get_language, t as tr
 
 
 def _format_time(timestamp: float) -> str:
     return time.strftime("%H:%M:%S", time.localtime(timestamp))
 
 
-def _format_eta(seconds: float) -> str:
+def _format_eta(seconds: float, lang: str = "ko") -> str:
     if seconds < 60:
-        return f"{int(seconds)}초 남음"
+        return tr("{n}초 남음", lang).format(n=int(seconds))
     if seconds < 3600:
-        return f"{int(seconds // 60)}분 {int(seconds % 60)}초 남음"
-    return f"{int(seconds // 3600)}시간 남음"
+        return tr("{m}분 {s}초 남음", lang).format(
+            m=int(seconds // 60), s=int(seconds % 60)
+        )
+    return tr("{n}시간 남음", lang).format(n=int(seconds // 3600))
 
 
 def _open_folder(path: str) -> None:
@@ -60,10 +65,14 @@ def _open_folder(path: str) -> None:
 
 
 class TransferWindow(customtkinter.CTkToplevel):
-    def __init__(self, state_file: str):
+    def __init__(self, state_file: str, config=None):
         super().__init__()
 
         self._state_file = state_file
+        # 언어는 창 생성 시점 1회 계산 (재시작 전제, 실시간 갱신 불필요).
+        # config 가 None 이면 get_language 가 detect_os_locale() 로 폴백하므로
+        # main.py 가 아직 config 를 안 넘겨도(--window 서브모드) 안전하게 동작.
+        self._lang = get_language(config)
 
         # M15: state_file 읽기(json.load)는 GUI 메인스레드(after 콜백)에서
         # 500ms 마다 동기 I/O 로 실행돼, 느린 디스크/대용량 completed 목록/
@@ -78,7 +87,7 @@ class TransferWindow(customtkinter.CTkToplevel):
         self._reader_running = True
         threading.Thread(target=self._state_reader_loop, daemon=True).start()
 
-        self.title("파일 전송")
+        self.title(tr("파일 전송", self._lang))
         # 세로를 넉넉히 — 완료 항목 여러 개가 한눈에 보이도록
         self.geometry("540x640")
         self.attributes("-topmost", True)
@@ -95,7 +104,7 @@ class TransferWindow(customtkinter.CTkToplevel):
         recv_bar = customtkinter.CTkFrame(self, fg_color="transparent")
         recv_bar.pack(fill="x", padx=t.SP[4], pady=(t.SP[4], t.SP[2]))
         customtkinter.CTkLabel(
-            recv_bar, text="받기".upper(),
+            recv_bar, text=tr("받기", self._lang).upper(),
             font=t.FONT_SECTION, text_color=t.spool_label,
         ).pack(side="left")
         self._recv_count = Badge(recv_bar, text="0", variant="muted")
@@ -121,7 +130,7 @@ class TransferWindow(customtkinter.CTkToplevel):
         self._active_bar = active_bar  # 받기 섹션을 이 앞에 pack 하기 위한 참조
 
         customtkinter.CTkLabel(
-            active_bar, text="진행 중".upper(),
+            active_bar, text=tr("진행 중", self._lang).upper(),
             font=t.FONT_SECTION, text_color=t.spool_label,
         ).pack(side="left")
         self._active_count = Badge(active_bar, text="0", variant="muted")
@@ -139,8 +148,8 @@ class TransferWindow(customtkinter.CTkToplevel):
         self._active_empty = EmptyState(
             self._active_frame,
             icon_name="inbox",
-            title="진행 중인 전송이 없어요",
-            desc="파일을 다른 PC에서 복사하면 여기 표시됩니다",
+            title=tr("진행 중인 전송이 없어요", self._lang),
+            desc=tr("파일을 다른 PC에서 복사하면 여기 표시됩니다", self._lang),
         )
         self._active_empty.pack(pady=t.SP[4])
 
@@ -149,7 +158,7 @@ class TransferWindow(customtkinter.CTkToplevel):
         comp_bar.pack(fill="x", padx=t.SP[4], pady=(t.SP[2], t.SP[2]))
 
         customtkinter.CTkLabel(
-            comp_bar, text="완료".upper(),
+            comp_bar, text=tr("완료", self._lang).upper(),
             font=t.FONT_SECTION, text_color=t.spool_label,
         ).pack(side="left")
         self._comp_count = Badge(comp_bar, text="0", variant="muted")
@@ -166,8 +175,8 @@ class TransferWindow(customtkinter.CTkToplevel):
         self._completed_empty = EmptyState(
             self._completed_frame,
             icon_name="circle-check",
-            title="완료된 전송이 아직 없어요",
-            desc="성공한 전송 기록이 여기 쌓입니다",
+            title=tr("완료된 전송이 아직 없어요", self._lang),
+            desc=tr("성공한 전송 기록이 여기 쌓입니다", self._lang),
         )
         self._completed_empty.pack(pady=t.SP[4])
 
@@ -295,7 +304,7 @@ class TransferWindow(customtkinter.CTkToplevel):
             font=(t.FAMILY, 11, "bold"),
             command=lambda tid=transfer_id: self._on_cancel_click(tid),
         )
-        add_tooltip(cancel_btn, "전송 취소")
+        add_tooltip(cancel_btn, tr("전송 취소", self._lang))
         cancel_btn.pack(side="right", padx=(t.SP[1], 0))
 
         customtkinter.CTkLabel(
@@ -317,7 +326,7 @@ class TransferWindow(customtkinter.CTkToplevel):
         row3.pack(fill="x", padx=t.SP[3], pady=(t.SP[1], t.SP[2]))
 
         speed_label = customtkinter.CTkLabel(
-            row3, text="준비 중...",
+            row3, text=tr("준비 중...", self._lang),
             font=t.FONT_META, text_color=t.spool_dim, anchor="w",
         )
         speed_label.pack(side="left")
@@ -375,7 +384,7 @@ class TransferWindow(customtkinter.CTkToplevel):
         # UI 즉시 피드백
         w["cancelling"] = True
         w["cancel_btn"].configure(state="disabled", text="...")
-        w["speed_label"].configure(text="취소 중...")
+        w["speed_label"].configure(text=tr("취소 중...", self._lang))
         w["eta_label"].configure(text="")
 
     # ── v3.0 S4: 받기 섹션 ──────────────────────────────────────────────
@@ -400,7 +409,7 @@ class TransferWindow(customtkinter.CTkToplevel):
 
     def _add_receivable_widget(self, entry: dict) -> None:
         oid = entry.get("offer_id", "")
-        name = entry.get("name", "파일")
+        name = entry.get("name", tr("파일", self._lang))
         total_size = entry.get("total_size", 0)
 
         frame = customtkinter.CTkFrame(
@@ -423,7 +432,7 @@ class TransferWindow(customtkinter.CTkToplevel):
         ).pack(side="left", fill="x", expand=True)
 
         recv_btn = customtkinter.CTkButton(
-            row, text="받기", width=52, height=26,
+            row, text=tr("받기", self._lang), width=52, height=26,
             corner_radius=t.RADIUS["sm"], fg_color=t.relay_raised,
             hover_color=t.signal_ok, text_color=t.terminal_text, font=t.FONT_META,
             command=lambda o=oid: self._on_receive_click(o),
@@ -459,13 +468,13 @@ class TransferWindow(customtkinter.CTkToplevel):
         w["requested"] = False
         w["last_failure_at"] = failure.get("failed_at")
         try:
-            w["btn"].configure(text="재시도", state="normal")
+            w["btn"].configure(text=tr("재시도", self._lang), state="normal")
         except Exception:
             pass
         label = w.get("reason_label")
         if label is not None:
             try:
-                label.configure(text=failure.get("message", "실패 — 재시도 가능"))
+                label.configure(text=failure.get("message", tr("실패 — 재시도 가능", self._lang)))
                 if not label.winfo_ismapped():
                     label.pack(fill="x", padx=t.SP[3], pady=(0, t.SP[2]))
             except Exception:
@@ -515,7 +524,7 @@ class TransferWindow(customtkinter.CTkToplevel):
             return
         # 즉시 UI 피드백 (완료되면 main 이 state 에서 제거 → 위젯 사라짐)
         w["requested"] = True
-        w["btn"].configure(state="disabled", text="받는 중")
+        w["btn"].configure(state="disabled", text=tr("받는 중", self._lang))
         label = w.get("reason_label")
         if label is not None and label.winfo_ismapped():
             try:
@@ -540,9 +549,9 @@ class TransferWindow(customtkinter.CTkToplevel):
             speed = transferred / elapsed
             speed_text = f"{_format_size(int(speed))}/s  ·  {int(percent * 100)}%"
             remaining = (total - transferred) / speed if speed > 0 else 0
-            eta_text = _format_eta(remaining) if remaining > 0 else "완료 중..."
+            eta_text = _format_eta(remaining, self._lang) if remaining > 0 else tr("완료 중...", self._lang)
         else:
-            speed_text = "준비 중..."
+            speed_text = tr("준비 중...", self._lang)
             eta_text = ""
 
         w["speed_label"].configure(text=speed_text)
@@ -601,7 +610,7 @@ class TransferWindow(customtkinter.CTkToplevel):
         saved_dir = entry.get("path")
         if entry.get("via_receive_button") and saved_dir:
             customtkinter.CTkButton(
-                frame, text="폴더 열기", width=68, height=24,
+                frame, text=tr("폴더 열기", self._lang), width=68, height=24,
                 corner_radius=t.RADIUS["sm"], fg_color=t.relay_raised,
                 hover_color=t.signal_ok, text_color=t.terminal_text, font=t.FONT_META,
                 command=lambda p=saved_dir: _open_folder(p),

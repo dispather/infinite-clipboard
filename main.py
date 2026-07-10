@@ -58,6 +58,7 @@ from core.file_transfer import (
 from core.privacy import detect_sensitive_kind
 # v3.0 lazy provider (OS 별 백엔드 팩토리 — 헤드리스/미지원 시 None graceful)
 from core.lazy_clipboard import get_lazy_provider, FetchedContent, KIND_FILE, KIND_IMAGE
+from ui.i18n import get_language, t
 
 # 로깅 설정 — 콘솔 + 파일 이중 출력
 from config import LOG_FILE
@@ -143,6 +144,8 @@ class InfiniteClipboard:
 
     def __init__(self, config: AppConfig):
         self.config = config
+        # 트레이는 장수 프로세스 — 언어를 앱 시작 시점 1회만 계산해 보관(재시작 전제).
+        self._lang = get_language(self.config)
         self.running = False
         self._restart_requested = False
 
@@ -539,9 +542,12 @@ class InfiniteClipboard:
         logger.info(f"[클라이언트] 서버 연결 끊김{f' ({reason})' if reason else ''}")
         if "version mismatch" in reason or "hard break" in reason:
             self._notify(
-                "버전 불일치로 연결 실패",
-                "상대 PC 의 Infinite Clipboard 버전이 다릅니다 — 양쪽 모두 "
-                "최신 버전으로 업그레이드하세요",
+                t("버전 불일치로 연결 실패", self._lang),
+                t(
+                    "상대 PC 의 Infinite Clipboard 버전이 다릅니다 — 양쪽 모두 "
+                    "최신 버전으로 업그레이드하세요",
+                    self._lang,
+                ),
             )
         self._notify_state_changed()
 
@@ -1260,7 +1266,10 @@ class InfiniteClipboard:
             with self._offer_lock:
                 offer = self.received_offers.get(offer_id)
             name = self._offer_display_name(offer) if offer else "파일"
-            self._notify("받기 실패", f"{name} — 원본에서 받을 수 없음 (클립보드 유지)")
+            self._notify(
+                t("받기 실패", self._lang),
+                t("{name} — 원본에서 받을 수 없음 (클립보드 유지)", self._lang).format(name=name),
+            )
             raise
 
     @staticmethod
@@ -1287,7 +1296,10 @@ class InfiniteClipboard:
                 "created_at": offer.get("created_at", time.time()),
             }
         self._save_transfer_state(force=True)
-        self._notify("파일 받기", f"{name} — 전송 창에서 [받기]")
+        self._notify(
+            t("파일 받기", self._lang),
+            t("{name} — 전송 창에서 [받기]", self._lang).format(name=name),
+        )
 
     def _clear_receivable(self, offer_id) -> None:
         with self._offer_lock:
@@ -1320,10 +1332,16 @@ class InfiniteClipboard:
         logger.warning(f"[받기] 실패: offer={offer_id[:8]}… reason={reason} retryable={retryable}")
         if retryable:
             self._mark_receivable_failed(offer_id, reason)
-            self._notify("받기 실패", f"{name} — {message} (재시도 가능)")
+            self._notify(
+                t("받기 실패", self._lang),
+                t("{name} — {message} (재시도 가능)", self._lang).format(name=name, message=message),
+            )
         else:
             self._clear_receivable(offer_id)
-            self._notify("받기 실패", f"{name} — {message}")
+            self._notify(
+                t("받기 실패", self._lang),
+                t("{name} — {message}", self._lang).format(name=name, message=message),
+            )
 
     def _annotate_completed_transfer(self, transfer_id, **fields) -> None:
         """완료 목록의 기존 엔트리에 필드 추가 (예: 받기 버튼 저장 경로).
@@ -1415,7 +1433,12 @@ class InfiniteClipboard:
 
         self._clear_receivable(offer_id)
         self._annotate_completed_transfer(offer_id, path=dest_dir, via_receive_button=True)
-        self._notify("받기 완료", f"{name} — {saved}개 → {dest_dir}")
+        self._notify(
+            t("받기 완료", self._lang),
+            t("{name} — {saved}개 → {dest_dir}", self._lang).format(
+                name=name, saved=saved, dest_dir=dest_dir
+            ),
+        )
         logger.info(f"[받기] 완료: {saved}개 → {dest_dir}")
 
     @staticmethod
@@ -1831,8 +1854,11 @@ class InfiniteClipboard:
                 if len(failed_overwrites) > 3:
                     names += f" 외 {len(failed_overwrites) - 3}개"
                 self._notify(
-                    "덮어쓰기 실패",
-                    f"{names} — 기존 파일 유지됨 (교체 안 됨, 사용 중이거나 권한 문제)",
+                    t("덮어쓰기 실패", self._lang),
+                    t(
+                        "{names} — 기존 파일 유지됨 (교체 안 됨, 사용 중이거나 권한 문제)",
+                        self._lang,
+                    ).format(names=names),
                 )
 
             if restored_paths:
@@ -2243,21 +2269,26 @@ def _run_window_only(window_type: str) -> None:
         config = load_config(persist_corrections=False)
         win = SettingsWindow(config)
     elif window_type == "history":
-        from config import _get_config_dir
+        from config import _get_config_dir, load_config
         from core.clipboard_manager import ClipboardManager
         from ui.history_window import HistoryWindow
         history_file = _get_config_dir() / "clipboard_history.json"
         history, corrupted = _load_clipboard_history_file(history_file)
         cm = ClipboardManager()
-        win = HistoryWindow(history, cm, corrupted=corrupted)
+        # 설정된 언어를 창에 전달 (자동교정 저장은 메인 프로세스 몫 — persist_corrections=False)
+        config = load_config(persist_corrections=False)
+        win = HistoryWindow(history, cm, corrupted=corrupted, config=config)
     elif window_type == "transfers":
-        from config import _get_config_dir
+        from config import _get_config_dir, load_config
         from ui.transfer_window import TransferWindow
         state_file = str(_get_config_dir() / "transfer_state.json")
-        win = TransferWindow(state_file)
+        config = load_config(persist_corrections=False)
+        win = TransferWindow(state_file, config=config)
     elif window_type == "about":
+        from config import load_config
         from ui.about_window import AboutWindow
-        win = AboutWindow()
+        config = load_config(persist_corrections=False)
+        win = AboutWindow(config=config)
 
     if win is None:
         sys.exit(1)

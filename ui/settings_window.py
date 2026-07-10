@@ -24,6 +24,9 @@ import customtkinter
 
 from config import AppConfig, save_config
 from ui import theme as t
+# 주의: 위에서 theme 을 `t` 로 import 했으므로, i18n 의 t() 는 `tr` 로 별칭한다
+# (동일 이름이면 theme 모듈이 shadowing 되어 t.SP/t.tray_bg 등이 전부 깨진다).
+from ui.i18n import get_language, t as tr
 from ui.components import (
     SectionCard, SectionHeader, FormRow,
     PrimaryButton, SecondaryButton, IconButton, Badge,
@@ -34,7 +37,7 @@ customtkinter.set_appearance_mode("dark")
 customtkinter.set_default_color_theme("blue")
 
 
-def _native_directory_dialog(parent=None, initial_dir=None) -> str:
+def _native_directory_dialog(parent=None, initial_dir=None, lang="ko") -> str:
     """OS 네이티브 디렉토리 선택 대화상자."""
     system = platform.system()
 
@@ -61,7 +64,9 @@ def _native_directory_dialog(parent=None, initial_dir=None) -> str:
         return ""
 
     from tkinter import filedialog
-    return filedialog.askdirectory(title="저장 경로 선택", initialdir=initial_dir) or ""
+    return filedialog.askdirectory(
+        title=tr("저장 경로 선택", lang), initialdir=initial_dir,
+    ) or ""
 
 
 def _detect_tailscale_ip() -> str:
@@ -96,6 +101,9 @@ class SettingsWindow(customtkinter.CTkToplevel):
 
         self._config = config
         self._on_save_callback = on_save_callback
+        # 언어는 창 수명 동안 고정 — 한 번 계산해 전 위젯에서 재사용
+        # (언어 전환은 재시작 전제, 실시간 갱신 불필요).
+        self._lang = get_language(config)
         # H3: Tailscale CLI 조회는 후보가 여러 개면 각 5초 timeout 이 누적돼 최대
         # 10초(macOS)까지 걸릴 수 있다. 창 생성을 막지 않도록 백그라운드 스레드로
         # 조회하고, 메인 스레드는 after() 폴링으로 결과를 받아 위젯을 갱신한다
@@ -105,7 +113,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
         self._tailscale_ip_ready = False
         threading.Thread(target=self._detect_tailscale_bg, daemon=True).start()
 
-        self.title("Infinite Clipboard · 설정")
+        self.title(f"Infinite Clipboard · {tr('설정', self._lang)}")
         # Critical 감사(2026-07-10): 이전엔 950px 고정 + resizable(False,False) +
         # 스크롤 없는 CTkFrame 이라, 세로 해상도가 낮은 화면(예: 1366x768 노트북)
         # 에서 저장 버튼까지 도달 불가능했다. 컨테이너를 CTkScrollableFrame 으로
@@ -127,10 +135,10 @@ class SettingsWindow(customtkinter.CTkToplevel):
         )
         btn_bar.pack(side="bottom", fill="x", padx=t.SP[4], pady=(t.SP[2], t.SP[4]))
 
-        PrimaryButton(btn_bar, text="저장하고 재시작", command=self._save).pack(
+        PrimaryButton(btn_bar, text=tr("저장하고 재시작", self._lang), command=self._save).pack(
             side="right"
         )
-        SecondaryButton(btn_bar, text="취소", command=self.destroy).pack(
+        SecondaryButton(btn_bar, text=tr("취소", self._lang), command=self.destroy).pack(
             side="right", padx=(0, t.SP[2])
         )
 
@@ -145,14 +153,14 @@ class SettingsWindow(customtkinter.CTkToplevel):
         header = customtkinter.CTkFrame(container, fg_color="transparent")
         header.pack(fill="x", pady=(0, t.SP[4]))
         customtkinter.CTkLabel(
-            header, text="설정",
+            header, text=tr("설정", self._lang),
             font=t.FONT_HEADING,
             text_color=t.terminal_text,
             anchor="w",
         ).pack(side="left")
 
         # H3: 초기엔 "확인 중" — 조회가 끝나면 _poll_tailscale_result 가 갱신
-        self._ts_badge = Badge(header, text="Tailscale 확인 중…", variant="muted")
+        self._ts_badge = Badge(header, text=tr("Tailscale 확인 중…", self._lang), variant="muted")
         self._ts_badge.pack(side="right")
 
         # ── 섹션 1. 연결 ──
@@ -175,8 +183,10 @@ class SettingsWindow(customtkinter.CTkToplevel):
         sec_auto.pack(fill="x", pady=(0, t.SP[4]))
         self._build_section_autostart(sec_auto)
 
-        # 초기 모드 상태 반영
-        self._on_mode_changed(self._MODE_TO_KR.get(config.mode, "클라이언트"))
+        # 초기 모드 상태 반영 (표시값과 동일하게 번역된 라벨로 호출)
+        self._on_mode_changed(
+            tr(self._MODE_TO_KR.get(config.mode, "클라이언트"), self._lang)
+        )
 
         # 함정 #10: CTkScrollableFrame 은 canvas 위에서만 기본으로 휠이 먹으므로
         # 자식 위젯 트리 전체에 재귀 바인딩 필요 (창이 작아져 스크롤이 실제로
@@ -217,14 +227,14 @@ class SettingsWindow(customtkinter.CTkToplevel):
 
     def _build_section_connection(self, parent, config):
         inner = self._section_inner(parent)
-        SectionHeader(inner, title="연결").pack(fill="x", pady=(0, t.SP[3]))
+        SectionHeader(inner, title=tr("연결", self._lang)).pack(fill="x", pady=(0, t.SP[3]))
 
-        # 모드
+        # 모드 — 표시값은 번역, 내부 로직은 _MODE_TO_KR/EN(한국어 키) 유지
         initial_mode = self._MODE_TO_KR.get(config.mode, "클라이언트")
-        self._mode_var = customtkinter.StringVar(value=initial_mode)
-        row_mode = FormRow(inner, "모드")
+        self._mode_var = customtkinter.StringVar(value=tr(initial_mode, self._lang))
+        row_mode = FormRow(inner, tr("모드", self._lang))
         self._mode_seg = customtkinter.CTkSegmentedButton(
-            row_mode, values=["서버", "클라이언트"],
+            row_mode, values=[tr("서버", self._lang), tr("클라이언트", self._lang)],
             variable=self._mode_var, command=self._on_mode_changed,
             height=30,
             selected_color=t.signal_ok,
@@ -239,12 +249,12 @@ class SettingsWindow(customtkinter.CTkToplevel):
         row_mode.pack(fill="x", pady=(0, t.SP[2]))
 
         # 호스트 (클라이언트 모드)
-        row_host = FormRow(inner, "호스트")
+        row_host = FormRow(inner, tr("호스트", self._lang))
         self._host_entry = self._make_entry(row_host)
         self._host_entry.pack(side="left", fill="x", expand=True, padx=(0, t.SP[1]))
         self._host_entry.insert(0, config.server_host)
         self._detect_btn = customtkinter.CTkButton(
-            row_host, text="자동", width=48, height=32,
+            row_host, text=tr("자동", self._lang), width=48, height=32,
             corner_radius=t.RADIUS["md"],
             fg_color=t.signal_ok if self._tailscale_ip else t.relay_raised,
             hover_color=t.signal_ok_hi if self._tailscale_ip else t.whisper_line_hi,
@@ -256,7 +266,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
         row_host.pack(fill="x", pady=(0, t.SP[2]))
 
         # 포트
-        row_port = FormRow(inner, "포트")
+        row_port = FormRow(inner, tr("포트", self._lang))
         self._port_entry = self._make_entry(row_port)
         self._port_entry.pack(side="left", fill="x", expand=True)
         self._port_entry.insert(0, str(config.port))
@@ -268,10 +278,10 @@ class SettingsWindow(customtkinter.CTkToplevel):
         # v2.2 R2: 서버 bind 주소 (Server 모드 전용)
         # "" → Tailscale 자동 (미감지 시 0.0.0.0 fallback) / "0.0.0.0" → 모든 인터페이스
         initial_bind = self._BIND_TO_KR.get(config.bind_address, "Tailscale 자동")
-        self._bind_var = customtkinter.StringVar(value=initial_bind)
-        row_bind = FormRow(inner, "노출")
+        self._bind_var = customtkinter.StringVar(value=tr(initial_bind, self._lang))
+        row_bind = FormRow(inner, tr("노출", self._lang))
         self._bind_seg = customtkinter.CTkSegmentedButton(
-            row_bind, values=["Tailscale 자동", "모든 인터페이스"],
+            row_bind, values=[tr("Tailscale 자동", self._lang), tr("모든 인터페이스", self._lang)],
             variable=self._bind_var,
             height=30,
             selected_color=t.signal_ok,
@@ -289,17 +299,17 @@ class SettingsWindow(customtkinter.CTkToplevel):
         # M1: "모든 인터페이스" 선택 시 평문 프로토콜 스니핑 위험을 opt-in
         # 시점에 바로 보여준다 (로그만으로는 사용자가 결정 전에 못 봄).
         self._bind_warning = customtkinter.CTkLabel(
-            inner, text="⚠ 프로토콜은 평문 — 같은 물리 LAN 의 제3자가 스니핑 가능",
+            inner, text=tr("⚠ 프로토콜은 평문 — 같은 물리 LAN 의 제3자가 스니핑 가능", self._lang),
             font=t.FONT_META, text_color=t.signal_wait, anchor="w",
         )
-        self._update_bind_warning(initial_bind)
+        self._update_bind_warning(tr(initial_bind, self._lang))
 
     def _build_section_auth(self, parent, config):
         inner = self._section_inner(parent)
-        SectionHeader(inner, title="인증").pack(fill="x", pady=(0, t.SP[3]))
+        SectionHeader(inner, title=tr("인증", self._lang)).pack(fill="x", pady=(0, t.SP[3]))
 
         # 인증 키 + 눈 아이콘 버튼
-        row_key = FormRow(inner, "인증 키")
+        row_key = FormRow(inner, tr("인증 키", self._lang))
         self._auth_entry = self._make_entry(row_key, font=t.FONT_MONO)
         self._auth_entry.pack(side="left", fill="x", expand=True, padx=(0, t.SP[1]))
         self._auth_entry.insert(0, config.auth_key)
@@ -308,7 +318,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
         self._eye_btn = IconButton(
             row_key, icon_name="eye",
             command=self._toggle_pin_visibility,
-            tooltip="인증 키 표시/숨기기",
+            tooltip=tr("인증 키 표시/숨기기", self._lang),
         )
         self._eye_btn.pack(side="left")
         row_key.pack(fill="x", pady=(0, t.SP[2]))
@@ -324,7 +334,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
             customtkinter.CTkLabel(trust_row, text="", image=icon_lbl).pack(side="left", padx=(0, t.SP[2] - 2))
         customtkinter.CTkSwitch(
             trust_row,
-            text="Tailscale 피어 로그 표시",
+            text=tr("Tailscale 피어 로그 표시", self._lang),
             variable=self._trust_var, onvalue=True, offvalue=False,
             text_color=t.terminal_text,
             font=t.FONT_BODY,
@@ -335,41 +345,41 @@ class SettingsWindow(customtkinter.CTkToplevel):
         ).pack(side="left", fill="x", expand=True)
         trust_row.pack(fill="x")
         customtkinter.CTkLabel(
-            inner, text="인증에는 영향 없음 — HMAC 은 항상 필수",
+            inner, text=tr("인증에는 영향 없음 — HMAC 은 항상 필수", self._lang),
             font=t.FONT_META, text_color=t.spool_dim, anchor="w",
         ).pack(fill="x", pady=(0, t.SP[2]))
 
     def _build_section_device(self, parent, config):
         inner = self._section_inner(parent)
-        SectionHeader(inner, title="기기").pack(fill="x", pady=(0, t.SP[3]))
+        SectionHeader(inner, title=tr("기기", self._lang)).pack(fill="x", pady=(0, t.SP[3]))
 
         # 이름
-        row_name = FormRow(inner, "이름")
+        row_name = FormRow(inner, tr("이름", self._lang))
         self._name_entry = self._make_entry(row_name)
         self._name_entry.pack(side="left", fill="x", expand=True)
         self._name_entry.insert(0, config.device_name)
         row_name.pack(fill="x", pady=(0, t.SP[2]))
 
         # 저장 경로 + 폴더 아이콘 버튼
-        row_path = FormRow(inner, "저장 경로")
+        row_path = FormRow(inner, tr("저장 경로", self._lang))
         self._path_entry = self._make_entry(row_path)
         self._path_entry.pack(side="left", fill="x", expand=True, padx=(0, t.SP[1]))
         self._path_entry.insert(0, config.download_path)
         IconButton(
             row_path, icon_name="folder-open",
             command=self._browse_directory,
-            tooltip="폴더 선택",
+            tooltip=tr("폴더 선택", self._lang),
         ).pack(side="left")
         row_path.pack(fill="x", pady=(0, t.SP[2]))
 
         # v2.3 audit #10: 충돌 처리 정책 — 동일 파일명 재수신 시 동작.
         # SHA-256 dedup 이 우선 적용되어 같은 파일은 정책 무관 자동 skip.
         initial_policy = self._POLICY_TO_KR.get(config.file_conflict_policy, "번호 추가")
-        self._policy_var = customtkinter.StringVar(value=initial_policy)
-        row_policy = FormRow(inner, "충돌 처리")
+        self._policy_var = customtkinter.StringVar(value=tr(initial_policy, self._lang))
+        row_policy = FormRow(inner, tr("충돌 처리", self._lang))
         self._policy_seg = customtkinter.CTkSegmentedButton(
             row_policy,
-            values=self._POLICY_ORDER,
+            values=[tr(p, self._lang) for p in self._POLICY_ORDER],
             variable=self._policy_var,
             height=30,
             selected_color=t.signal_ok,
@@ -384,21 +394,43 @@ class SettingsWindow(customtkinter.CTkToplevel):
         row_policy.pack(fill="x", pady=(0, t.SP[2]))
 
         # v2.3 audit P2: staging TTL + 즉시 정리 버튼.
-        row_ttl = FormRow(inner, "임시 정리")
+        row_ttl = FormRow(inner, tr("임시 정리", self._lang))
         self._ttl_entry = self._make_entry(row_ttl, font=t.FONT_MONO)
         self._ttl_entry.configure(width=70)
         self._ttl_entry.pack(side="left", padx=(0, t.SP[1]))
         self._ttl_entry.insert(0, str(config.staging_ttl_hours))
         customtkinter.CTkLabel(
-            row_ttl, text="시간 후",
+            row_ttl, text=tr("시간 후", self._lang),
             font=t.FONT_LABEL,
             text_color=t.spool_label,
         ).pack(side="left", padx=(0, t.SP[3]))
         SecondaryButton(
-            row_ttl, text="지금 정리",
+            row_ttl, text=tr("지금 정리", self._lang),
             command=self._cleanup_staging_now,
         ).pack(side="right")
         row_ttl.pack(fill="x")
+
+        # 언어 선택 — 재시작 시 전 창/트레이/알림에 적용. 언어명(autonym)은
+        # 현재 언어와 무관하게 항상 그대로 표기하므로 tr() 로 감싸지 않는다.
+        row_lang = FormRow(inner, tr("언어", self._lang))
+        self._lang_var = customtkinter.StringVar(
+            value="English" if self._lang == "en" else "한국어"
+        )
+        customtkinter.CTkOptionMenu(
+            row_lang, values=["한국어", "English"], variable=self._lang_var,
+            height=30,
+            corner_radius=t.RADIUS["md"],
+            fg_color=t.relay_raised,
+            button_color=t.relay_raised,
+            button_hover_color=t.whisper_line_hi,
+            text_color=t.terminal_text,
+            font=(t.FAMILY, 12, "bold"),
+        ).pack(side="left", fill="x", expand=True)
+        row_lang.pack(fill="x", pady=(t.SP[2], 0))
+        customtkinter.CTkLabel(
+            inner, text=tr("재시작 후 적용됩니다", self._lang),
+            font=t.FONT_META, text_color=t.spool_dim, anchor="w",
+        ).pack(fill="x", pady=(t.SP[1], 0))
 
     def _build_section_autostart(self, parent):
         from core.autostart import (
@@ -406,7 +438,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
             is_supported as _autostart_is_supported,
         )
         inner = self._section_inner(parent)
-        SectionHeader(inner, title="자동 실행").pack(fill="x", pady=(0, t.SP[3]))
+        SectionHeader(inner, title=tr("자동 실행", self._lang)).pack(fill="x", pady=(0, t.SP[3]))
 
         self._autostart_var = customtkinter.BooleanVar(
             value=_autostart_is_enabled() if _autostart_is_supported() else False,
@@ -416,7 +448,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
         if img is not None:
             customtkinter.CTkLabel(row, text="", image=img).pack(side="left", padx=(0, t.SP[2] - 2))
         sw = customtkinter.CTkSwitch(
-            row, text="OS 시작 시 자동 실행",
+            row, text=tr("OS 시작 시 자동 실행", self._lang),
             variable=self._autostart_var, onvalue=True, offvalue=False,
             text_color=t.terminal_text,
             font=t.FONT_BODY,
@@ -450,16 +482,24 @@ class SettingsWindow(customtkinter.CTkToplevel):
             staging = Path(tempfile.gettempdir()) / "ic_clipboard"
             deleted, freed = cleanup_staging_dir(staging, ttl)
             if deleted == 0:
-                messagebox.showinfo("임시 파일 정리", "정리할 항목이 없습니다.")
+                messagebox.showinfo(
+                    tr("임시 파일 정리", self._lang),
+                    tr("정리할 항목이 없습니다.", self._lang),
+                )
             else:
                 messagebox.showinfo(
-                    "임시 파일 정리",
-                    f"{deleted}개 항목 삭제\n{format_size(freed)} 회수",
+                    tr("임시 파일 정리", self._lang),
+                    tr("{deleted}개 항목 삭제\n{size} 회수", self._lang).format(
+                        deleted=deleted, size=format_size(freed),
+                    ),
                 )
         except Exception as e:
             import logging
             logging.getLogger(__name__).warning(f"cleanup 실패: {e}")
-            messagebox.showerror("임시 파일 정리", f"정리 실패: {e}")
+            messagebox.showerror(
+                tr("임시 파일 정리", self._lang),
+                tr("정리 실패: {e}", self._lang).format(e=e),
+            )
 
     def _section_inner(self, card):
         """SectionCard 내부에 여백 있는 프레임을 만들고 반환."""
@@ -488,7 +528,8 @@ class SettingsWindow(customtkinter.CTkToplevel):
     # ─── 동작 ──────────────────────────────────────────────────
 
     def _on_mode_changed(self, selected: str) -> None:
-        if selected == "서버":
+        # selected 는 번역된 표시 라벨 — 번역된 "서버" 와 비교
+        if selected == tr("서버", self._lang):
             self._host_entry.configure(state="disabled", fg_color=t.tray_bg)
             self._detect_btn.configure(state="disabled", fg_color=t.relay_raised)
             # v2.2 R2: server 모드일 때만 bind 옵션 활성
@@ -504,7 +545,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
 
     def _update_bind_warning(self, selected: str) -> None:
         """M1: "모든 인터페이스" 선택 시에만 평문 프로토콜 경고 캡션 표시."""
-        if selected == "모든 인터페이스":
+        if selected == tr("모든 인터페이스", self._lang):
             self._bind_warning.pack(fill="x", pady=(t.SP[1], 0))
         else:
             self._bind_warning.pack_forget()
@@ -546,7 +587,9 @@ class SettingsWindow(customtkinter.CTkToplevel):
 
     def _browse_directory(self) -> None:
         self.withdraw()
-        directory = _native_directory_dialog(initial_dir=self._path_entry.get())
+        directory = _native_directory_dialog(
+            initial_dir=self._path_entry.get(), lang=self._lang,
+        )
         self.deiconify()
         self.attributes("-topmost", True)
         self.lift()
@@ -560,7 +603,10 @@ class SettingsWindow(customtkinter.CTkToplevel):
         return value == "" or value.isdigit()
 
     def _save(self) -> None:
-        mode_kr = self._mode_var.get()
+        # 표시값(번역됨) → 한국어 키 역매핑. _MODE_TO_EN/_BIND_TO_EN/_POLICY_TO_EN
+        # (한국어 키 → config 값) 은 SSOT 로 그대로 재사용한다.
+        mode_disp_to_kr = {tr(kr, self._lang): kr for kr in self._MODE_TO_EN}
+        mode_kr = mode_disp_to_kr.get(self._mode_var.get(), "클라이언트")
         self._config.mode = self._MODE_TO_EN.get(mode_kr, "client")
 
         host_val = self._host_entry.get().strip()
@@ -577,15 +623,22 @@ class SettingsWindow(customtkinter.CTkToplevel):
         self._config.download_path = self._path_entry.get().strip()
         # v2.2 R2: bind 주소 (Server 모드 전용 — client 모드면 사용자 의도 보존)
         if self._config.mode == "server":
-            self._config.bind_address = self._BIND_TO_EN.get(self._bind_var.get(), "")
+            bind_disp_to_kr = {tr(kr, self._lang): kr for kr in self._BIND_TO_EN}
+            bind_kr = bind_disp_to_kr.get(self._bind_var.get(), "Tailscale 자동")
+            self._config.bind_address = self._BIND_TO_EN.get(bind_kr, "")
         # v2.3 audit #10: 충돌 정책. 잘못된 라벨이면 default 유지.
+        policy_disp_to_kr = {tr(kr, self._lang): kr for kr in self._POLICY_TO_EN}
+        policy_kr = policy_disp_to_kr.get(self._policy_var.get(), "")
         self._config.file_conflict_policy = self._POLICY_TO_EN.get(
-            self._policy_var.get(), "rename_with_counter",
+            policy_kr, "rename_with_counter",
         )
         # v2.3 audit P2: staging TTL. 잘못된 입력이면 _validate_and_clamp 가 보정.
         ttl_text = self._ttl_entry.get().strip()
         if ttl_text.isdigit():
             self._config.staging_ttl_hours = int(ttl_text)
+
+        # 언어 — 재시작 시 전 UI 에 적용 ("English"/"한국어" autonym → en/ko)
+        self._config.language = "en" if self._lang_var.get() == "English" else "ko"
 
         save_config(self._config)
 

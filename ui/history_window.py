@@ -23,6 +23,9 @@ from ui.components import (
     load_icon, EmptyState, Badge, apply_window_icon,
     enable_mousewheel_scroll, bind_focus_ring, enable_tab_focus,
 )
+# 주의: 이 파일은 `from ui import theme as t` 로 `t` 를 theme 별칭으로 이미 쓴다.
+# i18n 번역 함수는 이름 충돌을 피하려고 `tr` 로 별칭 import 한다.
+from ui.i18n import get_language, t as tr
 
 
 # 타입 → (아이콘명, 한국어 라벨, 컬러키)
@@ -33,17 +36,17 @@ _TYPE_META = {
 }
 
 
-def _format_elapsed(timestamp: float) -> str:
+def _format_elapsed(timestamp: float, lang: str = "ko") -> str:
     diff = time.time() - timestamp
     if diff < 5:
-        return "방금"
+        return tr("방금", lang)
     if diff < 60:
-        return f"{int(diff)}초 전"
+        return tr("{n}초 전", lang).format(n=int(diff))
     if diff < 3600:
-        return f"{int(diff // 60)}분 전"
+        return tr("{n}분 전", lang).format(n=int(diff // 60))
     if diff < 86400:
-        return f"{int(diff // 3600)}시간 전"
-    return f"{int(diff // 86400)}일 전"
+        return tr("{n}시간 전", lang).format(n=int(diff // 3600))
+    return tr("{n}일 전", lang).format(n=int(diff // 86400))
 
 
 def _prepare_preview(entry: dict) -> str:
@@ -75,7 +78,7 @@ def _prepare_preview(entry: dict) -> str:
 
 
 class HistoryWindow(customtkinter.CTkToplevel):
-    def __init__(self, history_list: list, clipboard_manager, corrupted: bool = False):
+    def __init__(self, history_list: list, clipboard_manager, corrupted: bool = False, config=None):
         super().__init__()
 
         self.history_list = history_list
@@ -83,8 +86,12 @@ class HistoryWindow(customtkinter.CTkToplevel):
         # M13: 이력 파일이 손상되어 초기화된 경우, "원래 비어있음" 과 구분되는
         # 안내를 보여준다 (과거엔 완전 무음이라 사용자가 구분할 수 없었음).
         self.corrupted = corrupted
+        # config 가 None 이어도 get_language 가 getattr 폴백 → detect_os_locale()
+        # 로 자연히 처리하므로 이 창을 단독으로 띄워도 안전하다(main.py 호출부가
+        # 아직 config 를 안 넘겨도 깨지지 않음).
+        self._lang = get_language(config)
 
-        self.title("클립보드 이력")
+        self.title(tr("클립보드 이력", self._lang))
         # 가로를 넉넉히 — preview 텍스트가 잘리지 않게
         self.geometry("620x560")
         self.attributes("-topmost", True)
@@ -97,7 +104,7 @@ class HistoryWindow(customtkinter.CTkToplevel):
         header.pack(fill="x", padx=t.SP[4], pady=(t.SP[4], t.SP[2]))
 
         customtkinter.CTkLabel(
-            header, text="이력",
+            header, text=tr("이력", self._lang),
             font=t.FONT_HEADING,
             text_color=t.terminal_text,
             anchor="w",
@@ -107,7 +114,7 @@ class HistoryWindow(customtkinter.CTkToplevel):
         self._count_badge.pack(side="left", padx=(t.SP[2], 0))
 
         customtkinter.CTkLabel(
-            header, text="텍스트 항목을 클릭하면 다시 복사됩니다",
+            header, text=tr("텍스트 항목을 클릭하면 다시 복사됩니다", self._lang),
             font=t.FONT_META, text_color=t.spool_dim, anchor="e",
         ).pack(side="right")
 
@@ -140,15 +147,15 @@ class HistoryWindow(customtkinter.CTkToplevel):
                 empty = EmptyState(
                     self._scroll,
                     icon_name="inbox",
-                    title="이력 파일이 손상되어 초기화됐어요",
-                    desc="기존 파일은 clipboard_history.json.corrupt-* 로 백업됨",
+                    title=tr("이력 파일이 손상되어 초기화됐어요", self._lang),
+                    desc=tr("기존 파일은 clipboard_history.json.corrupt-* 로 백업됨", self._lang),
                 )
             else:
                 empty = EmptyState(
                     self._scroll,
                     icon_name="inbox",
-                    title="이력이 비어 있어요",
-                    desc="어느 PC에서든 복사하면 여기 쌓입니다",
+                    title=tr("이력이 비어 있어요", self._lang),
+                    desc=tr("어느 PC에서든 복사하면 여기 쌓입니다", self._lang),
                 )
             empty.pack(expand=True, pady=t.SP[10])
             self._item_widgets.append(empty)
@@ -198,7 +205,7 @@ class HistoryWindow(customtkinter.CTkToplevel):
 
         # 우: 타임스탬프
         time_lbl = customtkinter.CTkLabel(
-            frame, text=_format_elapsed(timestamp),
+            frame, text=_format_elapsed(timestamp, self._lang),
             font=t.FONT_META,
             text_color=t.spool_dim,
             width=64, anchor="e",
