@@ -1120,7 +1120,16 @@ class FileTransferManager:
         # 2) 4 정책 분기.
         if policy == "overwrite":
             try:
-                final_path.unlink()
+                # final_path 가 폴더면 unlink() 는 항상 IsADirectoryError 로 실패한다
+                # (2026-07-10 발견 — _receive_offer_impl 이 폴더 offer 를 통째로
+                # 이 메서드에 넘기면서 처음 드러남: restore_folder 는 개별 파일만
+                # 넘겨서 여태 이 경로를 안 탔다). rmtree 로 폴더 전체를 비우고
+                # 새로 받은 폴더로 완전히 교체 — merge 가 아니라 clean overwrite
+                # (구 버전에서 삭제된 파일이 새 폴더에 잔류하는 걸 방지).
+                if final_path.is_dir():
+                    shutil.rmtree(final_path)
+                else:
+                    final_path.unlink()
                 logger.info(f"[{transfer_id}] overwrite: {final_path.name}")
                 return final_path
             except OSError as e:

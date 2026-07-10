@@ -1,3 +1,5 @@
 -r requirements.txt
 pyobjc-framework-Cocoa>=10.0
 pyobjc-framework-Quartz>=10.0
+# 알림 "받기"/"무시" 액션 버튼 (UNUserNotificationCenter) — 코드 서명 필요, build_mac.sh 참조
+pyobjc-framework-UserNotifications>=10.0

@@ -83,6 +83,10 @@ hiddenimports = [
     "core.file_transfer", "core.tailscale", "core.privacy", "core.autostart",
     # v3.0 lazy clipboard 팩토리/ABC (크로스 OS). OS별 백엔드는 아래 분기에서 명시
     "core.lazy_clipboard",
+    # 알림 "받기"/"무시" 액션 버튼 팩토리/ABC (크로스 OS, 2026-07-10). OS별
+    # 백엔드는 아래 분기에서 명시 — core.lazy_clipboard 와 동일한 이유(팩토리가
+    # 함수 안에서 lazy import 하므로 정적 분석이 놓칠 수 있음, 함정 #6 류).
+    "core.actionable_notify",
 ]
 
 if IS_WIN:
@@ -90,15 +94,27 @@ if IS_WIN:
         "pystray._win32",
         "plyer.platforms.win.notification",
         "win32api", "win32con", "win32gui", "win32clipboard", "win32process",
+        "core.notify_win",
     ]
+    # Windows-Toasts 는 WinRT 프로젝션 패키지(winrt-*/winsdk) 위에서 동작하는데,
+    # 이건 pywayland 의 cffi 확장과 같은 부류의 "동적 임포트라 정적 분석이
+    # 놓치는" 문제일 가능성이 높다(이 프로젝트에 macOS/Linux 개발 환경만 있어
+    # Windows 로 직접 검증 불가). Windows CI 에서 `pip show Windows-Toasts` 로
+    # 실제 의존 패키지를 확인 후, pywayland 처럼 collect_submodules(...) 를
+    # 추가해야 할 수 있다 — 누락 시 dev 모드(`python main.py`)는 멀쩡한데
+    # 번들(frozen)에서만 토스트 생성이 조용히 실패하는 함정 #6 류 회귀가 난다.
 elif IS_MAC:
     hiddenimports += [
         "pystray._darwin",
         "plyer.platforms.macosx.notification",
         # PyObjC 프레임워크 심볼
         "AppKit", "Foundation", "Quartz", "objc",
+        # 알림 액션 버튼용 UNUserNotificationCenter 프레임워크 (2026-07-10).
+        # 코드 서명 필요 — build_mac.sh 의 애드혹 codesign 단계 참조.
+        "UserNotifications",
         # v3.0 lazy clipboard 백엔드 (팩토리가 함수 안에서 lazy import → 명시, 함정 #6 류)
         "core.lazy_mac",
+        "core.notify_mac",
     ]
 elif IS_LINUX:
     from PyInstaller.utils.hooks import collect_submodules  # noqa: E402
@@ -113,6 +129,9 @@ elif IS_LINUX:
         # 비활성 → fallback. 함정 #6 류 silent 회귀 회피).
         "core.lazy_x11",
         "core.lazy_wayland",
+        # 알림 액션 버튼 백엔드 (2026-07-10) — gi.repository.Gio/GLib 사용, 새
+        # 시스템 의존성 없음(AppIndicator 트레이가 이미 python-gobject 를 요구).
+        "core.notify_linux",
         # vendored pywayland 바인딩(core/_wayland_proto): 각 __init__ 이 하위 모듈을
         # 전부 re-export → 패키지 루트만 명시해도 import graph 가 전부 수집.
         "core._wayland_proto.wayland",

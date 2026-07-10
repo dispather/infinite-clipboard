@@ -122,6 +122,15 @@ fi
     --distpath "$IC_BUILD_DIR/dist" \
     --workpath "$IC_BUILD_DIR/build"
 
+# ── 애드혹 코드 서명 (2026-07-10, 알림 "받기" 액션 버튼용) ─────────────
+# UNUserNotificationCenter(core/notify_mac.py)는 코드 서명된 앱 번들에게만
+# 알림 권한을 준다 — 무서명이면 요청 자체가 거부돼 이 백엔드가 항상
+# is_supported()=False 로 저하한다(크래시는 안 남, 기존 plyer 알림으로 폴백).
+# 애드혹 서명(`--sign -`)은 유료 Apple Developer 계정 없이도 이 요구사항을
+# 만족시킨다 — 배포용 서명(Gatekeeper 통과)과는 별개 문제이며, 기존
+# `xattr -dr com.apple.quarantine` 수동 우회 안내는 그대로 유효하다.
+codesign --force --deep --sign - "$IC_BUILD_DIR/dist/Infinite Clipboard.app"
+
 echo ""
 echo "빌드 완료 (산출물 sync 폴더 밖):"
 echo "  .app:  $IC_BUILD_DIR/dist/Infinite Clipboard.app"

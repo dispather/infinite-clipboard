@@ -21,6 +21,7 @@ import socket
 import threading
 import time
 import uuid
+from pathlib import Path
 
 import pytest
 import xxhash
@@ -358,8 +359,15 @@ def test_peer_reconnect_with_same_peer_id_eventually_succeeds():
 
 def test_dedup_hash_injection_enables_second_transfer_skip(tmp_path):
     """main.py 의 실제 핸들러 체인(_handle_file_end)이 계산한 SHA-256 을
-    metadata.files 에 제대로 주입해야, 동일 파일의 재전송이 restore_folder
-    의 dedup short-circuit 으로 실제 skip 된다 (CLAUDE.md 함정 #24 회귀)."""
+    metadata.files 에 제대로 주입해야, 동일 파일의 재전송이 dedup short-circuit
+    으로 실제 skip 된다 (CLAUDE.md 함정 #24 회귀).
+
+    2026-07-10 갱신: staging 이 transfer_id 별 하위 폴더로 격리되면서(별개의
+    "(1)" 접미어 버그 수정) 서로 다른 offer_id 는 애초에 staging 안에서 충돌할
+    수 없어졌다 — 이 시나리오의 실제 회귀 지점은 이제 "받기" 버튼 흐름
+    (`_receive_offer` → `config.download_path`)으로 옮겨졌다. `_receive_offer`
+    가 다운로드 폴더의 실제 충돌을 발견하면 그때 hash 를 계산해 dedup 을
+    시도하므로, 여기서 그 경로를 직접 검증한다."""
     unique_name = f"dedup-wiring-{uuid.uuid4().hex}.bin"
     src = tmp_path / "src"
     src.mkdir()
@@ -369,16 +377,13 @@ def test_dedup_hash_injection_enables_second_transfer_skip(tmp_path):
 
     server_app, client_app, _server_stub, stub = _setup_pair(tmp_path)
     try:
-        staging_dir = client_app._staging_dir()
-        dest_path = staging_dir / unique_name
-        for p in staging_dir.glob(f"{dest_path.stem}*{dest_path.suffix}"):
-            p.unlink()  # 고정 staging 경로 공유 위험 방지 (다른 테스트/실행 잔여물)
+        dest_path = Path(client_app.config.download_path) / unique_name
 
-        # 1차 전송
+        # 1차 전송 — "받기" 버튼(_receive_offer)으로 다운로드 폴더에 수신
         server_app._announce_offer([str(f1)])
         assert _wait_until(lambda: stub.captured is not None, timeout=4.0)
-        offer, fetch_cb = stub.captured
-        fetch_cb(offer["offer_id"])
+        offer, _fetch_cb = stub.captured
+        client_app._receive_offer(offer["offer_id"])
         assert dest_path.exists(), "1차 전송 후 목적지 파일이 없음"
         assert dest_path.read_bytes() == content
 
@@ -387,13 +392,13 @@ def test_dedup_hash_injection_enables_second_transfer_skip(tmp_path):
         stub.captured = None
         server_app._announce_offer([str(f1)])
         assert _wait_until(lambda: stub.captured is not None, timeout=4.0)
-        offer2, fetch_cb2 = stub.captured
+        offer2, _fetch_cb2 = stub.captured
         assert offer2["offer_id"] != offer["offer_id"]
-        fetch_cb2(offer2["offer_id"])
+        client_app._receive_offer(offer2["offer_id"])
 
-        duplicated = staging_dir / f"{dest_path.stem} (1){dest_path.suffix}"
+        duplicated = Path(client_app.config.download_path) / f"{dest_path.stem} (1){dest_path.suffix}"
         assert not duplicated.exists(), (
-            "테스트갭 #5 회귀 — dedup hash 주입이 깨져 재전송이 새 파일로 복제됨"
+            "테스트갭 #5 회귀 — dedup hash 주입이 깨져 재수신이 새 파일로 복제됨"
         )
         assert dest_path.read_bytes() == content
     finally:
@@ -525,7 +530,12 @@ def test_resume_ignored_when_checkpoint_does_not_match_current_offer(tmp_path):
 )
 def test_conflict_policy_end_to_end_socket(tmp_path, policy):
     """4가지 file_conflict_policy 가 실제 소켓 기반 전송 종단에서 기대한
-    대로 동작하는지 (기존엔 _resolve_conflict 단위 테스트만 존재)."""
+    대로 동작하는지 (기존엔 _resolve_conflict 단위 테스트만 존재).
+
+    2026-07-10 갱신: staging 이 transfer_id 별 하위 폴더로 격리되면서(별개의
+    "(1)" 접미어 버그 수정) 서로 다른 offer_id 는 staging 안에서 애초에 충돌할
+    수 없어졌다 — 사용자에게 실제로 보이는 충돌 지점은 "받기" 버튼 흐름
+    (`_receive_offer` → `config.download_path`)이므로 거기서 검증한다."""
     unique_name = f"conflict-{uuid.uuid4().hex}.bin"
     src = tmp_path / "src"
     src.mkdir()
@@ -537,36 +547,34 @@ def test_conflict_policy_end_to_end_socket(tmp_path, policy):
     server_app, client_app, _server_stub, stub = _setup_pair(tmp_path)
     try:
         client_app.config.file_conflict_policy = policy
-        staging_dir = client_app._staging_dir()
-        dest_path = staging_dir / unique_name
-        for p in staging_dir.glob(f"{dest_path.stem}*{dest_path.suffix}"):
-            p.unlink()
+        download_dir = Path(client_app.config.download_path)
+        dest_path = download_dir / unique_name
 
         server_app._announce_offer([str(f1)])
         assert _wait_until(lambda: stub.captured is not None, timeout=4.0)
-        offer, fetch_cb = stub.captured
-        fetch_cb(offer["offer_id"])
+        offer, _fetch_cb = stub.captured
+        client_app._receive_offer(offer["offer_id"])
         assert dest_path.read_bytes() == content_v1
 
         f1.write_bytes(content_v2)
         stub.captured = None
         server_app._announce_offer([str(f1)])
         assert _wait_until(lambda: stub.captured is not None, timeout=4.0)
-        offer2, fetch_cb2 = stub.captured
-        fetch_cb2(offer2["offer_id"])
+        offer2, _fetch_cb2 = stub.captured
+        client_app._receive_offer(offer2["offer_id"])
 
         if policy == "overwrite":
             assert dest_path.read_bytes() == content_v2
         elif policy == "skip":
             assert dest_path.read_bytes() == content_v1
         elif policy == "rename_with_counter":
-            counter_path = staging_dir / f"{dest_path.stem} (1){dest_path.suffix}"
+            counter_path = download_dir / f"{dest_path.stem} (1){dest_path.suffix}"
             assert counter_path.exists(), "rename_with_counter 파일이 생성되지 않음"
             assert counter_path.read_bytes() == content_v2
             assert dest_path.read_bytes() == content_v1
         elif policy == "rename_with_timestamp":
             matches = [
-                p for p in staging_dir.glob(f"{dest_path.stem}.*{dest_path.suffix}")
+                p for p in download_dir.glob(f"{dest_path.stem}.*{dest_path.suffix}")
                 if p != dest_path
             ]
             assert matches, "rename_with_timestamp 파일이 생성되지 않음"

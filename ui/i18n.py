@@ -113,6 +113,10 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         "{name} — 원본에서 받을 수 없음 (클립보드 유지)": "{name} — couldn't fetch from source (clipboard kept)",
         "{name} — 전송 창에서 [받기]": "{name} — use [Receive] in the Transfers window",
+        # core/actionable_notify.py 백엔드가 있으면 알림 자체에 받기/무시 버튼이
+        # 붙으므로, 위와 달리 전송 창을 언급하지 않는 본문.
+        "{name} ({size})": "{name} ({size})",
+        "무시": "Dismiss",
         "{name} — {message} (재시도 가능)": "{name} — {message} (retryable)",
         "{name} — {message}": "{name} — {message}",
         "{name} — {saved}개 → {dest_dir}": "{name} — {saved} item(s) → {dest_dir}",

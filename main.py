@@ -58,6 +58,7 @@ from core.file_transfer import (
 from core.privacy import detect_sensitive_kind
 # v3.0 lazy provider (OS 별 백엔드 팩토리 — 헤드리스/미지원 시 None graceful)
 from core.lazy_clipboard import get_lazy_provider, FetchedContent, KIND_FILE, KIND_IMAGE
+from core.actionable_notify import get_actionable_notifier
 from ui.i18n import get_language, t
 
 # 로깅 설정 — 콘솔 + 파일 이중 출력
@@ -210,6 +211,13 @@ class InfiniteClipboard:
         # [receiver 측] OS lazy provider (첫 offer 수신 시 lazy-init). 미지원/헤드리스 None.
         self.lazy_provider = None
         self._lazy_provider_inited = False
+        # [receiver 측] 알림 "받기" 액션 버튼 백엔드 (첫 receivable offer 시 lazy-init).
+        # 미지원/헤드리스면 None — 기존 plyer 기반 _notify() 로 폴백.
+        self.actionable_notifier = None
+        self._actionable_notifier_inited = False
+        # [receiver 측] 알림의 "받기"와 전송창의 "받기"가 서로 다른 트리거(같은
+        # offer 를 동시에 겨냥 가능)라 in-flight 중복 수신을 막는 가드.
+        self._receiving_offer_ids: set = set()
         # [receiver 측] 진행 중 fetch 1개 (invariant A — 직렬화). _fetch_lock 으로 보호.
         #   {offer_id, transfer_id, event: Event, paths: [..]|None, fail: reason|None}
         self._active_fetch = None
@@ -303,6 +311,12 @@ class InfiniteClipboard:
         if self.lazy_provider is not None:
             try:
                 self.lazy_provider.stop()
+            except Exception:
+                pass
+        # 알림 액션 버튼 백엔드 정리 (규칙 #14 silent)
+        if self.actionable_notifier is not None:
+            try:
+                self.actionable_notifier.stop()
             except Exception:
                 pass
         # v3.0 S3: 이미지 offer 스냅샷 temp 정리
@@ -618,6 +632,14 @@ class InfiniteClipboard:
         """클립보드 변경 폴링 루프"""
         while self.running:
             try:
+                # actionable notifier 가 자체 이벤트 루프를 수동으로 돌려야 하는
+                # 백엔드(예: Linux D-Bus)면 여기서 드레인 — 별도 스레드로 못 띄우는
+                # 이유는 core/notify_linux.py 모듈 docstring 참조 (GLib landmine).
+                if self.actionable_notifier is not None:
+                    try:
+                        self.actionable_notifier.pump()
+                    except Exception:
+                        pass
                 # lazy provider 가 클립보드를 소유 중이면(원격 offer placeholder) self-loop
                 # 방지를 위해 읽기 skip — 사용자 로컬 복사 시 소유권 회수되어 자동 재개.
                 if self._is_network_active() and not self._lazy_owns_clipboard():
@@ -995,6 +1017,30 @@ class InfiniteClipboard:
                 logger.info("[offer] lazy provider 없음 (헤드리스/미지원) — 받기 fallback 대상")
         return self.lazy_provider
 
+    def _ensure_actionable_notifier(self):
+        """[receiver] 첫 receivable offer 시 액션 알림 백엔드를 백그라운드로 lazy-init.
+
+        `_add_receivable`→`_handle_clip_offer` 는 그 피어 연결의 네트워크 메시지
+        처리 스레드에서 호출된다. `get_actionable_notifier()` 생성 자체를 이
+        스레드에서 기다리면, macOS 백엔드(core/notify_mac.py)의 비동기 알림 권한
+        요청이 최대 5초(+사용자가 권한 팝업에 응답하는 시간) 그 스레드를 막아
+        같은 피어의 후속 메시지 처리가 지연된다(2026-07-10 리뷰 발견). 그래서
+        생성은 별도 스레드에 위임하고, 아직 준비 전이면 이번 호출은 None(=기존
+        plyer 알림 폴백)으로 처리 — 다음 offer 부터는 준비된 인스턴스를 즉시 재사용.
+        """
+        if not self._actionable_notifier_inited:
+            self._actionable_notifier_inited = True
+
+            def _init():
+                try:
+                    self.actionable_notifier = get_actionable_notifier()
+                except Exception as e:
+                    logger.warning(f"actionable notifier 생성 실패 — 일반 알림으로 폴백: {e}")
+                    self.actionable_notifier = None
+            threading.Thread(target=_init, daemon=True).start()
+            return None
+        return self.actionable_notifier
+
     def _handle_clip_offer(self, data):
         """[receiver] MSG_CLIP_OFFER 수신 → lazy provider 에 등록 (paste 시 fetch)."""
         offer = self.protocol.parse_clip_offer(data)
@@ -1004,15 +1050,26 @@ class InfiniteClipboard:
         if offer["source_peer"] == self.config.peer_id:
             return
         offer_id = offer["offer_id"]
+        source_peer = offer["source_peer"]
         with self._offer_lock:
-            # 새 offer 가 이전 것을 supersede — 최신만 유지.
+            # 새 offer 는 같은 발신자(source_peer)의 이전 offer 만 supersede — 무관한
+            # 다른 발신자의 대기 항목이 통째로 사라지는 버그(2026-07-10 제보) 수정.
             # _registered_at: fetch grace 기준 시각. 등록(클립보드 placeholder) 직전에
             # 박아두면 그 직후 OS 셸의 즉시 peek 까지 grace 안에 들어와 차단된다(race 없음).
             offer["_registered_at"] = time.time()
-            self.received_offers = {offer_id: offer}
-            # 이전 받기 fallback 잔여 정리 (supersede)
-            old_receivable = bool(self.receivable_offers)
-            self.receivable_offers = {}
+            self.received_offers = {
+                oid: o for oid, o in self.received_offers.items()
+                if o.get("source_peer") != source_peer
+            }
+            self.received_offers[offer_id] = offer
+            # 같은 발신자의 이전 받기 fallback 잔여만 정리 (supersede)
+            stale_receivable = {
+                oid for oid, o in self.receivable_offers.items()
+                if o.get("source_peer") == source_peer
+            }
+            for oid in stale_receivable:
+                self.receivable_offers.pop(oid, None)
+            old_receivable = bool(stale_receivable)
         # v3.0.5: 기본은 명시적 '받기' 모드 — 받는 PC 가 클립보드를 소유하지 않으므로
         # 클립보드 매니저/파일인식 앱의 자동 read 가 paste 없이 전송을 트리거하지 못한다
         # (함정 #28: Wayland 는 peek vs paste 구분 신호가 없어 paste-트리거 lazy 가 샘).
@@ -1296,10 +1353,32 @@ class InfiniteClipboard:
                 "created_at": offer.get("created_at", time.time()),
             }
         self._save_transfer_state(force=True)
-        self._notify(
-            t("파일 받기", self._lang),
-            t("{name} — 전송 창에서 [받기]", self._lang).format(name=name),
-        )
+
+        offer_id = offer["offer_id"]
+        title = t("파일 받기", self._lang)
+        notifier = self._ensure_actionable_notifier()
+        shown = False
+        if notifier is not None:
+            try:
+                shown = notifier.notify_receivable(
+                    offer_id, title,
+                    t("{name} ({size})", self._lang).format(
+                        name=name, size=format_size(int(offer.get("total_size", 0))),
+                    ),
+                    t("받기", self._lang), t("무시", self._lang),
+                    on_receive=lambda oid=offer_id: threading.Thread(
+                        target=self._receive_offer, args=(oid,), daemon=True,
+                    ).start(),
+                )
+            except Exception as e:
+                logger.warning(f"actionable 알림 실패 — 일반 알림으로 폴백: {e}")
+                shown = False
+        if not shown:
+            # 폴백 — 액션 버튼 없는 일반 알림, 전송 창에서 수동으로 받아야 함을 안내.
+            self._notify(
+                title,
+                t("{name} — 전송 창에서 [받기]", self._lang).format(name=name),
+            )
 
     def _clear_receivable(self, offer_id) -> None:
         with self._offer_lock:
@@ -1394,7 +1473,26 @@ class InfiniteClipboard:
         threading.Thread(target=_do, daemon=True).start()
 
     def _receive_offer(self, offer_id) -> None:
-        """[받기 버튼] offer 를 fetch 해 download_path 에 저장 (provider 무관 수동 수신)."""
+        """[받기 버튼] offer 를 fetch 해 download_path 에 저장 (provider 무관 수동 수신).
+
+        알림의 "받기" 액션 버튼과 전송 창의 "받기" 버튼은 서로 다른 트리거라
+        (하나는 이 프로세스 내 콜백, 하나는 별도 프로세스의 IPC 폴링) 같은
+        offer 를 동시에 겨냥할 수 있다 — 사용자가 알림과 전송 창을 둘 다 보고
+        양쪽에서 누르는 건 흔한 시나리오다. in-flight 가드로 중복 네트워크
+        fetch + 중복 파일 쓰기를 막는다.
+        """
+        with self._offer_lock:
+            if offer_id in self._receiving_offer_ids:
+                logger.debug(f"[받기] 이미 처리 중 — 중복 트리거 무시: offer={offer_id[:8]}…")
+                return
+            self._receiving_offer_ids.add(offer_id)
+        try:
+            self._receive_offer_impl(offer_id)
+        finally:
+            with self._offer_lock:
+                self._receiving_offer_ids.discard(offer_id)
+
+    def _receive_offer_impl(self, offer_id) -> None:
         with self._offer_lock:
             info = self.receivable_offers.get(offer_id)
         name = info.get("name", "파일") if info else "파일"
@@ -1413,15 +1511,41 @@ class InfiniteClipboard:
         import shutil
         dest_dir = self.config.download_path
         saved = 0
+        failed_overwrites: list = []
         try:
             os.makedirs(dest_dir, exist_ok=True)
             for p in fetched.paths:
                 base = os.path.basename(p.rstrip("/\\")) or "received"
-                target = os.path.join(dest_dir, base)
-                if os.path.isdir(p):
-                    shutil.copytree(p, target, dirs_exist_ok=True)
+                target = Path(dest_dir) / base
+                is_dir = os.path.isdir(p)
+                # fetch 는 항상 transfer_id 전용 staging 하위 폴더에서 원래 이름
+                # 그대로 오므로(2026-07-10 수정), 여기서 처음으로 "실제 목적지에
+                # 동명 파일이 있는가"를 확인한다. 충돌이 실제로 있을 때만 해시를
+                # 계산해 dedup short-circuit(동일 내용이면 재수신을 조용히 재사용
+                # — audit #10 과 동일한 보호를 이 목적지에도 적용) 을 시도하고,
+                # 그 다음 config.file_conflict_policy 4-정책으로 넘어간다(기존
+                # restore_folder 가 쓰는 메서드 재사용, 새 로직 작성 안 함).
+                # 폴더는 단일 해시로 dedup 판단이 안 되므로 정책 분기만 적용.
+                if target.exists():
+                    expected_size = expected_hash = None
+                    if not is_dir:
+                        try:
+                            expected_size = os.path.getsize(p)
+                            expected_hash = self.file_manager._compute_file_hash(Path(p))
+                        except OSError:
+                            expected_size = expected_hash = None
+                    resolved = self.file_manager._resolve_conflict(
+                        target, expected_size, expected_hash,
+                        self.config.file_conflict_policy, offer_id, failed_overwrites,
+                    )
+                    if resolved is None:
+                        continue  # dedup 일치 또는 skip 정책 — 기존 파일 그대로 둠
                 else:
-                    shutil.copy2(p, target)
+                    resolved = target
+                if is_dir:
+                    shutil.copytree(p, str(resolved), dirs_exist_ok=(resolved == target))
+                else:
+                    shutil.copy2(p, str(resolved))
                 saved += 1
         except Exception as e:
             logger.error(f"[받기] 저장 실패: {e}")
@@ -1430,6 +1554,18 @@ class InfiniteClipboard:
             # 부터 처음부터 다시, 스테이징 바이트 재사용 안 함 — 단순성 우선).
             self._handle_receive_failure(offer_id, name, "save_error")
             return
+
+        if failed_overwrites:
+            names = ", ".join(failed_overwrites[:3])
+            if len(failed_overwrites) > 3:
+                names += f" 외 {len(failed_overwrites) - 3}개"
+            self._notify(
+                t("덮어쓰기 실패", self._lang),
+                t(
+                    "{names} — 기존 파일 유지됨 (교체 안 됨, 사용 중이거나 권한 문제)",
+                    self._lang,
+                ).format(names=names),
+            )
 
         self._clear_receivable(offer_id)
         self._annotate_completed_transfer(offer_id, path=dest_dir, via_receive_button=True)
@@ -1837,9 +1973,17 @@ class InfiniteClipboard:
 
         try:
             # 임시 디렉토리에 복원 (사용자가 붙여넣기할 때 파일 관리자가 복사/이동).
+            # transfer_id 전용 하위 폴더에 격리 — 과거엔 모든 transfer 가 공용
+            # staging_dir 에 바로 풀려서, 예전에 받은 동명 파일이 남아있으면(정리
+            # 주기는 staging_ttl_hours) 실제 목적지(download_path)엔 동명 파일이
+            # 없는데도 여기서 먼저 "(1)" 접미어가 붙어버렸다(2026-07-10 제보).
+            # transfer_id 는 FileMetadata.from_dict 이 UUID v4 형식으로 이미 검증한
+            # 값이라 path 컴포넌트로 안전하다. cleanup_staging_dir 는 staging_dir
+            # 최상위 항목(이제 transfer_id 폴더)의 mtime 을 보고 통째로 정리하므로
+            # 코드 변경 없이 그대로 동작.
             # v2.3 audit #10: conflict_policy 전달 — 동일 파일명 재수신 시
             # SHA-256 dedup short-circuit + 4 정책 분기. 사용자 사고 (numbering 누적) 차단.
-            staging_dir = self._staging_dir()
+            staging_dir = self._staging_dir() / transfer_id
             restored_paths, failed_overwrites = self.file_manager.restore_folder(
                 transfer_id, metadata, dest_dir=staging_dir,
                 conflict_policy=self.config.file_conflict_policy,
