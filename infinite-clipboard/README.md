@@ -1,10 +1,10 @@
-# Infinite Clipboard v2
+# Infinite Clipboard
 
 Tailscale VPN으로 연결된 Windows/macOS/Linux PC 간 클립보드(텍스트/이미지)와 파일/폴더를 실시간 공유하는 트레이 상주 앱.
 
 - **프로토콜**: TCP 소켓 + 4바이트 길이 헤더 + JSON/바이너리 프레임
-- **인증**: 128비트 랜덤 공유 키 (`token_urlsafe(16)`) + SHA-256 해시 검증
-- **파일 전송**: 1MB 청크 + xxHash64(청크) + SHA-256(전체) 이중 검증 + 체크포인트 이어받기
+- **인증**: 128비트 랜덤 공유 키 (`token_urlsafe(16)`) + SHA-256 해시 검증 + peer_id 핸드셰이크
+- **파일/이미지 전송 (lazy)**: 복사 시 0바이트 offer만 전파, 받는 PC가 붙여넣기(또는 전송창 "받기" 버튼)로 fetch를 트리거해야 실제 전송 시작 — 1MB 청크 + xxHash64(청크) + SHA-256(전체) 이중 검증 + 체크포인트 이어받기. 텍스트는 그대로 즉시 동기화
 - **UI**: pystray 시스템 트레이 + customtkinter 설정·이력·전송 창
 
 ---
@@ -59,11 +59,11 @@ xattr -dr com.apple.quarantine "/Applications/Infinite Clipboard.app"
 
 ## 사용법
 
-- **클립보드 공유**: 아무 PC에서 Ctrl+C → 연결된 모든 PC에서 Ctrl+V (텍스트·이미지·파일 모두)
-- **파일 전송**: 파일/폴더를 Ctrl+C → 다른 PC에서 Ctrl+V하면 `~/Downloads/` (또는 설정한 경로)로 수신
+- **텍스트 공유**: 아무 PC에서 Ctrl+C → 연결된 모든 PC에 즉시 동기화 (별도 조작 불필요)
+- **파일/이미지 전송 (lazy)**: 파일/폴더/이미지를 복사하면 다른 PC들에 "받을 수 있다"는 알림만 감 — 실제 전송은 그 PC에서 **Ctrl+V 하거나, 트레이 → Transfers 창의 "받기" 버튼을 눌러야** 시작됨(복사만 해도 자동으로 전송되지 않음). 완료되면 `~/Downloads/` (또는 설정한 경로)에 저장
 - **설정 변경**: 트레이 아이콘 우클릭 → Settings
 - **이력 확인**: 트레이 아이콘 우클릭 → Clipboard History
-- **전송 진행률**: 트레이 아이콘 우클릭 → Transfers
+- **전송 진행률/받기**: 트레이 아이콘 우클릭 → Transfers
 - **자동 시작**: 설정창에 "OS 시작 시 자동 실행" 스위치
 
 ### 트레이 아이콘 색상
@@ -143,7 +143,6 @@ xattr -dr com.apple.quarantine "/Applications/Infinite Clipboard.app"
 
 **제약**
 
-- Private repo: GitHub Free 월 2,000분 / Pro 월 3,000분 (3 OS 합산 첫 빌드 ≈ 20분, cache 후 ≈ 8분 → 월 100-200회 가능)
 - **macOS 코드 서명 없음** → DMG 다운로드 시 Gatekeeper 차단. 사용자가 1회 수동 우회 필요:
   ```bash
   # /Applications/Infinite\ Clipboard.app 으로 끌어다 놓은 후
@@ -215,11 +214,11 @@ cd build
 makepkg -f          # PKGBUILD 를 읽어 패키지화
 ```
 
-결과: `build/infinite-clipboard-2.0.0-1-x86_64.pkg.tar.zst`
+결과: `build/infinite-clipboard-X.Y.Z-1-x86_64.pkg.tar.zst`
 
 설치/제거:
 ```bash
-sudo pacman -U infinite-clipboard-2.0.0-1-x86_64.pkg.tar.zst
+sudo pacman -U infinite-clipboard-X.Y.Z-1-x86_64.pkg.tar.zst
 sudo pacman -R infinite-clipboard
 ```
 
@@ -259,7 +258,7 @@ chmod +x build/build_mac.sh
 - `LSUIElement=1` — Dock 아이콘 없이 메뉴바 전용
 - `console=False` — 터미널 창 안 뜸
 - `bundle_identifier=com.dispather.infinite-clipboard`
-- `CFBundleVersion=2.0.0`
+- `CFBundleVersion=X.Y.Z`
 
 바로 실행:
 ```bash
@@ -275,7 +274,7 @@ chmod +x build/make_dmg.sh
 ./build/make_dmg.sh
 ```
 
-결과: `dist/InfiniteClipboard-2.0.0.dmg`
+결과: `dist/InfiniteClipboard-X.Y.Z.dmg`
 
 DMG를 열면 `/Applications` 심볼릭 링크가 함께 있어 드래그 설치 UX 제공.
 
@@ -308,7 +307,7 @@ build\build_win.bat
 iscc build\installer.iss
 ```
 
-결과: `build\Output\InfiniteClipboard-Setup-2.0.0.exe`
+결과: `build\Output\InfiniteClipboard-Setup-X.Y.Z.exe`
 
 인스톨러 기능:
 - Program Files 에 설치 (UAC 거부 시 `%LOCALAPPDATA%` 로 폴백)
