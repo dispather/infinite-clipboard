@@ -17,6 +17,8 @@ import uuid
 
 import pytest
 
+from config import AppConfig
+
 _SKIP = None
 if sys.platform == "linux" and not os.environ.get("DISPLAY"):
     _SKIP = "DISPLAY 없음 (헤드리스) — CI Xvfb/실 세션에서만"
@@ -61,9 +63,13 @@ def _make_receivable(name="photo.png", size=12345, kind="image"):
 
 
 def _make_window(gui_root, state_file):
-    """공유 루트 위에 TransferWindow(Toplevel) 생성 — __init__ 이 _poll_state 1회 호출."""
+    """공유 루트 위에 TransferWindow(Toplevel) 생성 — __init__ 이 _poll_state 1회 호출.
+
+    language="ko" 로 고정 — CI 러너 로케일에 따라 자동감지되면 이 파일의
+    한국어 문자열 assert(재시도/폴더 열기 등)가 로케일에 따라 깨진다.
+    """
     from ui.transfer_window import TransferWindow
-    win = TransferWindow(str(state_file))
+    win = TransferWindow(str(state_file), config=AppConfig(language="ko", auth_key="x" * 32))
     win.update()
     return win
 

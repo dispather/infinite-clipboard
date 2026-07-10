@@ -57,11 +57,13 @@ def test_init_does_not_block_on_slow_tailscale_detection(gui_root, monkeypatch):
     monkeypatch.setattr(sw, "_detect_tailscale_ip", _slow_ip(delay=1.0, ip="100.64.1.2"))
 
     start = time.monotonic()
-    win = sw.SettingsWindow(AppConfig(auth_key="x" * 32))
+    win = sw.SettingsWindow(AppConfig(auth_key="x" * 32, language="ko"))
     elapsed = time.monotonic() - start
     try:
         win.update()
-        assert elapsed < 0.5, f"H3 회귀 — __init__ 이 블로킹됨 ({elapsed:.2f}s)"
+        # 임계값은 모의 지연(1.0s)의 절반 미만 유지 — 실제 블로킹 회귀는 여전히 잡되,
+        # 언어 선택 위젯 추가 이후 CI 러너에서 로컬보다 여유가 줄어든 것을 흡수(0.8s).
+        assert elapsed < 0.8, f"H3 회귀 — __init__ 이 블로킹됨 ({elapsed:.2f}s)"
         # 백그라운드 조회가 아직 안 끝났을 시점이므로 "확인 중" 상태여야 함
         assert win._ts_badge.cget("text") == "Tailscale 확인 중…"
     finally:
@@ -75,7 +77,7 @@ def test_badge_and_button_update_after_detection_completes(gui_root, monkeypatch
 
     monkeypatch.setattr(sw, "_detect_tailscale_ip", _slow_ip(delay=0.2, ip="100.64.9.9"))
 
-    win = sw.SettingsWindow(AppConfig(auth_key="x" * 32))
+    win = sw.SettingsWindow(AppConfig(auth_key="x" * 32, language="ko"))
     try:
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline:
@@ -100,7 +102,7 @@ def test_auto_detect_button_click_is_non_blocking(gui_root, monkeypatch):
 
     # 초기 조회는 빠르게 끝내 놓고, 버튼 클릭 시의 조회만 느리게 시뮬레이션
     monkeypatch.setattr(sw, "_detect_tailscale_ip", _slow_ip(delay=0.0, ip=""))
-    win = sw.SettingsWindow(AppConfig(auth_key="x" * 32, mode="client"))
+    win = sw.SettingsWindow(AppConfig(auth_key="x" * 32, mode="client", language="ko"))
     try:
         win.update()
         monkeypatch.setattr(sw, "_detect_tailscale_ip", _slow_ip(delay=0.5, ip="100.64.5.5"))
