@@ -95,7 +95,7 @@
 ./build/generate_icons.sh
 ```
 
-결과물은 `assets/generated/`에 생성되며, **git에 포함**되므로 Windows 등 다른 PC에서 별도 변환 없이 바로 사용 가능하다. Windows에서는 이 스크립트를 돌릴 필요가 없다(이미 생성된 파일 그대로 씀).
+결과물은 `assets/generated/`에 생성되며 **git에 포함**되므로 Windows 등 다른 PC에서 별도 변환 없이 바로 사용 가능하다. Windows에서는 이 스크립트를 돌릴 필요가 없다(이미 생성된 파일 그대로 씀).
 
 변환 도구가 없을 때 자동 안내:
 ```
@@ -307,7 +307,7 @@ build/InfiniteClipboard/
 build/Output/
 ```
 
-`assets/generated/` 는 **동기화 포함** 권장 — 각 PC가 rsvg-convert 없이 바로 빌드 가능.
+`assets/generated/` 는 **동기화 포함** 권장. 각 PC가 rsvg-convert 없이 바로 빌드 가능.
 
 ---
 
