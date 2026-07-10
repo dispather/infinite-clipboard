@@ -39,6 +39,10 @@ settings.json
 .claude/
 .next-tasks.json
 .next-tasks.archive.jsonl
+# 개발 방법론/함정 노트 — 로컬 전용 자산, public repo엔 미공개(2026-07-10)
+/CLAUDE.md
+/infinite-clipboard/CLAUDE.md
+/phase-gates.md
 
 # Serena agent local state
 .serena/
