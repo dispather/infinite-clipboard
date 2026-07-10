@@ -19,6 +19,10 @@
 - 🔒 **설계부터 프라이빗** — 내 Tailscale(WireGuard) 네트워크로만 흐르며 공유 키로 접근을 제한한다. 중간에 어떤 클라우드 서비스도 끼지 않는다
 - 🖥️ **트레이에 상주** — 각 PC 에 한 번만 설정해두면 실행 중인 걸 잊고 지내도 된다
 
+<p align="center">
+  <img src="assets/screenshots/ko/transfers.png" alt="한 번의 클릭으로 파일 받기" width="480">
+</p>
+
 ---
 
 ## 설치
@@ -77,6 +81,12 @@ xattr -dr com.apple.quarantine "/Applications/Infinite Clipboard.app"
 - **이력 확인**: 트레이 아이콘 우클릭 → Clipboard History
 - **전송 진행률/받기**: 트레이 아이콘 우클릭 → Transfers
 - **자동 시작**: 설정창에 "OS 시작 시 자동 실행" 스위치
+
+<p align="center">
+  <img src="assets/screenshots/ko/settings.png" alt="설정창" width="300">
+  &nbsp;&nbsp;
+  <img src="assets/screenshots/ko/history.png" alt="클립보드 이력 창" width="380">
+</p>
 
 ### 트레이 아이콘 색상
 

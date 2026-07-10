@@ -19,6 +19,10 @@ Stop AirDropping to yourself, emailing files to your own inbox, or pasting into 
 - 🔒 **Private by design** — travels over your own Tailscale (WireGuard) network, gated by a shared key — no cloud service sits in the middle
 - 🖥️ **Lives in your tray** — set it up once on each PC, forget it's running
 
+<p align="center">
+  <img src="assets/screenshots/transfers.png" alt="Receive a file with one click" width="480">
+</p>
+
 ---
 
 ## Install
@@ -77,6 +81,12 @@ Settings file locations:
 - **History**: right-click the tray icon → Clipboard History
 - **Transfer progress / receiving**: right-click the tray icon → Transfers
 - **Autostart**: toggle "Start automatically" in the settings window
+
+<p align="center">
+  <img src="assets/screenshots/settings.png" alt="Settings window" width="300">
+  &nbsp;&nbsp;
+  <img src="assets/screenshots/history.png" alt="Clipboard history window" width="380">
+</p>
 
 ### Tray icon colors
 
