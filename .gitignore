@@ -39,6 +39,9 @@ settings.json
 .claude/
 .next-tasks.json
 .next-tasks.archive.jsonl
+# npx skills add 로 설치되는 에이전트 도구 스킬 — 로컬 개발 보조 도구, 제품 코드 아님
+.agents/
+skills-lock.json
 # 채팅에 붙여넣은 이미지 임시 업로드 폴더 — 개인 스크린샷(계정 정보 등) 포함 가능,
 # 실수로 커밋되는 걸 막기 위해 반드시 ignore (2026-07-10 git add -A 로 스테이징될 뻔함)
 .uploads/
