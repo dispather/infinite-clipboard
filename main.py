@@ -13,6 +13,7 @@ import threading
 import platform
 import base64
 import tempfile
+import uuid
 import json  # v3.0 S4: 모듈 레벨 (watch 폴링 스레드들이 사용 — 함수별 로컬 import 통일)
 from pathlib import Path
 
@@ -717,6 +718,12 @@ class InfiniteClipboard:
             "content": content if content_type == "text" else f"[{content_type}]",
             "preview": self._make_preview(content_type, content),
             "timestamp": time.time(),
+            # 코드 리뷰(2026-07-12, 커밋 49758a0 후속): timestamp 만으로 삭제
+            # 대상을 특정하면 두 항목이 같은 time.time() 값을 가질 때(Windows
+            # 타이머 해상도 등) 삭제가 동일 timestamp 의 다른 항목까지 함께
+            # 지워버린다. 안정적 unique id 를 별도로 부여해 삭제는 반드시
+            # id 로만 매칭한다(_watch_history_delete_requests 참조).
+            "id": uuid.uuid4().hex,
         }
         # H2: 로컬 모니터 스레드(_monitor_clipboard)와 네트워크 수신 스레드가
         # 동시에 호출할 수 있어 mutate+trim+저장을 한 크리티컬 섹션으로 묶는다.
@@ -1665,9 +1672,14 @@ class InfiniteClipboard:
     def _watch_history_delete_requests(self):
         """별도 프로세스 HistoryWindow 삭제 버튼 폴링 → clipboard_history 에서 제거.
 
-        entry 에 안정적 id 가 없어 timestamp(float, time.time()) 를 사실상 유니크
-        키로 재사용한다(충돌 가능성은 무시 가능 수준). fetch 같은 블로킹 작업이
-        없으므로 receive 와 달리 per-request 스레드 없이 동기 처리로 충분하다.
+        코드 리뷰(2026-07-12, 커밋 49758a0 후속): 각 항목은 이제 안정적 unique id
+        (uuid4 hex 문자열, `_add_to_history` 참조)를 가진다. 요청 목록엔 id(str)가
+        오는 게 정상이지만, id 부여 이전에 이미 저장된 레거시 항목은 id 가 없어
+        UI 가 대신 timestamp(float) 를 보낸다(`_on_delete_click` 참조) — 그 경우만
+        예외적으로 timestamp 매칭으로 폴백한다. id 가 있는 항목은 반드시 id 로만
+        매칭해, 두 항목이 같은 time.time() 값을 가져도(Windows 타이머 해상도 등)
+        서로 다른 항목이 함께 삭제되는 일이 없다. fetch 같은 블로킹 작업이 없으
+        므로 receive 와 달리 per-request 스레드 없이 동기 처리로 충분하다.
         """
         req_file = self._get_history_delete_request_file()
         while self.running:
@@ -1676,12 +1688,19 @@ class InfiniteClipboard:
                     with open(req_file, "r", encoding="utf-8") as f:
                         requests = json.load(f)
                     if isinstance(requests, list) and requests:
-                        targets = set(requests)
+                        target_ids = {r for r in requests if isinstance(r, str)}
+                        target_timestamps = {
+                            r for r in requests if isinstance(r, (int, float))
+                        }
                         with self._history_lock:
                             before = len(self.clipboard_history)
                             self.clipboard_history = [
                                 e for e in self.clipboard_history
-                                if e.get("timestamp") not in targets
+                                if not (
+                                    e.get("id") in target_ids
+                                    if e.get("id") is not None
+                                    else e.get("timestamp") in target_timestamps
+                                )
                             ]
                             removed = before - len(self.clipboard_history)
                             if removed:

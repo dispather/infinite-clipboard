@@ -186,12 +186,16 @@ class HistoryWindow(customtkinter.CTkToplevel):
         from config import _get_config_dir
         return str(_get_config_dir() / "history_delete_requests.json")
 
-    def _append_delete_requests(self, timestamps: list) -> None:
-        """history_delete_requests.json 에 timestamp 목록 append.
+    def _append_delete_requests(self, keys: list) -> None:
+        """history_delete_requests.json 에 삭제 키 목록 append.
 
-        main.py 의 _watch_history_delete_requests 스레드가 0.5초 안에 처리해
-        self.clipboard_history/clipboard_history.json 에 반영한다. cancel_
-        requests.json 과 동일한 read-append-write 패턴(ui/transfer_window.py
+        코드 리뷰(2026-07-12, 커밋 49758a0 후속): 각 키는 entry 의 안정적 id
+        (uuid4 hex 문자열, `_delete_key_for` 참조) 또는 — id 부여 이전 레거시
+        항목 한정 — timestamp(float) 다. main.py 의 _watch_history_delete_requests
+        가 id 는 id 로만, timestamp 는 id 없는 레거시 항목에만 매칭해 같은
+        timestamp 를 가진 서로 다른 항목이 함께 삭제되지 않는다. 0.5초 안에
+        처리되어 self.clipboard_history/clipboard_history.json 에 반영된다.
+        cancel_requests.json 과 동일한 read-append-write 패턴(ui/transfer_window.py
         _on_cancel_click 참조).
         """
         req_file = self._get_history_delete_request_file()
@@ -204,25 +208,30 @@ class HistoryWindow(customtkinter.CTkToplevel):
                     requests = loaded
             except (FileNotFoundError, json.JSONDecodeError):
                 pass
-            for ts in timestamps:
-                if ts not in requests:
-                    requests.append(ts)
+            for key in keys:
+                if key not in requests:
+                    requests.append(key)
             with open(req_file, "w", encoding="utf-8") as f:
                 json.dump(requests, f)
         except OSError:
             pass
 
+    @staticmethod
+    def _delete_key_for(entry: dict):
+        """항목의 삭제 매칭 키 — id 가 있으면 id, 없으면(레거시) timestamp."""
+        return entry.get("id") if entry.get("id") is not None else entry.get("timestamp")
+
     def _on_delete_click(self, entry: dict) -> None:
         """개별 삭제 — 로컬 목록/UI 즉시 갱신 + 메인 프로세스에 IPC 로 위임."""
-        ts = entry.get("timestamp")
+        key = self._delete_key_for(entry)
         try:
             self.history_list.remove(entry)
         except ValueError:
             pass
         self._count_badge.configure(text=str(len(self.history_list)))
         self._render()
-        if ts is not None:
-            self._append_delete_requests([ts])
+        if key is not None:
+            self._append_delete_requests([key])
 
     def _on_clear_all_click(self) -> None:
         """전체 지우기 — 되돌릴 수 없는 작업이라 확인 다이얼로그를 거친다."""
@@ -233,12 +242,12 @@ class HistoryWindow(customtkinter.CTkToplevel):
             tr("클립보드 히스토리를 모두 지울까요? 되돌릴 수 없습니다.", self._lang),
         ):
             return
-        timestamps = [e.get("timestamp") for e in self.history_list if e.get("timestamp") is not None]
+        keys = [self._delete_key_for(e) for e in self.history_list if self._delete_key_for(e) is not None]
         self.history_list.clear()
         self._count_badge.configure(text="0")
         self._render()
-        if timestamps:
-            self._append_delete_requests(timestamps)
+        if keys:
+            self._append_delete_requests(keys)
 
     def _create_item(self, entry: dict) -> customtkinter.CTkFrame:
         content_type = entry.get("type", "text")

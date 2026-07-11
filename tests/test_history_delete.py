@@ -85,6 +85,64 @@ def test_delete_request_for_unknown_timestamp_is_noop(tmp_path, monkeypatch):
     assert app.clipboard_history[0]["timestamp"] == 111.0
 
 
+def test_delete_by_id_ignores_sibling_with_same_timestamp(tmp_path, monkeypatch):
+    """코드 리뷰(2026-07-12, 커밋 49758a0 후속) 회귀: 두 항목이 우연히 같은
+    time.time() 값을 가져도(Windows 타이머 해상도 등), id 로 지정한 항목만
+    삭제되고 timestamp 가 같은 다른 항목은 남아야 한다."""
+    app, history_file, delete_file = _make_app(tmp_path, monkeypatch)
+    app.clipboard_history = [
+        {"type": "text", "content": "a", "preview": "a", "timestamp": 111.0, "id": "id-a"},
+        {"type": "text", "content": "b", "preview": "b", "timestamp": 111.0, "id": "id-b"},
+        {"type": "text", "content": "c", "preview": "c", "timestamp": 333.0, "id": "id-c"},
+    ]
+
+    with open(delete_file, "w", encoding="utf-8") as f:
+        json.dump(["id-a"], f)
+
+    app.running = True
+    th = threading.Thread(target=app._watch_history_delete_requests, daemon=True)
+    th.start()
+    try:
+        deadline = time.time() + 3.0
+        while time.time() < deadline and len(app.clipboard_history) == 3:
+            time.sleep(0.05)
+    finally:
+        app.running = False
+        th.join(timeout=2.0)
+
+    remaining_ids = [e["id"] for e in app.clipboard_history]
+    assert remaining_ids == ["id-b", "id-c"], (
+        f"id-a 만 삭제되고 timestamp 가 같은 id-b 는 남아야 함, 실제: {remaining_ids}"
+    )
+
+
+def test_delete_request_matches_legacy_entry_without_id_by_timestamp(tmp_path, monkeypatch):
+    """id 부여 이전 레거시 항목(entry 에 id 없음)은 여전히 timestamp 로 매칭돼야
+    하고, id 가 있는 다른 항목에는 영향을 주지 않아야 한다."""
+    app, history_file, delete_file = _make_app(tmp_path, monkeypatch)
+    app.clipboard_history = [
+        {"type": "text", "content": "legacy", "preview": "legacy", "timestamp": 111.0},
+        {"type": "text", "content": "new", "preview": "new", "timestamp": 111.0, "id": "id-new"},
+    ]
+
+    with open(delete_file, "w", encoding="utf-8") as f:
+        json.dump([111.0], f)
+
+    app.running = True
+    th = threading.Thread(target=app._watch_history_delete_requests, daemon=True)
+    th.start()
+    try:
+        deadline = time.time() + 3.0
+        while time.time() < deadline and len(app.clipboard_history) == 2:
+            time.sleep(0.05)
+    finally:
+        app.running = False
+        th.join(timeout=2.0)
+
+    assert len(app.clipboard_history) == 1
+    assert app.clipboard_history[0]["id"] == "id-new"
+
+
 def test_clear_all_requests_removes_every_entry(tmp_path, monkeypatch):
     """전체 지우기 — HistoryWindow 가 모든 timestamp 를 한 번에 append."""
     app, history_file, delete_file = _make_app(tmp_path, monkeypatch)
