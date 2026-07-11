@@ -382,9 +382,18 @@ def test_lazy_owns_clipboard_guard(tmp_path):
 
 def test_provider_fetch_grace_gate(tmp_path, monkeypatch):
     """v3.0.3 타이밍 가드: 등록 직후 grace 안의 read 는 _GracePeek(전송 안 함),
-    grace 후/끔(0) 은 정상 fetch. OS 셸의 즉시 peek 으로 인한 복사 즉시 전송 차단."""
+    grace 후/끔(0) 은 정상 fetch. OS 셸의 즉시 peek 으로 인한 복사 즉시 전송 차단.
+
+    2026-07-12 mac-studio 실기 발견: 이 테스트는 platform.system() 을 patch 안 해서
+    CI(Linux Xvfb) 에선 우연히 통과하지만 **실제 macOS 에서 돌리면 항상 FAIL**한다 —
+    `_provider_fetch` 의 macOS 분기(함정 #38)가 `fetch_grace_seconds` 값과 무관하게
+    grace 를 0 으로 강제해서 ① 단계가 `_GracePeek` 을 던지지 않는다. 이 테스트는
+    범용 grace 메커니즘 검증이 목적이라(macOS 예외는 `test_provider_fetch_grace_
+    bypassed_on_macos` 가 별도로 커버) 비-macOS 로 고정한다."""
+    import platform as platform_module
     from main import _GracePeek
 
+    monkeypatch.setattr(platform_module, "system", lambda: "Linux")
     app = _make_app("server", _free_port(), tmp_path / "dl")
     app.config.fetch_grace_seconds = 2.0
     oid = "grace-test-offer"
