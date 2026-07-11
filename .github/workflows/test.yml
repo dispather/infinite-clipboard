@@ -172,3 +172,39 @@ jobs:
         run: |
           source .venv-ci/bin/activate
           python -m pytest tests/test_lazy_mac.py tests/test_notify_mac.py -v
+
+  macos-selfhosted-app-verify:
+    name: macOS 서명된 .app 알림 권한 검증 (mac-studio 실기기)
+    # macos-selfhosted 잡은 core/notify_mac.py 를 무서명 venv python 으로 테스트하므로
+    # is_supported()=False(미승인)로 항상 skip 된다 — UNUserNotificationCenter 는
+    # "실제로 서명된 .app 번들 안에서 실행되는 프로세스"의 신원으로 권한을 판단하기
+    # 때문. 이 잡은 build/build_mac.sh 로 진짜 배포용 .app 을 빌드+애드혹 서명한 뒤,
+    # 그 안의 실행 파일을 직접 --check-notify-mac 로 돌려 마지막 한 조각(실제 권한
+    # 승인 + 알림 표시)까지 확인한다. 최초 실행 시 macOS 가 mac-studio 화면에 알림
+    # 권한 대화상자를 띄울 수 있고, 그건 사람이 [허용]을 한 번 눌러줘야 한다 —
+    # 그래서 미승인(exit 1)이어도 잡 자체를 실패시키지 않고 결과만 남긴다(2026-07-11).
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, macos-studio]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - name: build_mac.sh 로 서명된 .app 빌드
+        # pyenv + tcl-tk@8 자동 부트스트랩(최초 1회는 컴파일 때문에 느릴 수 있음)
+        # + 애드혹 codesign(2026-07-10 추가분, UNUserNotificationCenter 권한 요건).
+        run: bash build/build_mac.sh
+      - name: 프로즌 .app 안에서 알림 권한 실측 (--check-notify-mac)
+        run: |
+          APP="$HOME/Library/Caches/InfiniteClipboard-Build/dist/Infinite Clipboard.app"
+          "$APP/Contents/MacOS/Infinite Clipboard" --check-notify-mac | tee notify_check.log || true
+          {
+            echo "## macOS 알림 권한 검증 결과"
+            echo '```'
+            cat notify_check.log
+            echo '```'
+            if grep -q "NOTIFY_MAC_CHECK: ok" notify_check.log; then
+              echo "✅ 승인됨 — 서명된 .app 에서 실제 알림이 표시됐어야 합니다."
+            else
+              echo "⚠️ 미승인/실패 — mac-studio 화면에 알림 권한 대화상자가 떴다면"
+              echo "[허용]을 눌러주세요. 이후 이 잡을 재실행하면 ok 로 바뀝니다."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -2372,6 +2372,47 @@ def _load_clipboard_history_file(history_file) -> tuple:
         return [], True
 
 
+def _check_notify_mac() -> None:
+    """진단 전용 (2026-07-11) — macOS 알림 액션 버튼 백엔드가 **이 프로세스의
+    실제 번들 신원**에서 알림 권한을 받는지 확인한다.
+
+    `UNUserNotificationCenter`(core/notify_mac.py)는 요청하는 프로세스의
+    실행 경로/서명/Info.plist 로 신원을 판단하므로, 이 체크는 반드시
+    PyInstaller 로 빌드+서명된 `.app` 안의 실제 실행 파일로 돌려야 의미가
+    있다 — `python main.py --check-notify-mac` 처럼 개발 venv 로 돌리면
+    무서명 python3 프로세스 신원이라 늘 미승인으로 나온다(기대된 동작,
+    core/notify_mac.py 모듈 docstring 참조).
+
+    표준출력에 `NOTIFY_MAC_CHECK: <unsupported|ok|failed>` 한 줄을 남기고
+    그에 맞는 종료 코드(0=ok, 1=unsupported/failed)로 끝난다 — CI 로그에서
+    grep 하기 쉽게.
+
+    macOS 가 아니면 `get_actionable_notifier()`가 그 플랫폼의(엉뚱한) 백엔드를
+    반환할 수 있으므로 — 예를 들어 Linux 에서 이 플래그를 잘못 실행하면
+    실제 D-Bus 알림이 나갈 수 있다 — 플랫폼을 먼저 확인해 조용히 막는다.
+    """
+    if platform.system() != "Darwin":
+        print("NOTIFY_MAC_CHECK: unsupported (not macOS)")
+        sys.exit(1)
+
+    from core.actionable_notify import get_actionable_notifier
+
+    notifier = get_actionable_notifier()
+    if notifier is None or not notifier.is_supported():
+        print("NOTIFY_MAC_CHECK: unsupported")
+        sys.exit(1)
+    ok = notifier.notify_receivable(
+        "diag-check", "Infinite Clipboard 진단",
+        "알림 권한/실제 표시 확인용 테스트 — 무시해도 됩니다",
+        "받기", "무시", lambda: None,
+    )
+    # 알림이 실제로 화면에 그려질 시간을 잠깐 준다 (표시 자체는 비동기).
+    time.sleep(2)
+    notifier.stop()
+    print(f"NOTIFY_MAC_CHECK: {'ok' if ok else 'failed'}")
+    sys.exit(0 if ok else 1)
+
+
 def _run_window_only(window_type: str) -> None:
     """트레이 메뉴가 자기 자신을 `--window <type>` 으로 재호출했을 때의 경로.
 
@@ -2458,10 +2499,17 @@ def main():
     # 내부용: 트레이가 자기 자신을 재호출해 UI 창만 띄울 때 사용
     parser.add_argument("--window", choices=["settings", "history", "transfers", "about"],
                         help=argparse.SUPPRESS)
+    # 진단 전용 (2026-07-11): 빌드+서명된 .app 안에서 macOS 알림 권한이 실제로
+    # 승인되는지 확인 — 반드시 프로즌 실행 파일로 돌려야 의미 있음(_check_notify_mac 참조)
+    parser.add_argument("--check-notify-mac", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     # 로깅 초기화
     _setup_logging(debug=args.debug)
+
+    if args.check_notify_mac:
+        _check_notify_mac()
+        return
 
     # UI 창 전용 서브 모드 — 서버/클라이언트 초기화 없이 조기 반환
     if args.window:
