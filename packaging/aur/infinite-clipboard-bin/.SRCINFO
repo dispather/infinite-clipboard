@@ -1,0 +1,20 @@
+pkgbase = infinite-clipboard-bin
+	pkgdesc = Real-time clipboard and file sharing tray app between PCs over your own Tailscale network
+	pkgver = 3.0.8
+	pkgrel = 1
+	url = https://github.com/dispather/infinite-clipboard
+	arch = x86_64
+	license = MIT
+	depends = libayatana-appindicator
+	depends = python-gobject
+	depends = wl-clipboard
+	depends = xclip
+	optdepends = tailscale: connect to other PCs over your LAN VPN
+	provides = infinite-clipboard
+	conflicts = infinite-clipboard
+	options = !strip
+	options = !debug
+	source = https://github.com/dispather/infinite-clipboard/releases/download/v3.0.8/infinite-clipboard-3.0.8-1-x86_64.pkg.tar.zst
+	sha256sums = f3a4107e24ec25a69413f08efb9a9aa03e7f72e63f94e0eb0e6e9f64a0a3f44a
+
+pkgname = infinite-clipboard-bin

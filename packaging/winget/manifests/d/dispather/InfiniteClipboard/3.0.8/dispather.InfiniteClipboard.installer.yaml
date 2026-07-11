@@ -1,0 +1,26 @@
+# DRAFT — see packaging/README.md before submitting to microsoft/winget-pkgs.
+# InstallerSha256 is computed from the actual v3.0.8 release asset.
+# ProductCode assumes Inno Setup's standard "{AppId}_is1" registry key
+# convention (installer.iss AppId = {C5DF1725-56AE-40B7-8044-155627E7B3BB},
+# fixed — see CLAUDE.md, never changes across releases) — UNVERIFIED, confirm
+# on a real Windows install (check HKCU\...\Uninstall key name) before submit.
+PackageIdentifier: dispather.InfiniteClipboard
+PackageVersion: 3.0.8
+InstallerType: inno
+Scope: user
+InstallModes:
+  - interactive
+  - silent
+  - silentWithProgress
+InstallerSwitches:
+  Silent: /VERYSILENT /NORESTART /SUPPRESSMSGBOXES
+  SilentWithProgress: /VERYSILENT /NORESTART
+UpgradeBehavior: install
+ProductCode: '{C5DF1725-56AE-40B7-8044-155627E7B3BB}_is1'
+Installers:
+  - Architecture: x64
+    InstallerType: inno
+    InstallerUrl: https://github.com/dispather/infinite-clipboard/releases/download/v3.0.8/infinite-clipboard-setup-3.0.8.exe
+    InstallerSha256: F1679B5E52D1693DFA8192EFAAFFD1370E054D0885CDEC7F9A11099094EB3FF7
+ManifestType: installer
+ManifestVersion: 1.6.0

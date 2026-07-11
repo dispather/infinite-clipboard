@@ -1,0 +1,26 @@
+# DRAFT — see packaging/README.md before submitting to microsoft/winget-pkgs.
+PackageIdentifier: dispather.InfiniteClipboard
+PackageVersion: 3.0.8
+PackageLocale: en-US
+Publisher: dispather
+PublisherUrl: https://github.com/dispather
+PublisherSupportUrl: https://github.com/dispather/infinite-clipboard/issues
+PackageName: Infinite Clipboard
+PackageUrl: https://github.com/dispather/infinite-clipboard
+License: MIT
+LicenseUrl: https://github.com/dispather/infinite-clipboard/blob/main/LICENSE
+ShortDescription: One clipboard, every PC — real-time text sync and on-demand file transfer over your own Tailscale network.
+Description: >-
+  Infinite Clipboard keeps every PC you own — Windows, macOS, Linux — in sync
+  automatically, over your own Tailscale network. Instant text clipboard sync
+  plus on-demand file and folder transfer (only what you actually paste
+  elsewhere gets sent). Runs as a system tray app.
+Tags:
+  - clipboard
+  - clipboard-manager
+  - file-sharing
+  - tailscale
+  - system-tray
+  - cross-platform
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

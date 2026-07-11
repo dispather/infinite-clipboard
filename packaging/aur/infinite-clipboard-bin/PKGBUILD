@@ -1,0 +1,25 @@
+# Maintainer: dispather <dispather@users.noreply.github.com>
+pkgname=infinite-clipboard-bin
+pkgver=3.0.8
+pkgrel=1
+pkgdesc="Real-time clipboard and file sharing tray app between PCs over your own Tailscale network"
+arch=('x86_64')
+url="https://github.com/dispather/infinite-clipboard"
+license=('MIT')
+provides=('infinite-clipboard')
+conflicts=('infinite-clipboard')
+depends=(
+    'libayatana-appindicator'
+    'python-gobject'
+    'wl-clipboard'
+    'xclip'
+)
+optdepends=('tailscale: connect to other PCs over your LAN VPN')
+source=("https://github.com/dispather/infinite-clipboard/releases/download/v${pkgver}/infinite-clipboard-${pkgver}-1-x86_64.pkg.tar.zst")
+sha256sums=('f3a4107e24ec25a69413f08efb9a9aa03e7f72e63f94e0eb0e6e9f64a0a3f44a')
+options=(!strip !debug)
+
+package() {
+    cp -r "$srcdir/opt" "$pkgdir/"
+    cp -r "$srcdir/usr" "$pkgdir/"
+}

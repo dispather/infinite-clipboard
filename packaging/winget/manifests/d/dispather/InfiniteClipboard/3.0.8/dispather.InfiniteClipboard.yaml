@@ -1,0 +1,8 @@
+# DRAFT — see packaging/README.md before submitting to microsoft/winget-pkgs.
+# Created with schema version 1.6.0 conventions (verify against current schema
+# with `wingetcreate` or the winget-pkgs repo's latest manifest examples).
+PackageIdentifier: dispather.InfiniteClipboard
+PackageVersion: 3.0.8
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.6.0
