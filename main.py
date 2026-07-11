@@ -1302,8 +1302,19 @@ class InfiniteClipboard:
         provider 의 1회 캐시는 GracePeek 시 채워지지 않으므로(예외=미캐시) 이후 진짜 paste 가
         다시 콜백을 호출한다. grace=0 이면 가드 끔(eager). (받기 버튼은 _fetch_offer 직접
         호출이라 grace 무관 — 명시적 수신은 즉시.)
+
+        **macOS 는 이 가드에서 항상 제외된다(함정 #38, 2026-07-11 mac-studio 실기 확정)**:
+        `NSPasteboardItem` 의 data provider 콜백은 pasteboard 세대(generation)당 정확히
+        1회만 온다 — grace 가 그 유일한 호출을 거부하면 offer 가 영구적으로 죽고(재시도
+        콜백이 다시 안 옴), Windows/Linux 전제인 "자동 peek 과 진짜 paste 는 별개 이벤트"가
+        macOS 엔 성립하지 않는다(grace=2.0 3/3 실패 → grace=0 5/5 성공, 다양한 크기/발신
+        OS 로 실측, 스퓨리어스 재전송 부작용 없음). Windows(함정 #27)/Linux(함정 #28) 쪽
+        grace 로직은 그대로 유지 — 거긴 자동 peek 이 진짜 별개 이벤트라 grace 가 여전히
+        유효하다.
         """
         grace = float(getattr(self.config, "fetch_grace_seconds", 0) or 0)
+        if platform.system() == "Darwin":
+            grace = 0
         if grace > 0:
             with self._offer_lock:
                 offer = self.received_offers.get(offer_id)

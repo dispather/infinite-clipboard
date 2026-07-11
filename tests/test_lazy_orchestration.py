@@ -415,6 +415,34 @@ def test_provider_fetch_grace_gate(tmp_path, monkeypatch):
     assert called["fetch"] == 2, "grace=0 이면 즉시 전송돼야 함"
 
 
+def test_provider_fetch_grace_bypassed_on_macos(tmp_path, monkeypatch):
+    """함정 #38 (2026-07-11, mac-studio 실기 확정): NSPasteboardItem 의 data provider
+    콜백은 pasteboard 세대당 정확히 1회만 온다 — grace 가 그 유일한 호출을 거부하면
+    offer 가 영구적으로 죽는다(Windows/Linux 전제인 "peek≠paste"가 macOS 엔 불성립).
+    macOS 에서는 config.fetch_grace_seconds 값과 무관하게 등록 직후라도 즉시 fetch."""
+    import platform as platform_module
+    from main import _GracePeek
+
+    monkeypatch.setattr(platform_module, "system", lambda: "Darwin")
+
+    app = _make_app("server", _free_port(), tmp_path / "dl")
+    app.config.fetch_grace_seconds = 2.0  # macOS 아니었으면 GracePeek 을 던졌을 값
+    oid = "grace-macos-test-offer"
+    with app._offer_lock:
+        app.received_offers = {oid: {
+            "offer_id": oid, "kind": "file", "source_peer": "a" * 32,
+            "_registered_at": time.time(),  # 방금 등록 (grace 안 — 다른 OS 라면 GracePeek)
+        }}
+    called = {"fetch": 0}
+    monkeypatch.setattr(app, "_fetch_offer", lambda o: called.__setitem__("fetch", called["fetch"] + 1))
+
+    try:
+        app._provider_fetch(oid)
+    except _GracePeek:
+        pytest.fail("macOS 는 grace 를 타면 안 됨 — offer 가 영구적으로 죽는 함정 #38 재현")
+    assert called["fetch"] == 1, "macOS 는 등록 직후라도 즉시 fetch 해야 함"
+
+
 def test_spoofed_requester_peer_is_dropped(tmp_path, caplog):
     """감사 Critical #1: MSG_CLIP_FETCH 의 requester_peer 자기신고가 실제 소켓
     identity 와 다르면 서버가 drop 해야 한다. 과거엔 검증 없이 라우팅되어, 인증된

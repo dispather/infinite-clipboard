@@ -81,9 +81,6 @@ class _Provider(*_BASES, **_KW):
         return self
 
     def pasteboard_item_provideDataForType_(self, pasteboard, item, type_):
-        # TEMP DIAG (함정 #38, 2026-07-11): OS가 실제로 콜백을 발화했는지 확인.
-        # Tk mainloop 구동 시 이 줄조차 안 찍히면 run loop 미통합이 확정된다.
-        logger.info(f"[DIAG-38] pasteboard_item_provideDataForType_ 진입: type={type_} key={self._key}")
         self._backend._provide(item, type_, self._key)
 
 
@@ -209,11 +206,6 @@ class MacLazyProvider(LazyClipboardProvider):
 
     def _provide(self, item, type_, key) -> None:
         """provideDataForType 콜백 본체 (메인 스레드). fetch→직렬화→setData."""
-        # TEMP DIAG (함정 #38, 2026-07-11): 실제 메인 스레드에서 발화했는지까지 확인.
-        # CI 테스트는 NSRunLoop 를 직접 펌핑하지만 실앱은 Tk mainloop 가 대신한다는
-        # 가정이 검증된 적 없음 — 이 줄이 main_thread=False 로 찍히거나 아예 안 찍히면
-        # Tk 가 Cocoa run loop 를 제대로 서비스하지 못한다는 확정 증거가 된다.
-        logger.info(f"[DIAG-38] _provide 진입: main_thread={NSThread.isMainThread()} kind={self._offer.get('kind') if self._offer else None}")
         with self._lock:
             offer = self._offer
             cb = self._fetch_cb
@@ -250,8 +242,5 @@ class MacLazyProvider(LazyClipboardProvider):
         try:
             ns = NSData.dataWithBytes_length_(data, len(data))
             item.setData_forType_(ns, type_)
-            # TEMP DIAG (함정 #38): 여기까지 도달하면 OS 에 데이터를 실제로 넘긴 것 —
-            # 이 로그가 없이 붙여넣기가 실패한다면 위 두 DIAG 로그 중 어디서 끊겼는지가 원인.
-            logger.info(f"[DIAG-38] setData_forType_ 완료: type={type_} bytes={len(data)}")
         except Exception as e:  # noqa: BLE001
             logger.warning(f"macOS lazy setData 실패: {e}")
