@@ -443,6 +443,52 @@ def test_provider_fetch_grace_bypassed_on_macos(tmp_path, monkeypatch):
     assert called["fetch"] == 1, "macOS 는 등록 직후라도 즉시 fetch 해야 함"
 
 
+def test_offer_macos_large_file_forces_receive_mode(tmp_path, monkeypatch):
+    """2026-07-12 함정 #40 (mac-studio eager-fetch-tradeoff + NotebookLM 리서치,
+    design 판단 A안): macOS 는 provideDataForType: 콜백에 호출자 정보가 없어
+    '진짜 paste' 와 'Finder 자동 peek' 을 구분할 공개 API가 없다(NSFilePromiseProvider
+    도 드래그앤드롭 전용이라 적용 불가). grace=0(함정 #38)이라 macOS 는 사실상 매
+    offer 를 peek 이든 진짜 paste 든 즉시 fetch 하므로, _NOTIFY_SIZE_THRESHOLD(10MB)
+    이상은 lazy 등록 자체를 생략하고 명시 '받기' 모드로 강제 폴백해 대역폭 낭비와
+    (사용자가 paste 하지도 않았는데 뜨는) 전송창 노출을 막는다."""
+    import platform as platform_module
+
+    monkeypatch.setattr(platform_module, "system", lambda: "Darwin")
+
+    app = _make_app("client", _free_port(), tmp_path / "dl", lazy_paste=True)
+    stub = _StubProvider()
+    app.lazy_provider = stub
+    app._lazy_provider_inited = True
+
+    big_offer = {
+        "offer_id": str(uuid.uuid4()),
+        "source_peer": generate_peer_id(),
+        "kind": "file",
+        "items": [{"name": "big.bin", "size": 11_000_000, "hash": ""}],
+        "total_size": 11_000_000,  # >= _NOTIFY_SIZE_THRESHOLD(10MB)
+        "created_at": time.time(),
+    }
+    app._handle_clip_offer(big_offer)
+
+    assert stub.captured is None, \
+        "대용량 offer 인데 macOS 에서 lazy provider 에 등록됨 (대역폭/전송창 노출 위험)"
+    assert len(app.receivable_offers) == 1, "대용량 offer 가 받기 목록에 안 들어옴"
+
+    # 대조군: 같은 조건(macOS, lazy_paste=True)에서도 임계값 미만 파일은 기존대로
+    # provider 에 등록돼야 한다 (이번 수정이 macOS lazy 전체를 죽이면 안 됨).
+    small_offer = {
+        "offer_id": str(uuid.uuid4()),
+        "source_peer": generate_peer_id(),
+        "kind": "file",
+        "items": [{"name": "small.bin", "size": 1024, "hash": ""}],
+        "total_size": 1024,
+        "created_at": time.time(),
+    }
+    app._handle_clip_offer(small_offer)
+    assert stub.captured is not None, "임계값 미만 offer 인데 provider 등록이 생략됨"
+    assert stub.captured[0]["offer_id"] == small_offer["offer_id"]
+
+
 def test_spoofed_requester_peer_is_dropped(tmp_path, caplog):
     """감사 Critical #1: MSG_CLIP_FETCH 의 requester_peer 자기신고가 실제 소켓
     identity 와 다르면 서버가 drop 해야 한다. 과거엔 검증 없이 라우팅되어, 인증된

@@ -1073,8 +1073,23 @@ class InfiniteClipboard:
         # 클립보드 매니저/파일인식 앱의 자동 read 가 paste 없이 전송을 트리거하지 못한다
         # (함정 #28: Wayland 는 peek vs paste 구분 신호가 없어 paste-트리거 lazy 가 샘).
         # config.lazy_paste=True 면 자동 peek 없는 환경 한정 기존 paste-트리거 lazy 등록.
+        #
+        # 2026-07-12 mac-studio 오딧(eager-fetch-tradeoff) + NotebookLM 55소스 딥
+        # 리서치로 확정(함정 #40): macOS `NSPasteboardItem` provider 콜백은 파라미터에
+        # 호출자 정보가 전혀 없어 "진짜 paste" vs "Finder 자동 peek"을 구분할 공개 API가
+        # 없다(NSFilePromiseProvider/Receiver 도 드래그앤드롭 전용이라 적용 불가 — 크래시
+        # 남, Stack Overflow #79653316). grace=0(함정 #38)이라 macOS 는 사실상 매 offer
+        # 를 즉시 fetch — 대용량 파일이 이 경로로 새면 대역폭 낭비 + 전송창(1만줄 아래
+        # _NOTIFY_SIZE_THRESHOLD 트리거)이 사용자가 paste 하지도 않았는데 뜬다. 완전한
+        # 해결책은 없다고 결론(design 판단, A안 채택) — macOS 는 _NOTIFY_SIZE_THRESHOLD
+        # 이상이면 lazy 등록 자체를 생략하고 명시 '받기' 모드로 강제 폴백해 대역폭/전송창
+        # 노출을 막는다. 그 미만 파일은 여전히 복사만 해도 자동 수신됨(설정창 경고 참조).
+        macos_large_file = (
+            platform.system() == "Darwin"
+            and offer.get("total_size", 0) >= self._NOTIFY_SIZE_THRESHOLD
+        )
         ok = False
-        if getattr(self.config, "lazy_paste", False):
+        if getattr(self.config, "lazy_paste", False) and not macos_large_file:
             provider = self._ensure_lazy_provider()
             if provider is not None and provider.is_supported(offer["kind"]):
                 try:

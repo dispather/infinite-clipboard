@@ -436,6 +436,21 @@ class SettingsWindow(customtkinter.CTkToplevel):
             inner, text=tr("켜면 붙여넣기 시 자동 수신, 끄면 전송창 [받기] 버튼으로만 수신", self._lang),
             font=t.FONT_META, text_color=t.spool_dim, anchor="w",
         ).pack(fill="x", pady=(0, t.SP[2]))
+        if platform.system() == "Darwin":
+            # 2026-07-12 함정 #40: macOS 는 진짜 paste 와 Finder 자동 peek 을 구분할
+            # 공개 API가 없어(NotebookLM 55소스 리서치로 확정) 이 스위치를 켜면 다른
+            # 기기에서 파일을 복사만 해도(Mac 에서 붙여넣지 않아도) 자동 수신된다.
+            # _NOTIFY_SIZE_THRESHOLD(10MB) 이상은 명시 [받기] 로 폴백해 대역폭/전송창
+            # 노출은 막지만, 그 미만 작은 파일은 이 경고가 유일한 방어선이다.
+            customtkinter.CTkLabel(
+                inner, text=tr(
+                    "macOS 주의: 다른 기기가 복사만 해도(Mac에서 붙여넣지 않아도) "
+                    "10MB 미만 파일은 자동 수신됩니다 — macOS API 제약(플랫폼 한계)",
+                    self._lang,
+                ),
+                font=t.FONT_META, text_color=t.signal_wait, anchor="w", wraplength=380,
+                justify="left",
+            ).pack(fill="x", pady=(0, t.SP[2]))
 
         # 언어 선택 — 재시작 시 전 창/트레이/알림에 적용. 언어명(autonym)은
         # 현재 언어와 무관하게 항상 그대로 표기하므로 tr() 로 감싸지 않는다.
