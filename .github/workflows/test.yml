@@ -160,7 +160,15 @@ jobs:
           source .venv-ci/bin/activate
           python -m pip install --upgrade pip
           python -m pip install -r requirements_mac.txt pytest
-      - name: Run full pytest suite (실기기)
+      - name: Run macOS lazy + actionable-notify tests (실기기)
+        # 전체 스위트(tests/)가 아니라 macos CI 잡과 동일하게 범위를 좁힌다.
+        # mac-studio 의 Homebrew python@3.14 는 tcl-tk 9.0 에 링크돼 있는데,
+        # CLAUDE.md 함정 #11(macOS Tk 9.0 크래시 — 원래는 "창 닫기 시" 로
+        # 기록됐지만 여기선 CTk 루트 "생성" 단계 TkCreateFrame/색상 할당에서
+        # Abort trap 6 로 재현) 이 그대로 터진다. build_mac.sh 는 pyenv +
+        # tcl-tk@8 로 이걸 우회하지만, 이 잡의 목적은 Tk UI 가 아니라
+        # core/notify_mac.py·core/lazy_mac.py 실기기 검증이라 범위를 좁히는
+        # 쪽이 맞다(2026-07-11 워크플로우_dispatch 첫 실행에서 실측 발견).
         run: |
           source .venv-ci/bin/activate
-          python -m pytest tests/ -v
+          python -m pytest tests/test_lazy_mac.py tests/test_notify_mac.py -v
