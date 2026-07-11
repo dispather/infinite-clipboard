@@ -32,7 +32,8 @@ Download the package for your OS from the [GitHub Releases](https://github.com/d
 | OS | File (X.Y.Z = version) | Install |
 |----|------------------------|---------|
 | Linux (Arch/CachyOS) | `infinite-clipboard-X.Y.Z-1-x86_64.pkg.tar.zst` | `sudo pacman -U <file>` |
-| macOS (Apple Silicon) | `Infinite Clipboard X.Y.Z.dmg` | Open the DMG → drag to `/Applications` → **Gatekeeper bypass required, see below** |
+| macOS (Apple Silicon, M-series) | `Infinite.Clipboard.X.Y.Z-apple-silicon.dmg` | Open the DMG → drag to `/Applications` → **Gatekeeper bypass required, see below** |
+| macOS (Intel) | `Infinite.Clipboard.X.Y.Z-intel.dmg` | Same as above |
 | Windows | `infinite-clipboard-setup-X.Y.Z.exe` | Run the installer and follow the prompts (per-user, no admin rights needed) |
 
 After installing:
@@ -50,7 +51,7 @@ xattr -dr com.apple.quarantine "/Applications/Infinite Clipboard.app"
 
 After that it runs and auto-starts like any normal app. You'll need to re-run this command once whenever you overwrite it with a new version.
 
-> Right-click → Open doesn't reliably work around the block on unsigned ARM64 builds — the `xattr` command is the reliable fix.
+> Right-click → Open doesn't reliably work around the block on unsigned builds (Apple Silicon or Intel) — the `xattr` command is the reliable fix.
 
 ### Share the auth key once
 

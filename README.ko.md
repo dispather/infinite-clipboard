@@ -32,7 +32,8 @@
 | OS | 파일 (X.Y.Z = 버전) | 설치 방법 |
 |----|---------------------|-----------|
 | Linux (Arch/CachyOS) | `infinite-clipboard-X.Y.Z-1-x86_64.pkg.tar.zst` | `sudo pacman -U <파일>` |
-| macOS (Apple Silicon) | `Infinite Clipboard X.Y.Z.dmg` | DMG 열기 → `/Applications`로 드래그 → **아래 Gatekeeper 우회 필수** |
+| macOS (Apple Silicon, M시리즈) | `Infinite.Clipboard.X.Y.Z-apple-silicon.dmg` | DMG 열기 → `/Applications`로 드래그 → **아래 Gatekeeper 우회 필수** |
+| macOS (Intel) | `Infinite.Clipboard.X.Y.Z-intel.dmg` | 위와 동일 |
 | Windows | `infinite-clipboard-setup-X.Y.Z.exe` | 설치 프로그램 실행 → 안내 따르기 (per-user, 관리자 권한 불필요) |
 
 설치 후:
@@ -50,7 +51,7 @@ xattr -dr com.apple.quarantine "/Applications/Infinite Clipboard.app"
 
 해제 후엔 일반 앱처럼 실행 + 자동 시작 가능. 새 버전을 받아 덮어쓸 때마다 같은 명령을 1회 다시 실행해야 한다.
 
-> 우클릭 → 열기 방식은 unsigned ARM64 빌드에서 차단 다이얼로그가 그대로 떠 작동하지 않을 수 있다. `xattr` 명령이 가장 확실하다.
+> 우클릭 → 열기 방식은 unsigned 빌드(Apple Silicon/Intel 공통)에서 차단 다이얼로그가 그대로 떠 작동하지 않을 수 있다. `xattr` 명령이 가장 확실하다.
 
 ### 최초 1회 키 공유
 

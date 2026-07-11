@@ -5,7 +5,7 @@ name: Build (Windows + Linux + macOS)
 #   - workflow_dispatch (수동 실행)      → 빌드만 (artifact 만 남김)
 #
 # Phase 1: Windows + Linux ✅
-# Phase 2: macOS (Apple Silicon, macos-14) — 코드 서명 없음, 사용자 1회 quarantine 해제 필요
+# Phase 2: macOS (Apple Silicon macos-14 + Intel macos-13) — 코드 서명 없음, 사용자 1회 quarantine 해제 필요
 # 빌드 산출물은 GitHub Actions artifact 로 항상 업로드, tag 빌드일 때만 Release 에 첨부.
 
 on:
@@ -194,6 +194,10 @@ jobs:
   # Python 빌드는 매번 10-15분 소요 → ~/.pyenv/versions cache 가 결정적.
   # 코드 서명 없음 — 사용자가 DMG 다운로드 후 `xattr -dr com.apple.quarantine`
   # 으로 Gatekeeper 1회 우회 필요.
+  #
+  # arm64/x86_64 두 job 은 runner 만 다르고 step 은 완전히 동일 — matrix 대신
+  # 별도 job 으로 분리한 이유: cache key(runner.arch 로 이미 분기)와 artifact
+  # 이름을 job 단위로 고정해야 release job 의 download-artifact 가 명확해짐.
   # ─────────────────────────────────────────────────────────────────────
   macos:
     name: macOS build (Apple Silicon)
@@ -254,8 +258,70 @@ jobs:
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
-          name: macos-dmg
-          # 공백 포함 파일명 (`Infinite Clipboard <ver>.dmg`) — glob 으로 매칭.
+          name: macos-dmg-arm64
+          # 공백 포함 파일명 (`Infinite Clipboard <ver> (Apple Silicon).dmg`)
+          # — glob 으로 매칭. arch label 은 make_dmg.sh 가 `uname -m` 으로 부여.
+          path: ${{ github.workspace }}/ic-build/dist/Infinite Clipboard *.dmg
+          if-no-files-found: error
+          retention-days: 30
+
+  # ─────────────────────────────────────────────────────────────────────
+  # macOS (Intel): macos-13 runner. macos job 과 동일 스크립트를 그대로
+  # 재사용 — build_mac.sh/make_dmg.sh 는 arch 하드코딩 없이 `brew --prefix`/
+  # `uname -m` 으로 동적 분기하도록 이미 수정됨(2026-07-11, Apple Silicon
+  # 전용 `/opt/homebrew` 하드코딩이 Intel 에서 tcl-tk@8 미검출로 실패하던
+  # 문제 수정). cache key 도 runner.arch(X64) 로 arm64 와 자동 분리.
+  # ─────────────────────────────────────────────────────────────────────
+  macos-intel:
+    name: macOS build (Intel)
+    runs-on: macos-13
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install build tools (uv + pyenv + tcl-tk@8)
+        run: |
+          brew update
+          brew install uv pyenv tcl-tk@8
+
+      - name: Restore pyenv Python 3.12 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.pyenv/versions/3.12.13
+          key: pyenv-py312-tcltk8-${{ runner.os }}-${{ runner.arch }}-v1
+
+      - name: Restore uv cache
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/uv
+          key: uv-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pyproject.toml', 'requirements_mac.txt') }}
+          restore-keys: |
+            uv-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Run build_mac.sh
+        env:
+          IC_BUILD_DIR: ${{ github.workspace }}/ic-build
+        run: bash build/build_mac.sh
+
+      - name: Run make_dmg.sh
+        env:
+          IC_BUILD_DIR: ${{ github.workspace }}/ic-build
+        run: bash build/make_dmg.sh
+
+      - name: List build outputs
+        env:
+          IC_BUILD_DIR: ${{ github.workspace }}/ic-build
+        run: ls -la "$IC_BUILD_DIR/dist/"
+        continue-on-error: true
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg-intel
           path: ${{ github.workspace }}/ic-build/dist/Infinite Clipboard *.dmg
           if-no-files-found: error
           retention-days: 30
@@ -266,7 +332,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────
   release:
     name: Create GitHub Release (draft)
-    needs: [windows, linux, macos]
+    needs: [windows, linux, macos, macos-intel]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -285,10 +351,16 @@ jobs:
           name: linux-arch-package
           path: artifacts/
 
-      - name: Download macOS artifact
+      - name: Download macOS artifact (Apple Silicon)
         uses: actions/download-artifact@v4
         with:
-          name: macos-dmg
+          name: macos-dmg-arm64
+          path: artifacts/
+
+      - name: Download macOS artifact (Intel)
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-dmg-intel
           path: artifacts/
 
       - name: List artifacts

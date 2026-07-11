@@ -37,7 +37,9 @@ for tool in uv pyenv brew; do
 done
 
 # ── tcl-tk@8 확인 ─────────────────────────────────────────────────────
-TCLTK_PREFIX="/opt/homebrew/opt/tcl-tk@8"
+# Homebrew prefix 는 Apple Silicon(/opt/homebrew)과 Intel(/usr/local)이
+# 다르다 — `brew --prefix` 로 동적 확인 (하드코딩 시 Intel 빌드 실패).
+TCLTK_PREFIX="$(brew --prefix)/opt/tcl-tk@8"
 if [ ! -f "$TCLTK_PREFIX/lib/libtk8.6.dylib" ]; then
     echo "tcl-tk@8 설치 중..."
     brew install tcl-tk@8

@@ -15,7 +15,23 @@ IC_BUILD_DIR="${IC_BUILD_DIR:-$HOME/Library/Caches/InfiniteClipboard-Build}"
 VERSION=$(python3 -c "import sys; sys.path.insert(0, '.'); from version import __version__; print(__version__)")
 APP_NAME="Infinite Clipboard"
 APP_PATH="$IC_BUILD_DIR/dist/${APP_NAME}.app"
-DMG_NAME="${APP_NAME} ${VERSION}"
+
+# Apple Silicon(arm64)과 Intel(x86_64) 빌드가 동일 버전 문자열을 쓰면
+# DMG 파일명이 겹쳐 CI release 단계에서 한쪽이 다른 쪽을 덮어쓴다
+# (macos-14 + macos-13 매트릭스, 2026-07-11). arch 를 파일명에 포함하되
+# **공백/괄호는 파일명에 넣지 않는다** — GitHub Release 는 업로드 시 asset
+# 파일명의 공백/괄호를 전부 `.` 로 치환한다(하이픈은 안전). "(Apple Silicon)"
+# 처럼 괄호+공백을 섞으면 "Infinite.Clipboard.3.0.8..Apple.Silicon..dmg" 식으로
+# 마침표가 중복 찍혀 보기 흉해진다 — 실측: 릴리스 asset 다운로드해 확인.
+# 파일명(DMG_NAME)은 하이픈 suffix 로, Finder 마운트 시 보이는 볼륨 이름
+# (VOLNAME, URL 에 노출 안 됨)만 사람이 읽기 좋은 괄호 형태를 유지한다.
+case "$(uname -m)" in
+    arm64)  ARCH_SUFFIX="apple-silicon"; ARCH_LABEL="Apple Silicon" ;;
+    x86_64) ARCH_SUFFIX="intel";         ARCH_LABEL="Intel" ;;
+    *)      ARCH_SUFFIX="$(uname -m)";   ARCH_LABEL="$(uname -m)" ;;
+esac
+DMG_NAME="${APP_NAME} ${VERSION}-${ARCH_SUFFIX}"
+VOLNAME="${APP_NAME} ${VERSION} (${ARCH_LABEL})"
 DMG_PATH="$IC_BUILD_DIR/dist/${DMG_NAME}.dmg"
 STAGING="$IC_BUILD_DIR/dist/.dmg-staging"
 
@@ -41,9 +57,9 @@ ln -s /Applications "$STAGING/Applications"
 rm -f "$DMG_PATH"
 
 # UDZO = zlib 압축. .app 크기의 ~40% 수준으로 축소.
-# -volname: Finder 에서 마운트될 때 보일 이름.
+# -volname: Finder 에서 마운트될 때 보일 이름 (파일명과 다름 — 위 주석 참조).
 hdiutil create \
-    -volname "$DMG_NAME" \
+    -volname "$VOLNAME" \
     -srcfolder "$STAGING" \
     -ov \
     -format UDZO \
