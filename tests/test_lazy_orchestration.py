@@ -205,16 +205,18 @@ def test_offer_default_receive_mode(tmp_path):
 
 
 def test_lazy_image_roundtrip_loopback(tmp_path):
-    """이미지 복사(base64)→offer(kind=image)→fetch→FetchedContent.data 바이트 일치 (S3)."""
-    import base64
+    """이미지 복사(raw PNG bytes)→offer(kind=image)→fetch→FetchedContent.data 바이트 일치 (S3).
 
+    2026-07-11: ClipboardManager.get_clipboard_content() 가 이미지를 raw bytes 로
+    반환하도록 바뀌어(capture-only 최적화), _announce_image_offer 도 더 이상
+    base64 str 을 받지 않는다 — 여기서도 그대로 bytes 를 넘긴다.
+    """
     png = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 200  # ~51KB 임의 바이너리
-    b64 = base64.b64encode(png).decode("ascii")
 
     server_app, client_app, _server_stub, stub = _setup_pair(tmp_path)
     try:
         # source(서버) 이미지 복사 → offer broadcast (kind=image)
-        server_app._announce_image_offer(b64)
+        server_app._announce_image_offer(png)
         assert _wait_until(lambda: stub.captured is not None, timeout=4.0), \
             "이미지 offer 등록 안 됨"
         offer, fetch_cb = stub.captured

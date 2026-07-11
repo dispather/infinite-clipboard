@@ -78,7 +78,14 @@ class ClipboardManager:
         Returns:
             Tuple[str, Any]: (타입, 데이터)
             - 타입: 'text', 'image', 'files', 'empty'
-            - 데이터: 텍스트 문자열, base64 인코딩된 이미지, 파일 경로 리스트
+            - 데이터: 텍스트 문자열, 이미지는 **raw PNG bytes**(base64 아님 —
+              2026-07-11 capture-only 최적화: 유일한 소비자(main.py 의 lazy
+              이미지 offer 스냅샷)가 로컬 파일 쓰기만 하므로 base64
+              encode/decode 왕복이 순수 오버헤드였음), 파일 경로 리스트.
+              set_clipboard_content() 는 비대칭 — 여전히 base64 str 을 받는다
+              (네트워크로 받은 base64 JSON 페이로드를 그대로 넘기는 경로용,
+              현재 v3.0 에선 이미지가 lazy-only 라 사실상 미사용이지만 대칭
+              깨졌다고 임의로 바꾸지 않음 — set 쪽은 이 최적화 범위 밖).
         """
         return self._handler.get_content()
 
@@ -147,6 +154,13 @@ class ClipboardManager:
         """데이터의 해시를 계산합니다."""
         if data is None:
             return None
+
+        # 이미지는 raw PNG bytes (2026-07-11 capture-only 최적화) — str(bytes)
+        # 는 non-printable 바이트를 \xNN 으로 이스케이프해 base64 문자열보다도
+        # 커지므로, prefix 만 str 로 만들고 나머지는 바이트 그대로 이어붙인다.
+        if isinstance(data, (bytes, bytearray)):
+            prefix = f"{content_type}:".encode("utf-8")
+            return hashlib.md5(prefix + bytes(data)).hexdigest()
 
         import json
         if isinstance(data, (list, dict)):
@@ -269,8 +283,7 @@ class WindowsClipboard:
                 if image:
                     buffer = io.BytesIO()
                     image.save(buffer, format="PNG")
-                    image_data = base64.b64encode(buffer.getvalue()).decode("utf-8")
-                    return ("image", image_data)
+                    return ("image", buffer.getvalue())
 
             return ("empty", None)
 
@@ -464,8 +477,7 @@ class MacClipboard:
             if image:
                 buffer = io.BytesIO()
                 image.save(buffer, format="PNG")
-                image_data = base64.b64encode(buffer.getvalue()).decode("utf-8")
-                return ("image", image_data)
+                return ("image", buffer.getvalue())
 
             # 텍스트 확인 (pbpaste 사용) — 바이트로 읽고 인코딩 자동 탐지
             # RDP 세션이 CP949/CP1252/UTF-16 을 주입하는 경우 대비
@@ -965,7 +977,7 @@ class LinuxClipboard:
             if image:
                 buffer = io.BytesIO()
                 image.save(buffer, format="PNG")
-                return ("image", base64.b64encode(buffer.getvalue()).decode("utf-8"))
+                return ("image", buffer.getvalue())
 
             # 바이트로 읽고 인코딩 자동 탐지 — RDP/Windows 원격 주입 대비
             if self.tool == "wl-paste":
@@ -1025,8 +1037,7 @@ class LinuxClipboard:
                     if image:
                         buffer = io.BytesIO()
                         image.save(buffer, format="PNG")
-                        img_data = base64.b64encode(buffer.getvalue()).decode("utf-8")
-                        self._klipper_cached_content = ("image", img_data)
+                        self._klipper_cached_content = ("image", buffer.getvalue())
                         return self._klipper_cached_content
 
                 if text:

@@ -651,7 +651,7 @@ class InfiniteClipboard:
                             # v3.0 S2c: eager 전송 대신 offer broadcast (paste 시점 fetch).
                             self._announce_offer(content)
                         elif content_type == "image":
-                            # v3.0 S3: 이미지도 lazy — base64 디코드 → 임시 스냅샷 → offer
+                            # v3.0 S3: 이미지도 lazy — raw bytes 임시 스냅샷 → offer
                             self._announce_image_offer(content)
                         else:
                             # 텍스트만 inline 전송 (작고 즉시성 중요)
@@ -949,20 +949,19 @@ class InfiniteClipboard:
                 except OSError as e:
                     logger.debug(f"이미지 offer 스냅샷 삭제 실패 (무시): {e}")
 
-    def _announce_image_offer(self, b64_data):
+    def _announce_image_offer(self, png_bytes):
         """[source] 이미지 복사 → 바이트를 임시 파일로 스냅샷 + MSG_CLIP_OFFER(kind=image).
 
         파일과 달리 클립보드 이미지는 디스크 경로가 없으므로, copy 시점에 바이트를
         임시 파일로 떠 두고(다른 PC 가 paste 할 때 그 파일을 단일-파일 전송으로 보냄).
-        네트워크 전송은 paste 시점에만 발생(0바이트 copy 유지). base64 decode 는 로컬 CPU
-        만 사용 — 향후 capture-only 최적화 여지(현재는 단순/저위험 우선).
+        네트워크 전송은 paste 시점에만 발생(0바이트 copy 유지).
+
+        2026-07-11 capture-only 최적화: `ClipboardManager.get_clipboard_content()`
+        가 이제 이미지를 raw PNG bytes 로 반환(과거엔 base64 str → 여기서 다시
+        decode, 로컬 파일 쓰기만 하는 경로에 순수 왕복 오버헤드였음). 네트워크로는
+        절대 안 나가므로(offer 는 메타만 broadcast) base64 를 거칠 이유가 없다.
         """
         self._cleanup_offer_image()  # 이전 이미지 offer 스냅샷 정리
-        try:
-            png_bytes = base64.b64decode(b64_data)
-        except Exception as e:
-            logger.error(f"이미지 offer 디코드 오류: {e}")
-            return
         if not png_bytes:
             return
         try:
