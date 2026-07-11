@@ -18,7 +18,7 @@ APP_PATH="$IC_BUILD_DIR/dist/${APP_NAME}.app"
 
 # Apple Silicon(arm64)과 Intel(x86_64) 빌드가 동일 버전 문자열을 쓰면
 # DMG 파일명이 겹쳐 CI release 단계에서 한쪽이 다른 쪽을 덮어쓴다
-# (macos-14 + macos-13 매트릭스, 2026-07-11). arch 를 파일명에 포함하되
+# (macos-15 + macos-15-intel 매트릭스, 2026-07-11). arch 를 파일명에 포함하되
 # **공백/괄호는 파일명에 넣지 않는다** — GitHub Release 는 업로드 시 asset
 # 파일명의 공백/괄호를 전부 `.` 로 치환한다(하이픈은 안전). "(Apple Silicon)"
 # 처럼 괄호+공백을 섞으면 "Infinite.Clipboard.3.0.8..Apple.Silicon..dmg" 식으로

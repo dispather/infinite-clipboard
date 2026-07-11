@@ -78,7 +78,7 @@
   xattr -dr com.apple.quarantine "/Applications/Infinite Clipboard.app"
   ```
   정식 해결은 Apple Developer Program ($99/년) 등록 후 워크플로우에 서명 + 공증 step 추가 (별도 트랙)
-- macOS 빌드는 **Apple Silicon (ARM64) only**. Intel Mac 사용 시 `macos-13` 으로 별도 matrix 필요 (현재 빠짐)
+- macOS 빌드는 **Apple Silicon (ARM64, `macos-15`)** 과 **Intel (x86_64, `macos-15-intel`)** 둘 다 지원 (2026-07-11 부터)
 
 ---
 

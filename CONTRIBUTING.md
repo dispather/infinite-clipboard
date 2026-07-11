@@ -78,7 +78,7 @@ Defined in `.github/workflows/build.yml`.
   xattr -dr com.apple.quarantine "/Applications/Infinite Clipboard.app"
   ```
   A proper fix requires enrolling in the Apple Developer Program ($99/yr) and adding signing + notarization steps to the workflow (tracked separately)
-- macOS builds are **Apple Silicon (ARM64) only**. Intel Macs would need a separate `macos-13` matrix (not currently set up)
+- macOS builds cover both **Apple Silicon (ARM64, `macos-15`)** and **Intel (x86_64, `macos-15-intel`)** as of 2026-07-11
 
 ---
 

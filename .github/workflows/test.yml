@@ -115,7 +115,10 @@ jobs:
 
   macos:
     name: macOS (NSPasteboard data provider)
-    runs-on: macos-14
+    # macos-14 는 2026-07-06 부터 폐지 시작(전면 중단 11-02) — macos-15 로 교체
+    # (2026-07-11, build.yml 에서 macos-13 완전 폐지를 실측으로 발견한 김에
+    # 동일 리스크 있는 다른 워크플로우도 함께 정리. 함정 #39 참조)
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6

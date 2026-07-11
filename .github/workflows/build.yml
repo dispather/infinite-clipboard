@@ -5,7 +5,7 @@ name: Build (Windows + Linux + macOS)
 #   - workflow_dispatch (수동 실행)      → 빌드만 (artifact 만 남김)
 #
 # Phase 1: Windows + Linux ✅
-# Phase 2: macOS (Apple Silicon macos-14 + Intel macos-13) — 코드 서명 없음, 사용자 1회 quarantine 해제 필요
+# Phase 2: macOS (Apple Silicon macos-15 + Intel macos-15-intel) — 코드 서명 없음, 사용자 1회 quarantine 해제 필요
 # 빌드 산출물은 GitHub Actions artifact 로 항상 업로드, tag 빌드일 때만 Release 에 첨부.
 
 on:
@@ -188,7 +188,7 @@ jobs:
           retention-days: 30
 
   # ─────────────────────────────────────────────────────────────────────
-  # macOS (Apple Silicon): macos-14 runner.
+  # macOS (Apple Silicon): macos-15 runner.
   # build_mac.sh 가 pyenv + tcl-tk@8 + Python 3.12 (Tk 8.6 링크) 를 자동
   # 부트스트랩한다. 함정 #11 (Tk 9.0 세그폴트) 회피용.
   # Python 빌드는 매번 10-15분 소요 → ~/.pyenv/versions cache 가 결정적.
@@ -198,10 +198,17 @@ jobs:
   # arm64/x86_64 두 job 은 runner 만 다르고 step 은 완전히 동일 — matrix 대신
   # 별도 job 으로 분리한 이유: cache key(runner.arch 로 이미 분기)와 artifact
   # 이름을 job 단위로 고정해야 release job 의 download-artifact 가 명확해짐.
+  #
+  # **runner label 은 GitHub 가 주기적으로 폐지한다** — 함정 #39 참조
+  # (2026-07-11: macos-13 도입 당일 완전 폐지 상태였던 걸 실측으로 발견,
+  # 1.5시간 무한 큐잉 후 원인 파악). 새 label 채택 전 반드시
+  # https://docs.github.com/en/actions/reference/runners/github-hosted-runners
+  # 최신 표에서 확인. macos-14 는 2026-07-06 부터 폐지 시작(전면 중단
+  # 2026-11-02) — 이 커밋에서 macos-15 로 선제 교체.
   # ─────────────────────────────────────────────────────────────────────
   macos:
     name: macOS build (Apple Silicon)
-    runs-on: macos-14
+    runs-on: macos-15
     defaults:
       run:
         shell: bash
@@ -211,7 +218,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Install build tools (uv + pyenv + tcl-tk@8)
-        # brew 는 macos-14 에 사전 설치. pyenv 와 uv 는 build_mac.sh 가 요구.
+        # brew 는 macos-15 에 사전 설치. pyenv 와 uv 는 build_mac.sh 가 요구.
         # tcl-tk@8 은 함정 #11 회피용 Python 빌드 의존성.
         run: |
           brew update
@@ -266,15 +273,19 @@ jobs:
           retention-days: 30
 
   # ─────────────────────────────────────────────────────────────────────
-  # macOS (Intel): macos-13 runner. macos job 과 동일 스크립트를 그대로
-  # 재사용 — build_mac.sh/make_dmg.sh 는 arch 하드코딩 없이 `brew --prefix`/
-  # `uname -m` 으로 동적 분기하도록 이미 수정됨(2026-07-11, Apple Silicon
-  # 전용 `/opt/homebrew` 하드코딩이 Intel 에서 tcl-tk@8 미검출로 실패하던
-  # 문제 수정). cache key 도 runner.arch(X64) 로 arm64 와 자동 분리.
+  # macOS (Intel): macos-15-intel runner (macos-13 은 2025-12-04 완전
+  # 폐지됐다 — 이 job 최초 도입 시 무근거로 macos-13 을 썼다가 워크플로우
+  # 실행에서 1.5시간 무한 큐잉을 겪고서야 발견함. 함정 #39 참조 — 새 macOS
+  # runner label 은 반드시 도입 직전 GitHub 문서에서 재확인). macos job 과
+  # 동일 스크립트를 그대로 재사용 — build_mac.sh/make_dmg.sh 는 arch
+  # 하드코딩 없이 `brew --prefix`/`uname -m` 으로 동적 분기하도록 이미
+  # 수정됨(2026-07-11, Apple Silicon 전용 `/opt/homebrew` 하드코딩이 Intel
+  # 에서 tcl-tk@8 미검출로 실패하던 문제 수정). cache key 도 runner.arch(X64)
+  # 로 arm64 와 자동 분리.
   # ─────────────────────────────────────────────────────────────────────
   macos-intel:
     name: macOS build (Intel)
-    runs-on: macos-13
+    runs-on: macos-15-intel
     defaults:
       run:
         shell: bash
