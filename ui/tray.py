@@ -27,6 +27,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("infinite-clipboard.tray")
 
+# 2026-07-12 mac-studio 오딧: _launch_window 가 spawn 중임을 표시하는 sentinel.
+# 실제 Popen 객체와 구분해 "아직 프로세스가 안 떴지만 다른 스레드가 이미
+# 요청했다"는 상태를 표현한다 (동시 호출 race 차단용).
+_SPAWNING = object()
+
 
 # ── 아이콘 이미지 로드 ─────────────────────────────────────────────────
 
@@ -106,6 +111,10 @@ class TrayApp:
         self.icon: pystray.Icon | None = None
         # 앱 상태 변경 시 아이콘 자동 갱신
         self.app.on_state_changed = self.update_icon
+        # 2026-07-12 mac-studio 오딧 #1: window_type 별 마지막 spawn 결과 추적
+        # (중복 창 생성 가드). 값은 subprocess.Popen 객체 또는 _SPAWNING sentinel.
+        self._window_procs: dict = {}
+        self._window_procs_lock = threading.Lock()
 
     def run(self) -> None:
         """트레이 아이콘 생성 및 실행 (블로킹)"""
@@ -192,6 +201,19 @@ class TrayApp:
         if window_type not in ("settings", "history", "transfers", "about"):
             return
 
+        # 2026-07-12 mac-studio 오딧 #1: 대용량 수신 자동 팝업(main.py
+        # _launch_transfer_window)과 이 메뉴 클릭이 겹치면 창이 2개 뜨는
+        # 문제 — 같은 window_type 이 이미 떠있거나(poll() is None) 다른
+        # 스레드가 방금 spawn 을 시작(sentinel)했으면 재실행을 생략한다.
+        # check-then-mark 를 lock 안에서 원자적으로 수행해 두 트리거가
+        # 거의 동시에 들어와도 race 없이 하나만 spawn 된다.
+        with self._window_procs_lock:
+            entry = self._window_procs.get(window_type)
+            if entry is not None and (entry is _SPAWNING or entry.poll() is None):
+                logger.debug(f"[트레이] {window_type} 창이 이미 떠있어(또는 준비 중) 재실행 생략")
+                return
+            self._window_procs[window_type] = _SPAWNING
+
         if getattr(sys, "frozen", False):
             # PyInstaller 번들 — sys.executable 이 자체 바이너리
             cmd = [sys.executable, "--window", window_type]
@@ -203,14 +225,21 @@ class TrayApp:
             )
             cmd = [sys.executable, main_py, "--window", window_type]
 
-        threading.Thread(
-            # M11: 함정 #8 과 동일 이유 — start_new_session 없으면 이 창이 tray
-            # 프로세스와 같은 세션/프로세스 그룹에 묶여, 개발 모드에서 터미널의
-            # Ctrl+C(SIGINT) 가 그룹 전체에 가면 "독립 프로세스"여야 할 창도
-            # 함께 죽는다.
-            target=lambda: subprocess.Popen(cmd, start_new_session=True),
-            daemon=True,
-        ).start()
+        def _spawn() -> None:
+            try:
+                # M11: 함정 #8 과 동일 이유 — start_new_session 없으면 이 창이
+                # tray 프로세스와 같은 세션/프로세스 그룹에 묶여, 개발 모드에서
+                # 터미널의 Ctrl+C(SIGINT) 가 그룹 전체에 가면 "독립 프로세스"
+                # 여야 할 창도 함께 죽는다.
+                proc = subprocess.Popen(cmd, start_new_session=True)
+            except Exception:
+                with self._window_procs_lock:
+                    self._window_procs.pop(window_type, None)
+                raise
+            with self._window_procs_lock:
+                self._window_procs[window_type] = proc
+
+        threading.Thread(target=_spawn, daemon=True).start()
 
     def _show_history(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
         self._launch_window("history")

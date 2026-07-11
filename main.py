@@ -2148,9 +2148,16 @@ class InfiniteClipboard:
     def _launch_transfer_window(self):
         """v2.2.1 B3: TransferWindow 를 별도 프로세스로 띄운다.
 
-        tray 의 _launch_window('transfers') 와 동일 패턴. PyInstaller 번들/dev 모드 자동 분기.
-        이미 떠있는 창이 있을 수 있으나 OS 가 보통 동일 process 의 새 인스턴스를 focus.
+        2026-07-12 mac-studio 오딧 #1: tray 가 있으면(트레이 모드) TrayApp
+        ._launch_window('transfers') 로 위임 — 트레이 메뉴 클릭과 이 자동
+        팝업이 겹쳐도 TrayApp 이 가진 중복 spawn 가드(_window_procs)를 그대로
+        재사용해 창이 2개 뜨지 않는다. --no-tray 모드는 self.tray 가 None 이라
+        이 자동 팝업이 유일한 트리거이므로(트레이 메뉴 자체가 없음) 중복이
+        애초에 불가능 — 기존 단독 spawn 경로를 그대로 유지한다.
         """
+        if self.tray is not None:
+            self.tray._launch_window("transfers")
+            return
         import subprocess
         try:
             if getattr(sys, "frozen", False):
@@ -2437,8 +2444,21 @@ def _run_window_only(window_type: str) -> None:
     from ui.components import enable_mac_clipboard_shortcuts
     enable_mac_clipboard_shortcuts(root)
     root.withdraw()
-    root.after(50, root.deiconify)
-    root.after(100, root.withdraw)
+
+    # 2026-07-12 mac-studio 오딧 #2(미확정 리드): macOS 위젯 초기화를 위해
+    # 이 캐리어 root 를 한 번 보였다가 다시 숨기는데, 기존엔 deiconify 와
+    # withdraw 가 서로 독립된 두 after 타이머(50ms 간격)에 의존해 WM 이
+    # deiconify 를 실제로 처리하기 전에 withdraw 가 먼저 스케줄될 race 여지가
+    # 있었다(빈 정사각형 창이 안 숨겨진 채 남는 증상으로 의심). deiconify 직후
+    # update_idletasks() 로 이벤트 루프가 map 을 실제로 처리하도록 강제한
+    # 뒤에야 withdraw 를 스케줄 — Cmd+V 위젯 초기화 목적(가시성/geometry)은
+    # 그대로 두고 타이밍 구조만 견고화. macOS 실기 미검증(이 개발 세션은
+    # DISPLAY 없음) — mac-studio 재현 시 재확인 요청.
+    def _flash_for_macos_init():
+        root.deiconify()
+        root.update_idletasks()
+        root.after(50, root.withdraw)
+    root.after(50, _flash_for_macos_init)
 
     def _close_all(win=None):
         try:

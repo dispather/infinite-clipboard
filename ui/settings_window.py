@@ -410,6 +410,33 @@ class SettingsWindow(customtkinter.CTkToplevel):
         ).pack(side="right")
         row_ttl.pack(fill="x")
 
+        # 2026-07-12 mac-studio 오딧 #3: lazy_paste(config.py) 가 GUI 에
+        # 노출 안 돼 settings.json 직접 편집이 필요했던 문제. 클라이언트별
+        # 독립 설정 — mesh 전체 authoritative sync(별도 MSG_CONFIG_SYNC
+        # 프로토콜 확장 필요, 비긴급)는 mac-studio 도 제안만 했고 이번 범위
+        # 밖. ON=paste 트리거 시 자동 수신(lazy), OFF(기본값)=전송창 [받기]
+        # 버튼으로만 수신(explicit) — 함정 #28 참조.
+        self._lazy_paste_var = customtkinter.BooleanVar(value=config.lazy_paste)
+        lazy_row = customtkinter.CTkFrame(inner, fg_color="transparent")
+        lazy_icon = load_icon("inbox", size=16, color="dim")
+        if lazy_icon is not None:
+            customtkinter.CTkLabel(lazy_row, text="", image=lazy_icon).pack(side="left", padx=(0, t.SP[2] - 2))
+        customtkinter.CTkSwitch(
+            lazy_row, text=tr("자동 붙여넣기 수신(lazy)", self._lang),
+            variable=self._lazy_paste_var, onvalue=True, offvalue=False,
+            text_color=t.terminal_text,
+            font=t.FONT_BODY,
+            progress_color=t.signal_ok,
+            button_color=t.terminal_text,
+            button_hover_color=t.ZINC[50],
+            fg_color=t.relay_raised,
+        ).pack(side="left", fill="x", expand=True)
+        lazy_row.pack(fill="x")
+        customtkinter.CTkLabel(
+            inner, text=tr("켜면 붙여넣기 시 자동 수신, 끄면 전송창 [받기] 버튼으로만 수신", self._lang),
+            font=t.FONT_META, text_color=t.spool_dim, anchor="w",
+        ).pack(fill="x", pady=(0, t.SP[2]))
+
         # 언어 선택 — 재시작 시 전 창/트레이/알림에 적용. 언어명(autonym)은
         # 현재 언어와 무관하게 항상 그대로 표기하므로 tr() 로 감싸지 않는다.
         row_lang = FormRow(inner, tr("언어", self._lang))
@@ -636,6 +663,9 @@ class SettingsWindow(customtkinter.CTkToplevel):
         ttl_text = self._ttl_entry.get().strip()
         if ttl_text.isdigit():
             self._config.staging_ttl_hours = int(ttl_text)
+
+        # 2026-07-12 mac-studio 오딧 #3: lazy_paste 스위치 반영
+        self._config.lazy_paste = bool(self._lazy_paste_var.get())
 
         # 언어 — 재시작 시 전 UI 에 적용 ("English"/"한국어" autonym → en/ko)
         self._config.language = "en" if self._lang_var.get() == "English" else "ko"

@@ -65,3 +65,67 @@ def test_launch_window_rejects_unknown_window_type(monkeypatch):
 
     time.sleep(0.1)
     assert not calls, "알 수 없는 window_type 인데 subprocess 가 호출됨"
+
+
+class _FakeRunningProcess:
+    """subprocess.Popen 대역 — poll() 이 항상 None(아직 실행 중)을 반환."""
+
+    def poll(self):
+        return None
+
+
+def test_launch_window_skips_duplicate_spawn_while_already_running(monkeypatch):
+    """2026-07-12 mac-studio 오딧 #1 회귀 — 대용량 수신 자동 팝업과 트레이
+    메뉴 클릭이 겹쳐도 같은 window_type 은 한 번만 spawn 돼야 한다."""
+    calls = []
+
+    def fake_popen(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return _FakeRunningProcess()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    tray = _make_tray()
+    tray._launch_window("transfers")
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline and not calls:
+        time.sleep(0.02)
+    assert len(calls) == 1, "첫 spawn 이 발생하지 않음"
+
+    # 창이 아직 떠있는(poll() is None) 상태에서 재요청 — 재실행 생략돼야 함
+    tray._launch_window("transfers")
+    time.sleep(0.2)
+    assert len(calls) == 1, "이미 떠있는 window_type 인데 subprocess 가 다시 호출됨"
+
+
+def test_launch_window_concurrent_calls_spawn_only_once(monkeypatch):
+    """자동 팝업 스레드와 트레이 메뉴 클릭 스레드가 거의 동시에 같은
+    window_type 을 요청하는 실제 repro 시나리오 — race 없이 1회만 spawn."""
+    import threading as _threading
+
+    calls = []
+    call_lock = _threading.Lock()
+
+    def fake_popen(cmd, **kwargs):
+        with call_lock:
+            calls.append((cmd, kwargs))
+        return _FakeRunningProcess()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    tray = _make_tray()
+    threads = [
+        _threading.Thread(target=lambda: tray._launch_window("transfers"))
+        for _ in range(5)
+    ]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=2.0)
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline and not calls:
+        time.sleep(0.02)
+
+    assert len(calls) == 1, f"동시 호출 5회인데 spawn 이 {len(calls)}회 발생함"

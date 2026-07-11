@@ -49,6 +49,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "임시 정리": "Temp Cleanup",
         "시간 후": "hours",
         "지금 정리": "Clean Now",
+        "자동 붙여넣기 수신(lazy)": "Auto-receive on paste (lazy)",
+        "켜면 붙여넣기 시 자동 수신, 끄면 전송창 [받기] 버튼으로만 수신": (
+            "When on, files auto-receive on paste; when off, use [Receive] "
+            "in the Transfers window"
+        ),
         "언어": "Language",
         "재시작 후 적용됩니다": "Applies after restart",
         "자동 실행": "Autostart",

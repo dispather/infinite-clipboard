@@ -653,8 +653,14 @@ if __name__ == "__main__":
     from ui.components import enable_mac_clipboard_shortcuts
     enable_mac_clipboard_shortcuts(root)
     root.withdraw()
-    root.after(50, root.deiconify)
-    root.after(100, root.withdraw)
+
+    # 2026-07-12 mac-studio 오딧 #2: main.py _run_window_only 와 동일 하드닝
+    # (일관성 유지 — 이 블록 자체는 dev 전용, 실사용 경로 아님).
+    def _flash_for_macos_init():
+        root.deiconify()
+        root.update_idletasks()
+        root.after(50, root.withdraw)
+    root.after(50, _flash_for_macos_init)
 
     def _close_all(win=None):
         try:
