@@ -138,3 +138,29 @@ jobs:
         run: python -m pytest tests/test_lazy_mac.py -v
       - name: Run macOS actionable-notify tests (UNUserNotificationCenter)
         run: python -m pytest tests/test_notify_mac.py -v
+
+  macos-selfhosted:
+    name: macOS (self-hosted, mac-studio 실기기)
+    # 수동 실행 전용 — 자동 push/PR 트리거에서는 이 잡을 건너뛴다. mac-studio 는
+    # public repo 에 self-hosted 러너로 붙어있어, 외부 fork PR 이 자동으로 그
+    # 기기 위에서 코드를 실행할 수 있게 두면 안 된다(2026-07-11 결정). 항상 켜져
+    # 있는 실기기라 macos-14 CI 러너와 달리 UNUserNotificationCenter 권한 승인이
+    # (최초 1회 GUI 클릭 필요할 순 있어도) 실제로 붙을 가능성이 있다.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, macos-studio]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Python venv + deps
+        # 시스템/Homebrew Python 을 건드리지 않도록 격리된 venv 사용 (PEP 668
+        # externally-managed-environment 회피 — build_mac.sh 의 .venv-build 와
+        # 동일한 이유). requirements_mac.txt 그대로 사용 — 이 기기는 렌트한 CI
+        # 분 단위 과금이 아니라 상시 실기기라 최소 의존성으로 줄일 필요 없음.
+        run: |
+          python3 -m venv .venv-ci
+          source .venv-ci/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements_mac.txt pytest
+      - name: Run full pytest suite (실기기)
+        run: |
+          source .venv-ci/bin/activate
+          python -m pytest tests/ -v
