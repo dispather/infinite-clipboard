@@ -4,7 +4,7 @@
 앱 전반에서 이 값을 참조하여 About 다이얼로그/CLI --version/로그 헤더에 표시.
 """
 
-__version__ = "3.0.8"
+__version__ = "3.0.9"
 __app_name__ = "Infinite Clipboard"
 __author__ = "dispather"
 __license__ = "MIT"
