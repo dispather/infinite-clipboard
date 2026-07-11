@@ -440,17 +440,30 @@ class SettingsWindow(customtkinter.CTkToplevel):
             # 2026-07-12 함정 #40: macOS 는 진짜 paste 와 Finder 자동 peek 을 구분할
             # 공개 API가 없어(NotebookLM 55소스 리서치로 확정) 이 스위치를 켜면 다른
             # 기기에서 파일을 복사만 해도(Mac 에서 붙여넣지 않아도) 자동 수신된다.
-            # _NOTIFY_SIZE_THRESHOLD(10MB) 이상은 명시 [받기] 로 폴백해 대역폭/전송창
-            # 노출은 막지만, 그 미만 작은 파일은 이 경고가 유일한 방어선이다.
+            # 아래 문턱 이상은 명시 [받기] 로 폴백해 대역폭/전송창 노출은 막지만,
+            # 그 미만 작은 파일은 이 경고가 유일한 방어선이다.
             customtkinter.CTkLabel(
                 inner, text=tr(
                     "macOS 주의: 다른 기기가 복사만 해도(Mac에서 붙여넣지 않아도) "
-                    "10MB 미만 파일은 자동 수신됩니다 — macOS API 제약(플랫폼 한계)",
+                    "아래 문턱 미만 파일은 자동 수신됩니다 — macOS API 제약(플랫폼 한계)",
                     self._lang,
                 ),
                 font=t.FONT_META, text_color=t.signal_wait, anchor="w", wraplength=380,
                 justify="left",
             ).pack(fill="x", pady=(0, t.SP[2]))
+
+            # 2026-07-12 mac-studio 실사용 피드백: 하드코딩 10MB 가 너무 자주 걸려
+            # 불편하다는 의견 반영 — 사용자가 직접 문턱을 정하게 노출(기본 100MB).
+            row_lazy_threshold = FormRow(inner, tr("자동 수신 문턱", self._lang))
+            self._lazy_threshold_entry = self._make_entry(row_lazy_threshold, font=t.FONT_MONO)
+            self._lazy_threshold_entry.configure(width=70)
+            self._lazy_threshold_entry.pack(side="left", padx=(0, t.SP[1]))
+            self._lazy_threshold_entry.insert(0, str(config.lazy_size_threshold_mb))
+            customtkinter.CTkLabel(
+                row_lazy_threshold, text=tr("MB 이상은 [받기]로 전환", self._lang),
+                font=t.FONT_LABEL, text_color=t.spool_label,
+            ).pack(side="left", padx=(0, t.SP[3]))
+            row_lazy_threshold.pack(fill="x", pady=(0, t.SP[2]))
 
         # 언어 선택 — 재시작 시 전 창/트레이/알림에 적용. 언어명(autonym)은
         # 현재 언어와 무관하게 항상 그대로 표기하므로 tr() 로 감싸지 않는다.
@@ -681,6 +694,12 @@ class SettingsWindow(customtkinter.CTkToplevel):
 
         # 2026-07-12 mac-studio 오딧 #3: lazy_paste 스위치 반영
         self._config.lazy_paste = bool(self._lazy_paste_var.get())
+
+        # 2026-07-12: 자동 수신 문턱(macOS 전용 위젯 — Darwin 아니면 속성 자체가 없음)
+        if hasattr(self, "_lazy_threshold_entry"):
+            threshold_text = self._lazy_threshold_entry.get().strip()
+            if threshold_text.isdigit():
+                self._config.lazy_size_threshold_mb = int(threshold_text)
 
         # 언어 — 재시작 시 전 UI 에 적용 ("English"/"한국어" autonym → en/ko)
         self._config.language = "en" if self._lang_var.get() == "English" else "ko"

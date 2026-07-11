@@ -266,6 +266,16 @@ class InfiniteClipboard:
         receive_thread = threading.Thread(target=self._watch_receive_requests, daemon=True)
         receive_thread.start()
 
+        # 2026-07-12 mac-studio 기능 요청: HistoryWindow 삭제/전체지우기 IPC 폴링
+        history_delete_thread = threading.Thread(
+            target=self._watch_history_delete_requests, daemon=True
+        )
+        history_delete_thread.start()
+
+        # 2026-07-12 mac-studio 기능 요청: TransferWindow "받을 파일" 목록 무시 버튼 IPC 폴링
+        ignore_thread = threading.Thread(target=self._watch_ignore_requests, daemon=True)
+        ignore_thread.start()
+
         logger.info("Infinite Clipboard 동작 시작")
 
     def _staging_dir(self) -> Path:
@@ -1079,14 +1089,22 @@ class InfiniteClipboard:
         # 호출자 정보가 전혀 없어 "진짜 paste" vs "Finder 자동 peek"을 구분할 공개 API가
         # 없다(NSFilePromiseProvider/Receiver 도 드래그앤드롭 전용이라 적용 불가 — 크래시
         # 남, Stack Overflow #79653316). grace=0(함정 #38)이라 macOS 는 사실상 매 offer
-        # 를 즉시 fetch — 대용량 파일이 이 경로로 새면 대역폭 낭비 + 전송창(1만줄 아래
-        # _NOTIFY_SIZE_THRESHOLD 트리거)이 사용자가 paste 하지도 않았는데 뜬다. 완전한
-        # 해결책은 없다고 결론(design 판단, A안 채택) — macOS 는 _NOTIFY_SIZE_THRESHOLD
+        # 를 즉시 fetch — 대용량 파일이 이 경로로 새면 대역폭 낭비 + 전송창이 사용자가
+        # paste 하지도 않았는데 뜬다(_NOTIFY_SIZE_THRESHOLD 이상 receive 시 auto-popup).
+        # 완전한 해결책은 없다고 결론(design 판단, A안 채택) — macOS 는
+        # config.lazy_size_threshold_mb(기본 100MB, 설정창에서 사용자가 직접 조절)
         # 이상이면 lazy 등록 자체를 생략하고 명시 '받기' 모드로 강제 폴백해 대역폭/전송창
         # 노출을 막는다. 그 미만 파일은 여전히 복사만 해도 자동 수신됨(설정창 경고 참조).
+        # 2026-07-12 mac-studio 실사용 피드백: 하드코딩 10MB(_NOTIFY_SIZE_THRESHOLD,
+        # 원래는 전송창 auto-popup 임계값)가 너무 자주 걸려 불편하다 해서 별도
+        # 설정 가능 필드로 분리 — 문턱을 올리면 10MB~문턱 구간 파일도 전송창이
+        # 자동으로 뜰 수 있음(트레이드오프를 사용자가 명시적으로 감수, 강제 아님).
+        lazy_threshold_bytes = (
+            getattr(self.config, "lazy_size_threshold_mb", 100) * 1024 * 1024
+        )
         macos_large_file = (
             platform.system() == "Darwin"
-            and offer.get("total_size", 0) >= self._NOTIFY_SIZE_THRESHOLD
+            and offer.get("total_size", 0) >= lazy_threshold_bytes
         )
         ok = False
         if getattr(self.config, "lazy_paste", False) and not macos_large_file:
@@ -1629,6 +1647,90 @@ class InfiniteClipboard:
                                 json.dump([], f)
             except (json.JSONDecodeError, OSError) as e:
                 logger.debug(f"receive request 폴링: {e}")
+            time.sleep(0.5)
+
+    @staticmethod
+    def _get_history_delete_request_file():
+        """HistoryWindow 의 삭제/전체지우기 버튼이 timestamp append 하는 파일.
+
+        2026-07-12 mac-studio 기능 요청: HistoryWindow 는 별도 프로세스의 스냅샷
+        뷰(시작 시 1회 로드, 실시간 폴링 없음)라 clipboard_history.json 을 직접
+        수정하면 메인 프로세스의 인메모리 self.clipboard_history 가 다음 클립보드
+        변경 시 _save_history_file() 로 덮어써서 삭제가 무효화된다. 그래서 cancel_
+        requests.json/receive_requests.json 과 동일한 IPC 로 메인 프로세스에 위임.
+        """
+        from config import _get_config_dir
+        return str(_get_config_dir() / "history_delete_requests.json")
+
+    def _watch_history_delete_requests(self):
+        """별도 프로세스 HistoryWindow 삭제 버튼 폴링 → clipboard_history 에서 제거.
+
+        entry 에 안정적 id 가 없어 timestamp(float, time.time()) 를 사실상 유니크
+        키로 재사용한다(충돌 가능성은 무시 가능 수준). fetch 같은 블로킹 작업이
+        없으므로 receive 와 달리 per-request 스레드 없이 동기 처리로 충분하다.
+        """
+        req_file = self._get_history_delete_request_file()
+        while self.running:
+            try:
+                if os.path.exists(req_file):
+                    with open(req_file, "r", encoding="utf-8") as f:
+                        requests = json.load(f)
+                    if isinstance(requests, list) and requests:
+                        targets = set(requests)
+                        with self._history_lock:
+                            before = len(self.clipboard_history)
+                            self.clipboard_history = [
+                                e for e in self.clipboard_history
+                                if e.get("timestamp") not in targets
+                            ]
+                            removed = before - len(self.clipboard_history)
+                            if removed:
+                                self._save_history_file()
+                        if removed:
+                            logger.info(f"[히스토리] {removed}개 항목 삭제됨")
+                        try:
+                            os.unlink(req_file)
+                        except OSError:
+                            with open(req_file, "w", encoding="utf-8") as f:
+                                json.dump([], f)
+            except (json.JSONDecodeError, OSError) as e:
+                logger.debug(f"history delete request 폴링: {e}")
+            time.sleep(0.5)
+
+    @staticmethod
+    def _get_ignore_request_file():
+        """TransferWindow "받을 파일" 목록의 [무시] 버튼이 offer_id append 하는 파일.
+
+        2026-07-12 mac-studio 기능 요청. 기존 _remove_receivable_widget(UI 측
+        즉시 갱신)과 _clear_receivable(서버 측 receivable_offers 제거 + 상태 저장)
+        가 이미 있어 이 둘을 잇는 IPC만 추가한다 — cancel_requests.json 과 동일한
+        read-append-write 패턴.
+        """
+        from config import _get_config_dir
+        return str(_get_config_dir() / "ignore_requests.json")
+
+    def _watch_ignore_requests(self):
+        """별도 프로세스 TransferWindow 의 [무시] 버튼 폴링 → receivable_offers 에서 제거.
+
+        _clear_receivable 자체가 이미 락 보호 + 상태 저장을 하므로(fetch 같은
+        블로킹 작업도 없음) receive 와 달리 per-request 스레드 없이 동기 처리로
+        충분하다."""
+        req_file = self._get_ignore_request_file()
+        while self.running:
+            try:
+                if os.path.exists(req_file):
+                    with open(req_file, "r", encoding="utf-8") as f:
+                        requests = json.load(f)
+                    if isinstance(requests, list) and requests:
+                        for offer_id in requests:
+                            self._clear_receivable(offer_id)
+                        try:
+                            os.unlink(req_file)
+                        except OSError:
+                            with open(req_file, "w", encoding="utf-8") as f:
+                                json.dump([], f)
+            except (json.JSONDecodeError, OSError) as e:
+                logger.debug(f"ignore request 폴링: {e}")
             time.sleep(0.5)
 
     def _send_file_ready(self, file_paths):

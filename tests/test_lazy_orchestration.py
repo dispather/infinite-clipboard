@@ -11,6 +11,7 @@
 종단 검증한다. provider 는 fetch_callback 을 캡처만 하고, 테스트가 paste 처럼 호출한다.
 """
 
+import json
 import logging
 import os
 import socket
@@ -457,14 +458,16 @@ def test_offer_macos_large_file_forces_receive_mode(tmp_path, monkeypatch):
     design 판단 A안): macOS 는 provideDataForType: 콜백에 호출자 정보가 없어
     '진짜 paste' 와 'Finder 자동 peek' 을 구분할 공개 API가 없다(NSFilePromiseProvider
     도 드래그앤드롭 전용이라 적용 불가). grace=0(함정 #38)이라 macOS 는 사실상 매
-    offer 를 peek 이든 진짜 paste 든 즉시 fetch 하므로, _NOTIFY_SIZE_THRESHOLD(10MB)
-    이상은 lazy 등록 자체를 생략하고 명시 '받기' 모드로 강제 폴백해 대역폭 낭비와
-    (사용자가 paste 하지도 않았는데 뜨는) 전송창 노출을 막는다."""
+    offer 를 peek 이든 진짜 paste 든 즉시 fetch 하므로, config.lazy_size_threshold_mb
+    (2026-07-12: 하드코딩 10MB 대신 사용자 설정 가능, 기본 100MB) 이상은 lazy 등록
+    자체를 생략하고 명시 '받기' 모드로 강제 폴백해 대역폭 낭비와 (사용자가 paste
+    하지도 않았는데 뜨는) 전송창 노출을 막는다."""
     import platform as platform_module
 
     monkeypatch.setattr(platform_module, "system", lambda: "Darwin")
 
     app = _make_app("client", _free_port(), tmp_path / "dl", lazy_paste=True)
+    app.config.lazy_size_threshold_mb = 10  # 테스트에선 default(100MB) 대신 작게
     stub = _StubProvider()
     app.lazy_provider = stub
     app._lazy_provider_inited = True
@@ -474,7 +477,7 @@ def test_offer_macos_large_file_forces_receive_mode(tmp_path, monkeypatch):
         "source_peer": generate_peer_id(),
         "kind": "file",
         "items": [{"name": "big.bin", "size": 11_000_000, "hash": ""}],
-        "total_size": 11_000_000,  # >= _NOTIFY_SIZE_THRESHOLD(10MB)
+        "total_size": 11_000_000,  # >= lazy_size_threshold_mb(10) * 1024 * 1024
         "created_at": time.time(),
     }
     app._handle_clip_offer(big_offer)
@@ -496,6 +499,88 @@ def test_offer_macos_large_file_forces_receive_mode(tmp_path, monkeypatch):
     app._handle_clip_offer(small_offer)
     assert stub.captured is not None, "임계값 미만 offer 인데 provider 등록이 생략됨"
     assert stub.captured[0]["offer_id"] == small_offer["offer_id"]
+
+
+def test_offer_macos_threshold_uses_configured_value(tmp_path, monkeypatch):
+    """2026-07-12 mac-studio 실사용 피드백: 10MB 하드코딩이 너무 자주 걸려 불편
+    하다고 해서 config.lazy_size_threshold_mb 로 분리했다. 기본값(100MB)이 실제로
+    _handle_clip_offer 의 게이트에 반영되는지, 문턱을 바꾸면 그 값을 따르는지 확인."""
+    import platform as platform_module
+
+    monkeypatch.setattr(platform_module, "system", lambda: "Darwin")
+
+    app = _make_app("client", _free_port(), tmp_path / "dl", lazy_paste=True)
+    assert app.config.lazy_size_threshold_mb == 100, "기본값이 100MB 가 아님"
+    stub = _StubProvider()
+    app.lazy_provider = stub
+    app._lazy_provider_inited = True
+
+    # 기본값(100MB) 미만인 50MB — 여전히 lazy 등록돼야 함(과거 10MB 하드코딩이면 폴백됐을 크기)
+    mid_offer = {
+        "offer_id": str(uuid.uuid4()),
+        "source_peer": generate_peer_id(),
+        "kind": "file",
+        "items": [{"name": "mid.bin", "size": 50 * 1024 * 1024, "hash": ""}],
+        "total_size": 50 * 1024 * 1024,
+        "created_at": time.time(),
+    }
+    app._handle_clip_offer(mid_offer)
+    assert stub.captured is not None, "기본 100MB 문턱 미만인데 받기 폴백됨"
+
+    # 문턱을 5MB 로 낮추면 같은 50MB offer 가 이제는 폴백돼야 함
+    app.config.lazy_size_threshold_mb = 5
+    stub.captured = None
+    another_offer = {
+        "offer_id": str(uuid.uuid4()),
+        "source_peer": generate_peer_id(),
+        "kind": "file",
+        "items": [{"name": "mid2.bin", "size": 50 * 1024 * 1024, "hash": ""}],
+        "total_size": 50 * 1024 * 1024,
+        "created_at": time.time(),
+    }
+    app._handle_clip_offer(another_offer)
+    assert stub.captured is None, "문턱을 5MB 로 낮췄는데 50MB offer 가 여전히 lazy 등록됨"
+    assert another_offer["offer_id"] in app.receivable_offers
+
+
+def test_watch_ignore_requests_clears_receivable(tmp_path):
+    """2026-07-12 mac-studio 기능 요청: 전송창 "받을 파일" 목록에 무시 버튼이
+    없어서 안 받고 싶은 offer 를 치울 방법이 없었다. ui/transfer_window.py
+    _on_ignore_click 이 ignore_requests.json 에 offer_id 를 append 하면,
+    main.py _watch_ignore_requests 가 폴링해 기존 _clear_receivable 을 재사용해
+    제거해야 한다(cancel_requests.json/receive_requests.json 과 동일 IPC 패턴)."""
+    app = _make_app("client", _free_port(), tmp_path / "dl")
+    offer_a = {
+        "offer_id": str(uuid.uuid4()), "source_peer": generate_peer_id(),
+        "kind": "file", "total_size": 1024, "created_at": time.time(),
+        "items": [{"name": "a.bin", "size": 1024, "hash": ""}],
+    }
+    offer_b = {
+        "offer_id": str(uuid.uuid4()), "source_peer": generate_peer_id(),
+        "kind": "file", "total_size": 2048, "created_at": time.time(),
+        "items": [{"name": "b.bin", "size": 2048, "hash": ""}],
+    }
+    app._add_receivable(offer_a)
+    app._add_receivable(offer_b)
+    assert len(app.receivable_offers) == 2
+
+    req_file = app._get_ignore_request_file()
+    with open(req_file, "w", encoding="utf-8") as f:
+        json.dump([offer_a["offer_id"]], f)
+
+    app.running = True
+    th = threading.Thread(target=app._watch_ignore_requests, daemon=True)
+    th.start()
+    try:
+        deadline = time.time() + 3.0
+        while time.time() < deadline and offer_a["offer_id"] in app.receivable_offers:
+            time.sleep(0.05)
+    finally:
+        app.running = False
+        th.join(timeout=2.0)
+
+    assert offer_a["offer_id"] not in app.receivable_offers, "무시한 offer 가 여전히 목록에 남음"
+    assert offer_b["offer_id"] in app.receivable_offers, "무시 안 한 다른 offer 까지 지워짐"
 
 
 def test_spoofed_requester_peer_is_dropped(tmp_path, caplog):

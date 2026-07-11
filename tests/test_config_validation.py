@@ -34,6 +34,18 @@ def test_max_file_size_clamped():
         assert c.max_file_size_gb == 10
 
 
+def test_lazy_size_threshold_mb_clamped():
+    """2026-07-12: mac-studio 피드백으로 하드코딩 10MB 대신 사용자 설정 가능
+    필드로 분리(config.py:lazy_size_threshold_mb, 1~10240 MB, 기본 100)."""
+    for bad in (0, -5, 10241, 999999):
+        c = AppConfig(lazy_size_threshold_mb=bad, auth_key="x" * 16)
+        assert c.lazy_size_threshold_mb == 100
+
+    # 정상 범위는 유지
+    c = AppConfig(lazy_size_threshold_mb=5, auth_key="x" * 16)
+    assert c.lazy_size_threshold_mb == 5
+
+
 def test_clipboard_check_interval_clamped():
     for bad in (0, -1, 61, 1000):
         c = AppConfig(clipboard_check_interval=bad, auth_key="x" * 16)

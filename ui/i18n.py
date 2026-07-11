@@ -50,6 +50,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "시간 후": "hours",
         "지금 정리": "Clean Now",
         "자동 붙여넣기 수신(lazy)": "Auto-receive on paste (lazy)",
+        "macOS 주의: 다른 기기가 복사만 해도(Mac에서 붙여넣지 않아도) "
+        "아래 문턱 미만 파일은 자동 수신됩니다 — macOS API 제약(플랫폼 한계)": (
+            "macOS caveat: files under the threshold below auto-receive when "
+            "another device copies them (even without pasting on this Mac) "
+            "— a macOS API limitation"
+        ),
+        "자동 수신 문턱": "Auto-receive threshold",
+        "MB 이상은 [받기]로 전환": "MB+ switches to [Receive]",
         "켜면 붙여넣기 시 자동 수신, 끄면 전송창 [받기] 버튼으로만 수신": (
             "When on, files auto-receive on paste; when off, use [Receive] "
             "in the Transfers window"
@@ -78,6 +86,10 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         "이력이 비어 있어요": "History is empty",
         "어느 PC에서든 복사하면 여기 쌓입니다": "Copy on any PC and it shows up here",
+        "전체 지우기": "Clear all",
+        "클립보드 히스토리를 모두 지울까요? 되돌릴 수 없습니다.": (
+            "Clear all clipboard history? This cannot be undone."
+        ),
 
         # ui/transfer_window.py
         "파일 전송": "Transfers",

@@ -120,6 +120,13 @@ class AppConfig:
     # 것을 원천 차단(함정 #28). 받을 항목은 전송창 '받기' 버튼으로 수신. True=기존 paste-
     # 트리거 lazy 등록(자동 peek 없는 환경 한정 opt-in; KDE 등에선 자동 전송 회귀 위험).
     lazy_paste: bool = False
+    # 2026-07-12 mac-studio 오딧(eager-fetch-tradeoff, 함정 #40): macOS 는 peek
+    # 과 진짜 paste 를 구분할 API가 없어 lazy_paste=True 면 이 크기(MB) 이상 파일은
+    # 명시 '받기' 모드로 강제 폴백(main.py:_handle_clip_offer). 1 ~ 10240(10GB).
+    # 기본 100MB — mac-studio 실사용 피드백 반영(10MB 는 너무 자주 걸려 불편).
+    # 문턱을 올릴수록 그 크기까지는 "복사만 해도 자동 전체 전송"되는 대역폭/
+    # 프라이버시 노출이 커진다 — 사용자가 직접 감수 수준을 정하도록 설정창에 노출.
+    lazy_size_threshold_mb: int = 100
     # v3.0: 안정적 peer 식별자 (targeted relay 라우팅 전제). 빈 문자열이면
     # 자동 생성 후 영속. 같은 PC 는 재연결해도 같은 id. 32-char lowercase hex.
     # 형식 정의/검증은 core.protocol.is_valid_peer_id 가 SSOT.
@@ -242,6 +249,15 @@ class AppConfig:
                 f"reset to 'rename_with_counter'"
             )
             self.file_conflict_policy = "rename_with_counter"
+
+        # 2026-07-12: lazy_size_threshold_mb 범위 검증 (1~10240 MB = 10GB).
+        if not isinstance(self.lazy_size_threshold_mb, int) \
+                or not (1 <= self.lazy_size_threshold_mb <= 10240):
+            _logger.warning(
+                f"lazy_size_threshold_mb={self.lazy_size_threshold_mb!r} out of "
+                f"range [1,10240], reset to 100"
+            )
+            self.lazy_size_threshold_mb = 100
 
         # v2.3: staging_ttl_hours 범위 검증 (1~720 시간).
         # 0/음수는 의도치 않은 즉시 삭제 위험으로 거부.

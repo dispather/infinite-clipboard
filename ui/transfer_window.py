@@ -459,6 +459,19 @@ class TransferWindow(customtkinter.CTkToplevel):
             command=lambda o=oid: self._on_receive_click(o),
         )
         recv_btn.pack(side="right", padx=(t.SP[1], 0))
+
+        # 2026-07-12 mac-studio 기능 요청: 안 받고 싶은 항목을 목록에서 치울
+        # 방법이 없었음 — [받기] 왼쪽에 [무시] 버튼 추가.
+        ignore_img = load_icon("circle-x", size=16, color="dim")
+        ignore_btn = customtkinter.CTkButton(
+            row, text="" if ignore_img is not None else tr("무시", self._lang),
+            image=ignore_img, width=26, height=26,
+            corner_radius=t.RADIUS["sm"], fg_color="transparent",
+            hover_color=t.signal_fail, text_color=t.spool_dim,
+            command=lambda o=oid: self._on_ignore_click(o),
+        )
+        ignore_btn.pack(side="right", padx=(t.SP[1], 0))
+
         customtkinter.CTkLabel(
             row, text=_format_size(total_size),
             font=t.FONT_META, text_color=t.spool_dim,
@@ -552,6 +565,40 @@ class TransferWindow(customtkinter.CTkToplevel):
                 label.pack_forget()
             except Exception:
                 pass
+
+    def _get_ignore_request_file(self) -> str:
+        """main.py 의 _get_ignore_request_file 와 동일 경로."""
+        from config import _get_config_dir
+        return str(_get_config_dir() / "ignore_requests.json")
+
+    def _on_ignore_click(self, offer_id: str) -> None:
+        """2026-07-12 mac-studio 기능 요청: [무시] 버튼 → ignore_requests.json 에
+        offer_id append(main 폴링 처리, _clear_receivable 재사용) + 위젯 즉시 제거.
+
+        [취소]/[받기]와 달리 진행 중인 네트워크 작업이 없어(아직 fetch 조차
+        안 한 대기 상태) "요청 중" 중간 상태 없이 바로 위젯을 지운다 — main 이
+        0.5초 안에 receivable_offers 에서도 제거하므로 다음 상태 폴링에서
+        다시 나타나지 않는다.
+        """
+        if offer_id not in self._receivable_widgets:
+            return
+        req_file = self._get_ignore_request_file()
+        try:
+            requests = []
+            try:
+                with open(req_file, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, list):
+                    requests = loaded
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass
+            if offer_id not in requests:
+                requests.append(offer_id)
+            with open(req_file, "w", encoding="utf-8") as f:
+                json.dump(requests, f)
+        except OSError:
+            return
+        self._remove_receivable_widget(offer_id)
 
     def _update_active_widget(self, transfer_id: str, info: dict) -> None:
         w = self._active_widgets.get(transfer_id)

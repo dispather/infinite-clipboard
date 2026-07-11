@@ -8,6 +8,7 @@
 - 타이틀 중복 제거 (윈도우 제목바만 사용)
 """
 
+import json
 import os
 import sys
 
@@ -17,11 +18,13 @@ if _parent not in sys.path:
 
 import time
 import customtkinter
+from tkinter import messagebox
 
 from ui import theme as t
 from ui.components import (
     load_icon, EmptyState, Badge, apply_window_icon,
     enable_mousewheel_scroll, bind_focus_ring, enable_tab_focus,
+    SecondaryButton,
 )
 # 주의: 이 파일은 `from ui import theme as t` 로 `t` 를 theme 별칭으로 이미 쓴다.
 # i18n 번역 함수는 이름 충돌을 피하려고 `tr` 로 별칭 import 한다.
@@ -113,10 +116,16 @@ class HistoryWindow(customtkinter.CTkToplevel):
         self._count_badge = Badge(header, text=str(len(history_list)), variant="muted")
         self._count_badge.pack(side="left", padx=(t.SP[2], 0))
 
+        # 2026-07-12 mac-studio 기능 요청: 개별 삭제 외 전체 지우기.
+        SecondaryButton(
+            header, text=tr("전체 지우기", self._lang),
+            command=self._on_clear_all_click,
+        ).pack(side="right")
+
         customtkinter.CTkLabel(
             header, text=tr("텍스트 항목을 클릭하면 다시 복사됩니다", self._lang),
             font=t.FONT_META, text_color=t.spool_dim, anchor="e",
-        ).pack(side="right")
+        ).pack(side="right", padx=(0, t.SP[3]))
 
         # 스크롤 리스트
         self._scroll = customtkinter.CTkScrollableFrame(
@@ -169,6 +178,68 @@ class HistoryWindow(customtkinter.CTkToplevel):
         # 새로 생성된 아이템들에도 휠 스크롤이 먹히도록 재귀 바인딩
         enable_mousewheel_scroll(self._scroll)
 
+    # ── 2026-07-12 mac-studio 기능 요청: 삭제 ──────────────────────────
+
+    @staticmethod
+    def _get_history_delete_request_file() -> str:
+        """main.py 의 _get_history_delete_request_file 와 동일 경로."""
+        from config import _get_config_dir
+        return str(_get_config_dir() / "history_delete_requests.json")
+
+    def _append_delete_requests(self, timestamps: list) -> None:
+        """history_delete_requests.json 에 timestamp 목록 append.
+
+        main.py 의 _watch_history_delete_requests 스레드가 0.5초 안에 처리해
+        self.clipboard_history/clipboard_history.json 에 반영한다. cancel_
+        requests.json 과 동일한 read-append-write 패턴(ui/transfer_window.py
+        _on_cancel_click 참조).
+        """
+        req_file = self._get_history_delete_request_file()
+        try:
+            requests = []
+            try:
+                with open(req_file, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, list):
+                    requests = loaded
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass
+            for ts in timestamps:
+                if ts not in requests:
+                    requests.append(ts)
+            with open(req_file, "w", encoding="utf-8") as f:
+                json.dump(requests, f)
+        except OSError:
+            pass
+
+    def _on_delete_click(self, entry: dict) -> None:
+        """개별 삭제 — 로컬 목록/UI 즉시 갱신 + 메인 프로세스에 IPC 로 위임."""
+        ts = entry.get("timestamp")
+        try:
+            self.history_list.remove(entry)
+        except ValueError:
+            pass
+        self._count_badge.configure(text=str(len(self.history_list)))
+        self._render()
+        if ts is not None:
+            self._append_delete_requests([ts])
+
+    def _on_clear_all_click(self) -> None:
+        """전체 지우기 — 되돌릴 수 없는 작업이라 확인 다이얼로그를 거친다."""
+        if not self.history_list:
+            return
+        if not messagebox.askyesno(
+            tr("전체 지우기", self._lang),
+            tr("클립보드 히스토리를 모두 지울까요? 되돌릴 수 없습니다.", self._lang),
+        ):
+            return
+        timestamps = [e.get("timestamp") for e in self.history_list if e.get("timestamp") is not None]
+        self.history_list.clear()
+        self._count_badge.configure(text="0")
+        self._render()
+        if timestamps:
+            self._append_delete_requests(timestamps)
+
     def _create_item(self, entry: dict) -> customtkinter.CTkFrame:
         content_type = entry.get("type", "text")
         timestamp = entry.get("timestamp", time.time())
@@ -202,6 +273,21 @@ class HistoryWindow(customtkinter.CTkToplevel):
                 frame, text="", image=icon_img, cursor=cursor,
             )
             icon_lbl.pack(side="left", padx=(t.SP[3], t.SP[2] - 2))
+
+        # 최우측: 삭제 버튼 — 2026-07-12 mac-studio 기능 요청. text/image/files
+        # 전 타입 공통(재복사 가능 여부와 무관하게 삭제는 항상 가능해야 함)이라
+        # 아래 `if not recopyable: return frame` 이전에 추가한다. 클릭 시
+        # _on_click(재복사) 바인딩 그룹(widgets 리스트)에 넣지 않고 독립
+        # command= 콜백만 쓴다 — 프레임 클릭과 충돌 없음.
+        del_img = load_icon("circle-x", size=16, color="dim")
+        del_btn = customtkinter.CTkButton(
+            frame, text="" if del_img is not None else "×",
+            image=del_img, width=24, height=24,
+            corner_radius=t.RADIUS["sm"], fg_color="transparent",
+            hover_color=t.signal_fail, text_color=t.spool_dim,
+            command=lambda _entry=entry: self._on_delete_click(_entry),
+        )
+        del_btn.pack(side="right", padx=(0, t.SP[2]))
 
         # 우: 타임스탬프
         time_lbl = customtkinter.CTkLabel(
