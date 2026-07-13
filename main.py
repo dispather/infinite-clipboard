@@ -888,17 +888,38 @@ class InfiniteClipboard:
 
     def _send_msg_to(self, msg_type, data, receiver_peer):
         """JSON 메시지를 receiver_peer 에게만 (data 에 receiver_peer 동봉돼 있어야 함)."""
+        ok = True
         if self.config.mode == "server" and self.server:
-            self.server.send_to_peer(receiver_peer, msg_type, data)
+            ok = self.server.send_to_peer(receiver_peer, msg_type, data)
         elif self.config.mode == "client" and self.client:
-            self.client.send(msg_type, data)
+            ok = self.client.send(msg_type, data)
+        if ok is False:
+            # [diag-largefile] 가설 B — targeted relay 실패가 호출부에서 삼켜지는지 확인.
+            # 동작은 그대로(raise/취소 없음). 재발 로그에서 이 줄이 보이면 source 는
+            # 계속 보냈다고 믿지만 requester 는 일부 프레임을 못 받아 timeout 될 수 있다.
+            # NetworkClient.send()는 반환값이 None이므로, False를 명시 반환하는
+            # 서버 targeted relay 경로만 진단한다.
+            logger.warning(
+                f"[diag-largefile] targeted JSON 전송 실패(drop 가능): "
+                f"type={msg_type} receiver={receiver_peer[:8]}…"
+            )
 
     def _send_raw_to(self, raw_bytes, receiver_peer):
         """직렬화된(raw) 메시지를 receiver_peer 에게만 (meta 에 receiver_peer 동봉)."""
+        ok = True
         if self.config.mode == "server" and self.server:
-            self.server.send_raw_to_peer(receiver_peer, raw_bytes)
+            ok = self.server.send_raw_to_peer(receiver_peer, raw_bytes)
         elif self.config.mode == "client" and self.client:
-            self.client.send_raw(raw_bytes)
+            ok = self.client.send_raw(raw_bytes)
+        if ok is False:
+            # [diag-largefile] 가설 B — 바이너리 chunk relay 실패가 silently drop 되는지 확인.
+            # raw_bytes는 BINARY_MARKER+meta+payload 프레임이라 길이만 남긴다(경로 노출 최소화).
+            # NetworkClient.send_raw()는 반환값이 None이므로, False를 명시 반환하는
+            # 서버 targeted relay 경로만 진단한다.
+            logger.warning(
+                f"[diag-largefile] targeted raw 전송 실패(drop 가능): "
+                f"receiver={receiver_peer[:8]}… bytes={len(raw_bytes):,}"
+            )
 
     # ── v3.0 S2c: lazy offer/fetch 오케스트레이션 ──────────────────────
 
@@ -1195,6 +1216,8 @@ class InfiniteClipboard:
                 self._active_fetch = {
                     "offer_id": offer_id, "transfer_id": offer_id,
                     "event": event, "paths": None, "fail": None,
+                    # [diag-largefile] timeout 로그에서 마지막 수신 진행 상황을 남기기 위한 필드.
+                    "last_chunk_index": None, "last_chunk_file": None,
                 }
             try:
                 resume = self._load_resume_for_offer(offer_id, offer)
@@ -1205,6 +1228,23 @@ class InfiniteClipboard:
                 self._send_raw_to(raw, source_peer)
                 timeout = self._fetch_timeout(total)
                 if not event.wait(timeout=timeout):
+                    # [diag-largefile] 가설 C — 타임아웃 실패의 성격 판별.
+                    # 마지막으로 수신한 chunk 진행 상황을 함께 남긴다:
+                    #   last_chunk 가 계속 늘던 중이면 → 정상 전송인데 timeout 이
+                    #     너무 빡빡한 것(가설 C). _fetch_timeout 의 256KB/s 가정 재검토.
+                    #   last_chunk 가 None/정체면 → 프레임이 아예 안 옴(가설 A/B:
+                    #     스트림 desync 또는 relay silent drop). 위 diag 로그와 대조.
+                    with self._active_fetch_lock:
+                        af = self._active_fetch or {}
+                        last_idx = af.get("last_chunk_index")
+                        last_file = af.get("last_chunk_file")
+                    logger.warning(
+                        f"[diag-largefile] fetch 타임아웃 — offer={offer_id[:8]}… "
+                        f"total={total:,}B timeout={timeout:.0f}s "
+                        f"last_chunk={last_idx} file={last_file!r} "
+                        "(last_chunk 증가중이면 가설 C=타임아웃 과소, "
+                        "None/정체면 가설 A/B=프레임 미수신)"
+                    )
                     raise FetchFailure("timeout", f"fetch 타임아웃 ({timeout:.0f}s)")
                 with self._active_fetch_lock:
                     af = self._active_fetch or {}
@@ -2019,6 +2059,14 @@ class InfiniteClipboard:
         if success:
             chunk_index = data.get("chunk_index", 0)
             file_path = data.get("file_path", "")
+
+            # [diag-largefile] 가설 C — fetch timeout 시 마지막 수신 진행 상황 판별용.
+            # 로그는 timeout 지점에서만 남기고, 청크마다 상태만 갱신한다(대용량 로그 폭주 방지).
+            with self._active_fetch_lock:
+                af = self._active_fetch
+                if af and af.get("transfer_id") == transfer_id:
+                    af["last_chunk_index"] = chunk_index
+                    af["last_chunk_file"] = file_path
 
             # 10청크(~10MB)마다 체크포인트 갱신 (이어받기용)
             if chunk_index > 0 and chunk_index % 10 == 0:

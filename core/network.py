@@ -63,7 +63,25 @@ def _recv_all(sock: socket.socket, length: int) -> bytes:
     buf = bytearray(length)
     pos = 0
     while pos < length:
-        chunk = sock.recv(min(length - pos, 65536))
+        try:
+            chunk = sock.recv(min(length - pos, 65536))
+        except socket.timeout:
+            # [diag-largefile] 가설 A — mid-frame recv 타임아웃 desync.
+            # settimeout(30) 은 프레임 본문 도중에도 발동한다. pos>0(이미 일부
+            # 수신) 상태에서 타임아웃이 나면, 상위 _receive/_handle_client 의
+            # except socket.timeout 이 이 부분 프레임을 버리고 PING 을 끼워넣어
+            # 스트림이 desync 된다(남은 본문 → 다음 헤더 오독). 대용량일수록
+            # 프레임 수가 많아 이 스톨 기회가 누적된다.
+            # 동작은 그대로 — 진단 로그만 남기고 timeout 을 re-raise 한다.
+            # pos==0(프레임 사이 idle 대기 중 타임아웃)은 정상 keepalive 경로라
+            # 로그를 남기지 않는다.
+            if pos > 0:
+                logger.warning(
+                    "[diag-largefile] mid-frame recv 타임아웃 — 부분 수신 "
+                    f"{pos:,}/{length:,} bytes 후 스톨. 이 프레임은 상위에서 "
+                    "버려지고 스트림 desync 가능(가설 A)."
+                )
+            raise
         if not chunk:
             break
         buf[pos:pos + len(chunk)] = chunk
