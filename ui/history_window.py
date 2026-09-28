@@ -24,7 +24,7 @@ from ui import theme as t
 from ui.components import (
     load_icon, EmptyState, Badge, apply_window_icon,
     enable_mousewheel_scroll, bind_focus_ring, enable_tab_focus,
-    SecondaryButton,
+    SecondaryButton, add_tooltip, bind_ellipsis,
 )
 # 주의: 이 파일은 `from ui import theme as t` 로 `t` 를 theme 별칭으로 이미 쓴다.
 # i18n 번역 함수는 이름 충돌을 피하려고 `tr` 로 별칭 import 한다.
@@ -32,11 +32,17 @@ from ui.i18n import get_language, t as tr
 
 
 # 타입 → (아이콘명, 한국어 라벨, 컬러키)
+# A8(2026-09-28): 예전엔 재복사 불가한 image/files 아이콘이 민트(accent)로 강조되고
+# 클릭 가능한 text 는 dim 이라 강조가 반대였다 — 누를 수 있는 쪽을 밝게 한다.
 _TYPE_META = {
-    "text":  ("file-text", "텍스트", "dim"),
-    "image": ("image",     "이미지", "accent"),
-    "files": ("file",      "파일",   "accent"),
+    "text":  ("file-text", "텍스트", "text"),
+    "image": ("image",     "이미지", "dim"),
+    "files": ("file",      "파일",   "dim"),
 }
+
+# A4: 열린 창이 이력 파일 변경을 확인하는 주기 / 상대 시간 라벨 갱신 주기 (ms)
+_POLL_MS = 1000
+_ELAPSED_REFRESH_MS = 15000
 
 
 def _format_elapsed(timestamp: float, lang: str = "ko") -> str:
@@ -69,7 +75,9 @@ def _prepare_preview(entry: dict) -> str:
     if "\n" in preview:
         truncated = True
     # 2) 원본 content 가 preview 첫 줄보다 길면 잘린 것 (텍스트 타입 한정)
-    if isinstance(content, str):
+    # A5(2026-09-28): image/files 는 content 가 "[image]" 같은 표식이라 한국어
+    # preview "[이미지]" 보다 글자 수가 많아 가짜 "…" 가 붙었다 — 타입으로 한정한다.
+    if entry.get("type", "text") == "text" and isinstance(content, str):
         if len(content) > len(first_line) or "\n" in content:
             truncated = True
 
@@ -81,7 +89,8 @@ def _prepare_preview(entry: dict) -> str:
 
 
 class HistoryWindow(customtkinter.CTkToplevel):
-    def __init__(self, history_list: list, clipboard_manager, corrupted: bool = False, config=None):
+    def __init__(self, history_list: list, clipboard_manager, corrupted: bool = False,
+                 config=None, history_file=None):
         super().__init__()
 
         self.history_list = history_list
@@ -139,17 +148,85 @@ class HistoryWindow(customtkinter.CTkToplevel):
         self._scroll.pack(fill="both", expand=True, padx=t.SP[4], pady=(0, t.SP[4]))
 
         self._item_widgets: list = []
+        # A4(2026-09-28): 예전엔 연 시점 스냅샷이라 창을 열어둔 채 복사해도 새 항목이
+        # 안 뜨고 "방금" 이 영원히 "방금" 이었다(refresh() 호출처 0). 메인 프로세스가
+        # 원자적으로 다시 쓰는 이력 파일의 mtime 을 폴링해 바뀌면 다시 읽는다.
+        self._history_file = str(history_file) if history_file else None
+        self._file_sig = self._stat_sig()
+        # 삭제 요청은 메인이 0.5초 안에 반영 — 그 사이 다른 이유로 파일이 바뀌어
+        # 다시 읽으면 방금 지운 항목이 잠깐 되살아나므로, 반영될 때까지 걸러낸다.
+        self._pending_delete_keys: set = set()
+        self._time_labels: list = []
         self._render()
+        if self._history_file:
+            self.after(_POLL_MS, self._poll_history_file)
+        self.after(_ELAPSED_REFRESH_MS, self._refresh_elapsed_labels)
 
     def refresh(self, history_list: list) -> None:
         self.history_list = history_list
         self._count_badge.configure(text=str(len(history_list)))
         self._render()
 
+    # ── A4: 이력 파일 라이브 반영 ──────────────────────────────────────
+
+    def _stat_sig(self):
+        if not self._history_file:
+            return None
+        try:
+            st = os.stat(self._history_file)
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return None
+
+    def _poll_history_file(self) -> None:
+        try:
+            sig = self._stat_sig()
+            if sig != self._file_sig:
+                self._file_sig = sig
+                loaded = self._read_history_file()
+                if loaded is not None:
+                    self._apply_loaded(loaded)
+        except Exception:
+            pass
+        self.after(_POLL_MS, self._poll_history_file)
+
+    def _read_history_file(self):
+        """이력 파일을 읽는다. 읽기 실패/형식 이상이면 None — 화면을 비우지 않고 유지.
+
+        손상 판정·백업은 메인 프로세스(_load_clipboard_history_file) 몫이다.
+        """
+        try:
+            with open(self._history_file, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+        except FileNotFoundError:
+            return []
+        except (OSError, ValueError):
+            return None
+        if not isinstance(loaded, list):
+            return None
+        return [e for e in loaded if isinstance(e, dict)]
+
+    def _apply_loaded(self, loaded: list) -> None:
+        on_disk = {self._delete_key_for(e) for e in loaded}
+        # 파일에서 사라진 키는 삭제가 반영된 것 — 더 걸러낼 필요 없음
+        self._pending_delete_keys &= on_disk
+        visible = [e for e in loaded if self._delete_key_for(e) not in self._pending_delete_keys]
+        self.refresh(visible)
+
+    def _refresh_elapsed_labels(self) -> None:
+        """A4: "방금/N분 전" 라벨만 갱신(전체 재생성 없이 — hover/포커스 유지)."""
+        for label, ts in list(self._time_labels):
+            try:
+                label.configure(text=_format_elapsed(ts, self._lang))
+            except Exception:
+                pass
+        self.after(_ELAPSED_REFRESH_MS, self._refresh_elapsed_labels)
+
     def _render(self) -> None:
         for w in self._item_widgets:
             w.destroy()
         self._item_widgets.clear()
+        self._time_labels = []
 
         if not self.history_list:
             if self.corrupted:
@@ -224,6 +301,8 @@ class HistoryWindow(customtkinter.CTkToplevel):
     def _on_delete_click(self, entry: dict) -> None:
         """개별 삭제 — 로컬 목록/UI 즉시 갱신 + 메인 프로세스에 IPC 로 위임."""
         key = self._delete_key_for(entry)
+        if key is not None:
+            self._pending_delete_keys.add(key)
         try:
             self.history_list.remove(entry)
         except ValueError:
@@ -243,6 +322,7 @@ class HistoryWindow(customtkinter.CTkToplevel):
         ):
             return
         keys = [self._delete_key_for(e) for e in self.history_list if self._delete_key_for(e) is not None]
+        self._pending_delete_keys.update(keys)
         self.history_list.clear()
         self._count_badge.configure(text="0")
         self._render()
@@ -289,14 +369,17 @@ class HistoryWindow(customtkinter.CTkToplevel):
         # _on_click(재복사) 바인딩 그룹(widgets 리스트)에 넣지 않고 독립
         # command= 콜백만 쓴다 — 프레임 클릭과 충돌 없음.
         del_img = load_icon("circle-x", size=16, color="dim")
+        # A8(2026-09-28): 24px 는 앱 아이콘 버튼 규격(theme.BTN["icon"] 32px)보다
+        # 작고 이름(툴팁)도 없었다.
         del_btn = customtkinter.CTkButton(
             frame, text="" if del_img is not None else "×",
-            image=del_img, width=24, height=24,
+            image=del_img, width=t.BTN["icon"]["width"], height=t.BTN["icon"]["height"],
             corner_radius=t.RADIUS["sm"], fg_color="transparent",
             hover_color=t.signal_fail, text_color=t.spool_dim,
             command=lambda _entry=entry: self._on_delete_click(_entry),
         )
-        del_btn.pack(side="right", padx=(0, t.SP[2]))
+        add_tooltip(del_btn, tr("삭제", self._lang))
+        del_btn.pack(side="right", padx=(0, t.SP[1]))
 
         # 우: 타임스탬프
         time_lbl = customtkinter.CTkLabel(
@@ -307,6 +390,7 @@ class HistoryWindow(customtkinter.CTkToplevel):
             cursor=cursor,
         )
         time_lbl.pack(side="right", padx=(t.SP[2], t.SP[3]))
+        self._time_labels.append((time_lbl, timestamp))
 
         # 중: 미리보기 (원본이 더 긴 경우 " …" 덧붙여 잘림을 표시)
         # 재복사 불가 타입은 spool_label 로 dim 처리 — "클릭해도 되는 항목"과
@@ -320,6 +404,8 @@ class HistoryWindow(customtkinter.CTkToplevel):
             cursor=cursor,
         )
         preview_lbl.pack(side="left", fill="x", expand=True)
+        # A5: 긴 줄이 글자 중간에서 잘리고 끝의 "…" 가 화면 밖으로 사라지던 문제
+        bind_ellipsis(preview_lbl, preview_text)
 
         if not recopyable:
             return frame
@@ -446,7 +532,7 @@ if __name__ == "__main__":
             pass
 
     cm = ClipboardManager()
-    win = HistoryWindow(history, cm)
+    win = HistoryWindow(history, cm, history_file=history_file)
     win.after(150, win.focus_force)
     win.protocol("WM_DELETE_WINDOW", lambda: _close_all(win))
     root.mainloop()

@@ -40,6 +40,7 @@ from ui import theme as t
 # ═══════════════════════════════════════════════════════════════════════
 
 _icon_cache: dict[tuple[str, int, str], ctk.CTkImage] = {}
+_missing_icons: set[tuple[str, int, str]] = set()
 
 
 def enable_mac_clipboard_shortcuts(root) -> None:
@@ -218,6 +219,12 @@ def load_icon(name: str, size: int = 20, color: str = "text") -> Optional[ctk.CT
 
     path = t.icon_path(name, size=size, color=color)
     if not os.path.isfile(path):
+        # 2026-09-28 UX 검토 A2(함정 #44): 없는 size/color 조합은 호출부가 None 을
+        # 조용히 생략해 아이콘이 영영 안 보였다 — 최소한 로그엔 남긴다(키당 1회).
+        if key not in _missing_icons:
+            _missing_icons.add(key)
+            import logging
+            logging.getLogger(__name__).warning(f"아이콘 파일 없음: {path}")
         return None
 
     image = Image.open(path).convert("RGBA")
@@ -302,15 +309,23 @@ class FormRow(ctk.CTkFrame):
     """
 
     LABEL_WIDTH = 80
+    # 라벨 열 최대 폭 — 이보다 긴 라벨은 두 줄로 접어 입력 위젯 폭을 지킨다
+    LABEL_WIDTH_MAX = 110
 
-    def __init__(self, master, label: str, **kwargs):
+    def __init__(self, master, label: str, label_width: Optional[int] = None, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
+        # 2026-09-28 UX 검토 A7: 영어 라벨("Conflict Handling" 등)은 80px 를 넘어
+        # 라벨이 늘어나면서 그 행만 입력 열이 오른쪽으로 밀렸다 — 창이 모든 라벨의
+        # 최대 폭을 재서(measure_text_width) 같은 값을 넘기면 열이 맞춰진다.
+        width = label_width or self.LABEL_WIDTH
+        extra = {"wraplength": width, "justify": "left"} if label_width else {}
         ctk.CTkLabel(
             self, text=label,
             font=t.FONT_LABEL,
             text_color=t.spool_label,
             anchor="w",
-            width=self.LABEL_WIDTH,
+            width=width,
+            **extra,
         ).pack(side="left", padx=(0, t.SP[3]))
 
 
@@ -423,8 +438,17 @@ class Badge(ctk.CTkLabel):
 class EmptyState(ctk.CTkFrame):
     """빈 상태 — 아이콘(dim) + 제목 + 설명. 리스트 영역에 중앙 배치."""
 
-    def __init__(self, master, icon_name: str, title: str, desc: str = "", **kwargs):
+    def __init__(self, master, icon_name: str, title: str, desc: str = "",
+                 compact: bool = False, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
+
+        # compact: 여러 섹션이 한 창을 나눠 쓰는 곳(전송 창 "진행 중")용 한 줄 빈 상태 —
+        # 큰 아이콘+설명은 세로 ~130px 를 먹어 완료 목록 자리를 빼앗았다(2026-09-28 A1).
+        if compact:
+            ctk.CTkLabel(
+                self, text=title, font=t.FONT_META, text_color=t.spool_dim,
+            ).pack(pady=t.SP[2])
+            return
 
         img = load_icon(icon_name, size=32, color="dim")
         if img is not None:
@@ -590,3 +614,88 @@ def enable_tab_focus(widget) -> None:
     import tkinter as tk
     target = getattr(widget, "_canvas", widget)
     tk.Widget.configure(target, takefocus=1)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 레이아웃/텍스트 보정 (2026-09-28 UX 검토 A1/A5/A7)
+# ═══════════════════════════════════════════════════════════════════════
+
+def release_scrollable_min_height(frame: ctk.CTkScrollableFrame) -> None:
+    """CTkScrollableFrame 의 `height=` 인자가 200 미만이면 무효가 되는 문제를 푼다.
+
+    customtkinter 는 내부 세로 CTkScrollbar 를 height 없이 만들고 그 기본값이
+    200px 라, 프레임 최소 높이가 스크롤바에 묶인다(함정 #43 — transfer_window 의
+    height=120/160 이 둘 다 ~226px 로 렌더돼 완료 목록이 화면 밖으로 밀렸다).
+    스크롤바는 grid sticky="nsew" 로 캔버스 높이만큼 늘어나므로 요청 높이를 0 으로
+    내려도 표시엔 영향이 없다. `_parent_canvas` 직접 참조(enable_mousewheel_scroll)
+    와 같은 내부 속성 우회 패턴.
+    """
+    scrollbar = getattr(frame, "_scrollbar", None)
+    if scrollbar is None:
+        return
+    try:
+        scrollbar.configure(height=0)
+    except Exception:
+        pass
+
+
+def _measure(widget, font, text: str) -> int:
+    """Tk `font measure` — 명명 폰트를 만들지 않고 픽셀 폭만 잰다."""
+    return int(widget.tk.call("font", "measure", font, text))
+
+
+def measure_text_width(widget, font: tuple, texts) -> int:
+    """theme 폰트 튜플로 렌더했을 때 texts 중 가장 넓은 폭(스케일 전 단위).
+
+    CTk 는 (family, size) 를 (family, -size*scaling) 픽셀 크기로 바꿔 그리고 위젯
+    width 도 같은 배율로 키운다 — 그래서 음수(픽셀) size 로 재면 CTk width 인자와
+    같은 단위가 된다.
+    """
+    family, size = font[0], font[1]
+    rest = tuple(font[2:])
+    px_font = (family, -abs(int(size))) + rest
+    return max((_measure(widget, px_font, s) for s in texts), default=0)
+
+
+def bind_ellipsis(label: ctk.CTkLabel, text: str) -> None:
+    """라벨이 받은 폭에 맞게 text 를 "…" 로 줄여 표시한다(창 크기 변화에 재계산).
+
+    tkinter Label 은 넘치는 글자를 잘라낼 뿐 말줄임을 하지 않아, 긴 파일명/미리보기가
+    글자 중간에서 끊기고 끝의 "…" 도 화면 밖으로 사라졌다(A5). pack(fill="x",
+    expand=True) 로 남은 폭을 받는 라벨에 쓴다 — 배정 폭은 요청 폭과 무관하게 남은
+    공간이므로 글자를 줄여도 폭이 다시 바뀌지 않는다. 표시 문자열이 실제로 바뀔 때만
+    configure 해 <Configure> 가 되먹임 루프를 돌지 않게 한다.
+    """
+    import tkinter as tk
+    state = {"shown": None}
+
+    def _fit(_e=None):
+        inner = getattr(label, "_label", None)
+        if inner is None:
+            return
+        try:
+            avail = label.winfo_width() - 4
+            if avail <= 1:
+                return
+            font = inner.cget("font")
+            if _measure(inner, font, text) <= avail:
+                shown = text
+            else:
+                lo, hi = 0, len(text)
+                while lo < hi:
+                    mid = (lo + hi + 1) // 2
+                    if _measure(inner, font, text[:mid].rstrip() + "…") <= avail:
+                        lo = mid
+                    else:
+                        hi = mid - 1
+                shown = text[:lo].rstrip() + "…"
+            if shown != state["shown"]:
+                state["shown"] = shown
+                label.configure(text=shown)
+        except Exception:
+            pass
+
+    # CTkLabel.bind() 는 내부 canvas/label 로 위임된다(규칙 #12) — 배정 폭 변화는
+    # 바깥 프레임 자신의 <Configure> 로 받아야 하므로 tkinter.Misc.bind 를 직접 쓴다.
+    tk.Misc.bind(label, "<Configure>", _fit, "+")
+    label.after_idle(_fit)

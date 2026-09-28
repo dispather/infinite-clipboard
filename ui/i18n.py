@@ -44,8 +44,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "충돌 처리": "Conflict Handling",
         "덮어쓰기": "Overwrite",
         "건너뛰기": "Skip",
-        "시점 추가": "Add Timestamp",
-        "번호 추가": "Add Number",
+        # 4분할 버튼 폭에 맞춘 짧은 표기(2026-09-28 A7 — "Add Timestamp" 는 잘렸다)
+        "시점 추가": "Timestamp",
+        "번호 추가": "Number",
         "임시 정리": "Temp Cleanup",
         "시간 후": "hours",
         "지금 정리": "Clean Now",
@@ -87,6 +88,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "이력이 비어 있어요": "History is empty",
         "어느 PC에서든 복사하면 여기 쌓입니다": "Copy on any PC and it shows up here",
         "전체 지우기": "Clear all",
+        "삭제": "Delete",
         "클립보드 히스토리를 모두 지울까요? 되돌릴 수 없습니다.": (
             "Clear all clipboard history? This cannot be undone."
         ),

@@ -28,6 +28,7 @@ from ui import theme as t
 from ui.components import (
     load_icon, EmptyState, Badge, apply_window_icon,
     enable_mousewheel_scroll, add_tooltip,
+    release_scrollable_min_height, bind_ellipsis,
 )
 # 주의: 이 파일은 theme 를 `t` 로 alias 하므로(위) i18n 의 번역 함수는
 # `tr` 로 받아 충돌을 피한다. (get_language 는 config 없으면 OS 로케일 폴백)
@@ -121,6 +122,8 @@ class TransferWindow(customtkinter.CTkToplevel):
             scrollbar_button_color=t.relay_raised,
             height=120,
         )
+        # A1(2026-09-28, 함정 #43): height=120 이 스크롤바 기본 200px 에 묶여 무효였다.
+        release_scrollable_min_height(self._receive_frame)
         self._receive_frame.pack(fill="x", padx=t.SP[4], pady=(0, t.SP[3]))
         # 받을 항목 0 이면 섹션 자체를 숨긴다 (아래 _poll_state 가 토글)
         self._recv_bar.pack_forget()
@@ -144,17 +147,20 @@ class TransferWindow(customtkinter.CTkToplevel):
             corner_radius=t.CARD["radius"],
             border_color=t.whisper_line, border_width=1,
             scrollbar_button_color=t.relay_raised,
-            height=160,
+            # 진행 중 행 1개(~88px) 기준 — 단일 active invariant 라 동시에 최대 2개
+            # (송신 1 + 수신 1), 넘치면 스크롤. 예전 160 은 실제론 ~226px 였다(A1).
+            height=96,
         )
+        release_scrollable_min_height(self._active_frame)  # A1: height=160 무효 해제
         self._active_frame.pack(fill="x", padx=t.SP[4], pady=(0, t.SP[3]))
 
         self._active_empty = EmptyState(
             self._active_frame,
             icon_name="inbox",
             title=tr("진행 중인 전송이 없어요", self._lang),
-            desc=tr("파일을 다른 PC에서 복사하면 여기 표시됩니다", self._lang),
+            compact=True,
         )
-        self._active_empty.pack(pady=t.SP[4])
+        self._active_empty.pack(pady=t.SP[2])
 
         # ── 완료 섹션 ──
         comp_bar = customtkinter.CTkFrame(self, fg_color="transparent")
@@ -308,16 +314,20 @@ class TransferWindow(customtkinter.CTkToplevel):
             customtkinter.CTkLabel(row1, text="", image=dir_img).pack(
                 side="left", padx=(0, t.SP[2] - 2)
             )
-        customtkinter.CTkLabel(
+        name_lbl = customtkinter.CTkLabel(
             row1, text=filename,
             font=t.FONT_BODY_BOLD, text_color=t.terminal_text, anchor="w",
-        ).pack(side="left", fill="x", expand=True)
+        )
 
         # v2.2.1 B2: 취소 버튼 (오른쪽 끝)
         # Medium #7 (2026-07-10 감사): 24x24 는 앱 내 다른 아이콘 버튼(32x32,
         # theme.BTN["icon"])보다도 작았다 — 클릭 영역을 그 규격에 맞춤.
+        # A8(2026-09-28): 이 버튼만 글자 "X" 였다 — 받기 [무시]·이력 삭제와 같은
+        # circle-x 아이콘으로 통일(아이콘 로드 실패 시에만 글자 폴백).
+        cancel_img = load_icon("circle-x", size=16, color="dim")
         cancel_btn = customtkinter.CTkButton(
-            row1, text="X", width=32, height=32,
+            row1, text="" if cancel_img is not None else "X",
+            image=cancel_img, width=32, height=32,
             corner_radius=t.RADIUS["sm"],
             fg_color="transparent",
             hover_color=t.signal_fail,
@@ -332,6 +342,9 @@ class TransferWindow(customtkinter.CTkToplevel):
             row1, text=_format_size(total_size),
             font=t.FONT_META, text_color=t.spool_dim,
         ).pack(side="right")
+        # 오른쪽 요소를 먼저 배치한 뒤 파일명이 남은 폭을 받는다(A5 말줄임 전제)
+        name_lbl.pack(side="left", fill="x", expand=True)
+        bind_ellipsis(name_lbl, filename)
 
         # 2행: progress bar
         progress_bar = customtkinter.CTkProgressBar(
@@ -404,7 +417,7 @@ class TransferWindow(customtkinter.CTkToplevel):
 
         # UI 즉시 피드백
         w["cancelling"] = True
-        w["cancel_btn"].configure(state="disabled", text="...")
+        w["cancel_btn"].configure(state="disabled")
         w["speed_label"].configure(text=tr("취소 중...", self._lang))
         w["eta_label"].configure(text="")
 
@@ -447,15 +460,20 @@ class TransferWindow(customtkinter.CTkToplevel):
             customtkinter.CTkLabel(row, text="", image=dl_img).pack(
                 side="left", padx=(0, t.SP[2] - 2)
             )
-        customtkinter.CTkLabel(
+        name_lbl = customtkinter.CTkLabel(
             row, text=name, font=t.FONT_BODY_BOLD,
             text_color=t.terminal_text, anchor="w",
-        ).pack(side="left", fill="x", expand=True)
+        )
 
+        # A8(2026-09-28): 이 행의 주 액션인데 회색이라 [무시]와 구분이 약했다 —
+        # 앱 공통 주 액션 색(theme.BTN["primary"])을 쓴다.
         recv_btn = customtkinter.CTkButton(
             row, text=tr("받기", self._lang), width=52, height=26,
-            corner_radius=t.RADIUS["sm"], fg_color=t.relay_raised,
-            hover_color=t.signal_ok, text_color=t.terminal_text, font=t.FONT_META,
+            corner_radius=t.RADIUS["sm"], fg_color=t.BTN["primary"]["fg_color"],
+            hover_color=t.BTN["primary"]["hover_color"],
+            text_color=t.BTN["primary"]["text_color"],
+            text_color_disabled=t.spool_label,
+            font=(t.FAMILY, 10, "bold"),
             command=lambda o=oid: self._on_receive_click(o),
         )
         recv_btn.pack(side="right", padx=(t.SP[1], 0))
@@ -470,12 +488,15 @@ class TransferWindow(customtkinter.CTkToplevel):
             hover_color=t.signal_fail, text_color=t.spool_dim,
             command=lambda o=oid: self._on_ignore_click(o),
         )
+        add_tooltip(ignore_btn, tr("무시", self._lang))
         ignore_btn.pack(side="right", padx=(t.SP[1], 0))
 
         customtkinter.CTkLabel(
             row, text=_format_size(total_size),
             font=t.FONT_META, text_color=t.spool_dim,
         ).pack(side="right", padx=(0, t.SP[2]))
+        name_lbl.pack(side="left", fill="x", expand=True)
+        bind_ellipsis(name_lbl, name)
 
         reason_label = customtkinter.CTkLabel(
             frame, text="", font=t.FONT_META, text_color=t.signal_fail, anchor="w",
@@ -502,7 +523,10 @@ class TransferWindow(customtkinter.CTkToplevel):
         w["requested"] = False
         w["last_failure_at"] = failure.get("failed_at")
         try:
-            w["btn"].configure(text=tr("재시도", self._lang), state="normal")
+            w["btn"].configure(
+                text=tr("재시도", self._lang), state="normal",
+                fg_color=t.BTN["primary"]["fg_color"],
+            )
         except Exception:
             pass
         label = w.get("reason_label")
@@ -558,7 +582,10 @@ class TransferWindow(customtkinter.CTkToplevel):
             return
         # 즉시 UI 피드백 (완료되면 main 이 state 에서 제거 → 위젯 사라짐)
         w["requested"] = True
-        w["btn"].configure(state="disabled", text=tr("받는 중", self._lang))
+        # 비활성 글자색(spool_label)이 민트 배경 위에선 대비가 낮아 중립 표면으로 바꾼다
+        w["btn"].configure(
+            state="disabled", text=tr("받는 중", self._lang), fg_color=t.relay_raised,
+        )
         label = w.get("reason_label")
         if label is not None and label.winfo_ismapped():
             try:
@@ -630,7 +657,7 @@ class TransferWindow(customtkinter.CTkToplevel):
         if w:
             w["frame"].destroy()
         if not self._active_widgets:
-            self._active_empty.pack(pady=t.SP[4])
+            self._active_empty.pack(pady=t.SP[2])
 
     # ── 완료 위젯 ──────────────────────────────────────────────────────
 
@@ -661,7 +688,9 @@ class TransferWindow(customtkinter.CTkToplevel):
             customtkinter.CTkLabel(frame, text="", image=check_img).pack(
                 side="left", padx=(t.SP[3], t.SP[1])
             )
-        arrow_img = load_icon(dir_arrow, size=14, color="dim")
+        # A2(2026-09-28, 함정 #44): size=14 는 에셋이 없어 이 화살표가 도입 이래
+        # 한 번도 안 보였다 — 사전 렌더된 16 을 쓴다.
+        arrow_img = load_icon(dir_arrow, size=16, color="dim")
         if arrow_img is not None:
             customtkinter.CTkLabel(frame, text="", image=arrow_img).pack(
                 side="left", padx=(0, t.SP[2] - 2)
@@ -685,11 +714,13 @@ class TransferWindow(customtkinter.CTkToplevel):
             self._open_folder_btn.pack(side="right")
             self._open_folder_btn_shown = True
 
-        # 중앙: 파일명
-        customtkinter.CTkLabel(
+        # 중앙: 파일명 (A5: 남은 폭에 맞춰 "…" 말줄임)
+        name_lbl = customtkinter.CTkLabel(
             frame, text=filename,
             font=t.FONT_BODY, text_color=t.terminal_text, anchor="w",
-        ).pack(side="left", fill="x", expand=True)
+        )
+        name_lbl.pack(side="left", fill="x", expand=True)
+        bind_ellipsis(name_lbl, filename)
 
 
 if __name__ == "__main__":

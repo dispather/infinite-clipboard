@@ -30,6 +30,10 @@ def gui_root():
     """모듈 전체가 공유하는 단일 CTk 루트 (다중 루트 pyimage 캐시 깨짐 회피)."""
     import customtkinter
     customtkinter.set_appearance_mode("System")
+    # 앞 모듈의 (이미 파괴된) 루트에 묶인 CTkImage 가 캐시에 남아 있으면
+    # 같은 아이콘을 쓰는 순간 'pyimage doesn't exist' — 모듈마다 비우고 시작.
+    from ui import components as _components
+    _components._icon_cache.clear()
     try:
         root = customtkinter.CTk()
     except Exception as e:

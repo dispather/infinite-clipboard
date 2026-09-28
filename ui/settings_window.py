@@ -31,6 +31,7 @@ from ui.components import (
     SectionCard, SectionHeader, FormRow,
     PrimaryButton, SecondaryButton, IconButton, Badge,
     load_icon, apply_window_icon, enable_mousewheel_scroll, bind_focus_ring,
+    measure_text_width,
 )
 
 customtkinter.set_appearance_mode("dark")
@@ -95,6 +96,13 @@ class SettingsWindow(customtkinter.CTkToplevel):
     }
     _POLICY_TO_EN = {v: k for k, v in _POLICY_TO_KR.items()}
     _POLICY_ORDER = ["덮어쓰기", "건너뛰기", "시점 추가", "번호 추가"]
+    # A7(2026-09-28): 폼 라벨 전체(한국어 원문 키). 가장 넓은 번역 라벨 폭으로
+    # 모든 FormRow 의 라벨 열을 맞춘다 — 영어는 80px 고정을 넘어 행마다 입력 열이 어긋났다.
+    _FORM_LABELS = ["모드", "호스트", "포트", "노출", "인증 키", "이름", "저장 경로",
+                    "충돌 처리", "임시 정리", "자동 수신 문턱", "언어"]
+    # 설명 캡션 줄바꿈 폭(기본 창 500px 의 카드 안쪽 폭 기준) — 예전엔 wraplength 가
+    # 없어 긴 영어 캡션이 오른쪽에서 잘렸다("…Transfers windo").
+    _CAPTION_WRAP = 380
 
     def __init__(self, config: AppConfig, on_save_callback=None):
         super().__init__()
@@ -125,6 +133,13 @@ class SettingsWindow(customtkinter.CTkToplevel):
         self.attributes("-topmost", True)
         self.configure(fg_color=t.tray_bg)
         apply_window_icon(self)
+        self._label_width = min(
+            FormRow.LABEL_WIDTH_MAX,
+            max(
+                FormRow.LABEL_WIDTH,
+                measure_text_width(self, t.FONT_LABEL, [tr(k, self._lang) for k in self._FORM_LABELS]) + 4,
+            ),
+        )
 
         # ── 하단 버튼 바 (스크롤 바깥 고정) ─────────────────────────
         # 스크롤 영역 안에 넣으면 사용자가 저장 버튼을 찾으려 스크롤해야 해서 UX 불리.
@@ -232,7 +247,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
         # 모드 — 표시값은 번역, 내부 로직은 _MODE_TO_KR/EN(한국어 키) 유지
         initial_mode = self._MODE_TO_KR.get(config.mode, "클라이언트")
         self._mode_var = customtkinter.StringVar(value=tr(initial_mode, self._lang))
-        row_mode = FormRow(inner, tr("모드", self._lang))
+        row_mode = FormRow(inner, tr("모드", self._lang), label_width=self._label_width)
         self._mode_seg = customtkinter.CTkSegmentedButton(
             row_mode, values=[tr("서버", self._lang), tr("클라이언트", self._lang)],
             variable=self._mode_var, command=self._on_mode_changed,
@@ -249,7 +264,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
         row_mode.pack(fill="x", pady=(0, t.SP[2]))
 
         # 호스트 (클라이언트 모드)
-        row_host = FormRow(inner, tr("호스트", self._lang))
+        row_host = FormRow(inner, tr("호스트", self._lang), label_width=self._label_width)
         self._host_entry = self._make_entry(row_host)
         self._host_entry.pack(side="left", fill="x", expand=True, padx=(0, t.SP[1]))
         self._host_entry.insert(0, config.server_host)
@@ -266,7 +281,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
         row_host.pack(fill="x", pady=(0, t.SP[2]))
 
         # 포트
-        row_port = FormRow(inner, tr("포트", self._lang))
+        row_port = FormRow(inner, tr("포트", self._lang), label_width=self._label_width)
         self._port_entry = self._make_entry(row_port)
         self._port_entry.pack(side="left", fill="x", expand=True)
         self._port_entry.insert(0, str(config.port))
@@ -279,7 +294,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
         # "" → Tailscale 자동 (미감지 시 0.0.0.0 fallback) / "0.0.0.0" → 모든 인터페이스
         initial_bind = self._BIND_TO_KR.get(config.bind_address, "Tailscale 자동")
         self._bind_var = customtkinter.StringVar(value=tr(initial_bind, self._lang))
-        row_bind = FormRow(inner, tr("노출", self._lang))
+        row_bind = FormRow(inner, tr("노출", self._lang), label_width=self._label_width)
         self._bind_seg = customtkinter.CTkSegmentedButton(
             row_bind, values=[tr("Tailscale 자동", self._lang), tr("모든 인터페이스", self._lang)],
             variable=self._bind_var,
@@ -301,6 +316,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
         self._bind_warning = customtkinter.CTkLabel(
             inner, text=tr("⚠ 프로토콜은 평문 — 같은 물리 LAN 의 제3자가 스니핑 가능", self._lang),
             font=t.FONT_META, text_color=t.signal_wait, anchor="w",
+            wraplength=self._CAPTION_WRAP, justify="left",
         )
         self._update_bind_warning(tr(initial_bind, self._lang))
 
@@ -309,7 +325,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
         SectionHeader(inner, title=tr("인증", self._lang)).pack(fill="x", pady=(0, t.SP[3]))
 
         # 인증 키 + 눈 아이콘 버튼
-        row_key = FormRow(inner, tr("인증 키", self._lang))
+        row_key = FormRow(inner, tr("인증 키", self._lang), label_width=self._label_width)
         self._auth_entry = self._make_entry(row_key, font=t.FONT_MONO)
         self._auth_entry.pack(side="left", fill="x", expand=True, padx=(0, t.SP[1]))
         self._auth_entry.insert(0, config.auth_key)
@@ -347,6 +363,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
         customtkinter.CTkLabel(
             inner, text=tr("인증에는 영향 없음 — HMAC 은 항상 필수", self._lang),
             font=t.FONT_META, text_color=t.spool_dim, anchor="w",
+            wraplength=self._CAPTION_WRAP, justify="left",
         ).pack(fill="x", pady=(0, t.SP[2]))
 
     def _build_section_device(self, parent, config):
@@ -354,14 +371,14 @@ class SettingsWindow(customtkinter.CTkToplevel):
         SectionHeader(inner, title=tr("기기", self._lang)).pack(fill="x", pady=(0, t.SP[3]))
 
         # 이름
-        row_name = FormRow(inner, tr("이름", self._lang))
+        row_name = FormRow(inner, tr("이름", self._lang), label_width=self._label_width)
         self._name_entry = self._make_entry(row_name)
         self._name_entry.pack(side="left", fill="x", expand=True)
         self._name_entry.insert(0, config.device_name)
         row_name.pack(fill="x", pady=(0, t.SP[2]))
 
         # 저장 경로 + 폴더 아이콘 버튼
-        row_path = FormRow(inner, tr("저장 경로", self._lang))
+        row_path = FormRow(inner, tr("저장 경로", self._lang), label_width=self._label_width)
         self._path_entry = self._make_entry(row_path)
         self._path_entry.pack(side="left", fill="x", expand=True, padx=(0, t.SP[1]))
         self._path_entry.insert(0, config.download_path)
@@ -376,7 +393,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
         # SHA-256 dedup 이 우선 적용되어 같은 파일은 정책 무관 자동 skip.
         initial_policy = self._POLICY_TO_KR.get(config.file_conflict_policy, "번호 추가")
         self._policy_var = customtkinter.StringVar(value=tr(initial_policy, self._lang))
-        row_policy = FormRow(inner, tr("충돌 처리", self._lang))
+        row_policy = FormRow(inner, tr("충돌 처리", self._lang), label_width=self._label_width)
         self._policy_seg = customtkinter.CTkSegmentedButton(
             row_policy,
             values=[tr(p, self._lang) for p in self._POLICY_ORDER],
@@ -394,7 +411,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
         row_policy.pack(fill="x", pady=(0, t.SP[2]))
 
         # v2.3 audit P2: staging TTL + 즉시 정리 버튼.
-        row_ttl = FormRow(inner, tr("임시 정리", self._lang))
+        row_ttl = FormRow(inner, tr("임시 정리", self._lang), label_width=self._label_width)
         self._ttl_entry = self._make_entry(row_ttl, font=t.FONT_MONO)
         self._ttl_entry.configure(width=70)
         self._ttl_entry.pack(side="left", padx=(0, t.SP[1]))
@@ -435,6 +452,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
         customtkinter.CTkLabel(
             inner, text=tr("켜면 붙여넣기 시 자동 수신, 끄면 전송창 [받기] 버튼으로만 수신", self._lang),
             font=t.FONT_META, text_color=t.spool_dim, anchor="w",
+            wraplength=self._CAPTION_WRAP, justify="left",
         ).pack(fill="x", pady=(0, t.SP[2]))
         if platform.system() == "Darwin":
             # 2026-07-12 함정 #40: macOS 는 진짜 paste 와 Finder 자동 peek 을 구분할
@@ -448,13 +466,13 @@ class SettingsWindow(customtkinter.CTkToplevel):
                     "아래 문턱 미만 파일은 자동 수신됩니다 — macOS API 제약(플랫폼 한계)",
                     self._lang,
                 ),
-                font=t.FONT_META, text_color=t.signal_wait, anchor="w", wraplength=380,
-                justify="left",
+                font=t.FONT_META, text_color=t.signal_wait, anchor="w",
+                wraplength=self._CAPTION_WRAP, justify="left",
             ).pack(fill="x", pady=(0, t.SP[2]))
 
             # 2026-07-12 mac-studio 실사용 피드백: 하드코딩 10MB 가 너무 자주 걸려
             # 불편하다는 의견 반영 — 사용자가 직접 문턱을 정하게 노출(기본 100MB).
-            row_lazy_threshold = FormRow(inner, tr("자동 수신 문턱", self._lang))
+            row_lazy_threshold = FormRow(inner, tr("자동 수신 문턱", self._lang), label_width=self._label_width)
             self._lazy_threshold_entry = self._make_entry(row_lazy_threshold, font=t.FONT_MONO)
             self._lazy_threshold_entry.configure(width=70)
             self._lazy_threshold_entry.pack(side="left", padx=(0, t.SP[1]))
@@ -467,7 +485,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
 
         # 언어 선택 — 재시작 시 전 창/트레이/알림에 적용. 언어명(autonym)은
         # 현재 언어와 무관하게 항상 그대로 표기하므로 tr() 로 감싸지 않는다.
-        row_lang = FormRow(inner, tr("언어", self._lang))
+        row_lang = FormRow(inner, tr("언어", self._lang), label_width=self._label_width)
         self._lang_var = customtkinter.StringVar(
             value="English" if self._lang == "en" else "한국어"
         )
@@ -485,6 +503,7 @@ class SettingsWindow(customtkinter.CTkToplevel):
         customtkinter.CTkLabel(
             inner, text=tr("재시작 후 적용됩니다", self._lang),
             font=t.FONT_META, text_color=t.spool_dim, anchor="w",
+            wraplength=self._CAPTION_WRAP, justify="left",
         ).pack(fill="x", pady=(t.SP[1], 0))
 
     def _build_section_autostart(self, parent):

@@ -122,3 +122,25 @@ def test_load_history_wrong_shape_treated_as_corrupted(tmp_path):
 
     assert history == []
     assert corrupted is True
+
+
+# ── 2026-09-28 UX 검토 A4: 같은 텍스트 재복사 시 중복 대신 맨 위로 ─────────
+
+def test_same_text_moves_to_top_instead_of_duplicating(tmp_path, monkeypatch):
+    """이력 창이 파일을 실시간 반영하게 되면서(A4), 이력 항목 클릭(재복사) →
+    모니터가 새 복사로 감지 → 같은 텍스트가 맨 위에 또 쌓이는 게 눈앞에 보이게 됐다."""
+    app = _make_app(history_size=50)
+    monkeypatch.setattr(app, "_get_history_file", lambda: str(tmp_path / "h.json"))
+    app._add_to_history("text", "alpha")
+    app._add_to_history("text", "beta")
+    app._add_to_history("text", "alpha")
+    texts = [e["content"] for e in app.clipboard_history]
+    assert texts == ["alpha", "beta"], texts
+
+
+def test_non_text_entries_are_not_deduplicated(tmp_path, monkeypatch):
+    app = _make_app(history_size=50)
+    monkeypatch.setattr(app, "_get_history_file", lambda: str(tmp_path / "h.json"))
+    app._add_to_history("image", "base64data")
+    app._add_to_history("image", "base64data")
+    assert len(app.clipboard_history) == 2

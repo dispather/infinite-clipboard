@@ -730,6 +730,15 @@ class InfiniteClipboard:
         # 안 그러면 두 insert 사이에 length 체크가 끼어들어 trim 이 틀어지거나,
         # 파일 쓰기 도중 리스트가 바뀌어 json.dump 가 일관되지 않은 스냅샷을 볼 수 있다.
         with self._history_lock:
+            # 2026-09-28 UX 검토 A4: 이력 창이 이제 파일 변경을 실시간 반영하므로,
+            # 이력 항목 클릭(재복사) → 모니터가 그 값을 새 복사로 감지 → 같은 텍스트가
+            # 맨 위에 중복으로 쌓이는 게 눈앞에서 보이게 됐다. 같은 텍스트는 새로 쌓지
+            # 않고 기존 항목을 지워 맨 위로 올린다(최근 사용 순서 유지).
+            if content_type == "text":
+                self.clipboard_history = [
+                    e for e in self.clipboard_history
+                    if not (e.get("type") == "text" and e.get("content") == content)
+                ]
             self.clipboard_history.insert(0, entry)
             if len(self.clipboard_history) > self.config.clipboard_history_size:
                 self.clipboard_history.pop()
@@ -1700,9 +1709,9 @@ class InfiniteClipboard:
     def _get_history_delete_request_file():
         """HistoryWindow 의 삭제/전체지우기 버튼이 timestamp append 하는 파일.
 
-        2026-07-12 mac-studio 기능 요청: HistoryWindow 는 별도 프로세스의 스냅샷
-        뷰(시작 시 1회 로드, 실시간 폴링 없음)라 clipboard_history.json 을 직접
-        수정하면 메인 프로세스의 인메모리 self.clipboard_history 가 다음 클립보드
+        2026-07-12 mac-studio 기능 요청: HistoryWindow 는 별도 프로세스의 읽기 전용
+        뷰(2026-09-28 A4 부터 파일 mtime 을 폴링해 변경을 반영)라 clipboard_history.json
+        을 직접 수정하면 메인 프로세스의 인메모리 self.clipboard_history 가 다음 클립보드
         변경 시 _save_history_file() 로 덮어써서 삭제가 무효화된다. 그래서 cancel_
         requests.json/receive_requests.json 과 동일한 IPC 로 메인 프로세스에 위임.
         """
@@ -2676,7 +2685,8 @@ def _run_window_only(window_type: str) -> None:
         cm = ClipboardManager()
         # 설정된 언어를 창에 전달 (자동교정 저장은 메인 프로세스 몫 — persist_corrections=False)
         config = load_config(persist_corrections=False)
-        win = HistoryWindow(history, cm, corrupted=corrupted, config=config)
+        win = HistoryWindow(history, cm, corrupted=corrupted, config=config,
+                            history_file=history_file)
     elif window_type == "transfers":
         from config import _get_config_dir, load_config
         from ui.transfer_window import TransferWindow

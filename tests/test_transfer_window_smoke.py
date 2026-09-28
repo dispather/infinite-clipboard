@@ -36,6 +36,10 @@ def gui_root():
     """모듈 전체가 공유하는 단일 CTk 루트 (다중 루트 pyimage 깨짐 회피)."""
     import customtkinter
     customtkinter.set_appearance_mode("System")
+    # 앞 모듈의 (이미 파괴된) 루트에 묶인 CTkImage 가 캐시에 남아 있으면
+    # 같은 아이콘을 쓰는 순간 'pyimage doesn't exist' — 모듈마다 비우고 시작.
+    from ui import components as _components
+    _components._icon_cache.clear()
     try:
         root = customtkinter.CTk()
     except Exception as e:  # Tk/디스플레이 초기화 실패
@@ -287,5 +291,64 @@ def test_open_folder_header_button_hidden_when_no_receive_flow_completed(gui_roo
             "받기 버튼 완료 항목이 없는데 '폴더 열기' 버튼이 보임 — download_path 와 "
             "무관한 lazy-paste 사용자에게 오해를 줌"
         )
+    finally:
+        win.destroy()
+
+
+# ── 2026-09-28 UX 검토 A1: 받기 항목이 있어도 완료 목록이 창 안에 보여야 함 ──
+
+def test_completed_list_stays_inside_window_with_receivables(gui_root, tmp_path):
+    """함정 #43 회귀: CTkScrollableFrame(height=120/160) 이 스크롤바 기본 200px 에
+    묶여 무효라, 받기 2건 + 진행 1건이면 540x640 창에서 완료 목록이 통째로 밀려났다.
+    winfo_ismapped 는 창 밖으로 밀린 위젯도 True 라, 창 좌표 대비 실제 위치로 본다."""
+    state_file = tmp_path / "transfer_state.json"
+    now = time.time()
+    state = {
+        "active": {str(uuid.uuid4()): {
+            "filename": "big.zip", "total_size": 100, "bytes_transferred": 40,
+            "direction": "receive", "start_time": now - 5,
+        }},
+        "completed": [
+            {"transfer_id": str(uuid.uuid4()), "filename": f"f{i}.txt", "total_size": 10,
+             "direction": "receive", "completed_at": now - i}
+            for i in range(5)
+        ],
+        "receivable": [_make_receivable("a.bin", 10), _make_receivable("b.bin", 20)],
+    }
+    with open(state_file, "w", encoding="utf-8") as f:
+        json.dump(state, f)
+    win = _make_window(gui_root, state_file)
+    try:
+        win.geometry("540x640")
+        for _ in range(5):
+            win.update()
+        outer = win._completed_frame._parent_frame  # CTkScrollableFrame 의 실제 배치 프레임
+        win_bottom = win.winfo_rooty() + win.winfo_height()
+        visible = win_bottom - outer.winfo_rooty()
+        assert visible >= 100, (
+            f"완료 목록이 창 안에 {visible}px 만 보임(창 하단 {win_bottom}, "
+            f"목록 상단 {outer.winfo_rooty()}) — 함정 #43 회귀"
+        )
+    finally:
+        win.destroy()
+
+
+def test_completed_row_shows_direction_arrow(gui_root, tmp_path):
+    """A2 회귀: size=14 아이콘이 없어 완료 행의 방향 화살표가 한 번도 안 보였다."""
+    import customtkinter
+    state_file = tmp_path / "transfer_state.json"
+    _write_state(state_file, [], completed=[{
+        "transfer_id": str(uuid.uuid4()), "filename": "sent.txt", "total_size": 1,
+        "direction": "send", "completed_at": time.time(),
+    }])
+    win = _make_window(gui_root, state_file)
+    try:
+        row = _find_completed_row(win._completed_frame, "sent.txt")
+        assert row is not None
+        images = [
+            c for c in row.winfo_children()
+            if isinstance(c, customtkinter.CTkLabel) and c.cget("image") is not None
+        ]
+        assert len(images) == 2, f"체크+방향 아이콘 2개 기대, 실제 {len(images)}개"
     finally:
         win.destroy()
