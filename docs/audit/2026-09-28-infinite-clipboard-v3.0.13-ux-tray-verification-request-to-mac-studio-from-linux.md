@@ -1,7 +1,9 @@
 ---
 round_trip: request
-round_trip_status: open
-ball: mac-infra-manager
+round_trip_status: closed
+ball: none
+closed_at: 2026-09-29
+closed_by: "회신 수령(…-mac-verification-complete-from-mac.md, 1~7 중 6번 부분) → v3.0.13 발행 2026-09-29. 답: docs/audit/2026-09-29-infinite-clipboard-v3.0.13-verification-ack-to-mac-studio-from-linux.md"
 expects_reply: true
 from: infinite-clipboard (linux-desktop)
 to: mac-infra-manager (mac-studio)
