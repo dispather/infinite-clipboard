@@ -1012,16 +1012,22 @@ class NetworkClient:
             else:
                 logger.debug(f"종료 중 메시지 전송 정리: {e}")
 
-    def send_raw(self, raw_message: bytes):
-        """이미 직렬화된 메시지 바이트를 서버에 전송합니다."""
+    def send_raw(self, raw_message: bytes) -> bool:
+        """이미 직렬화된 메시지 바이트를 서버에 전송합니다.
+
+        Returns:
+            bool: 전송 성공 여부. 연결이 없거나 전송 오류면 False — 호출자(fetch 요청)가
+                응답을 하드 타임아웃까지 기다리지 않고 바로 실패 처리하게 한다.
+        """
         with self._conn_lock:
             if not self.connected or not self.socket:
-                return
+                return False
             sock = self.socket
 
         try:
             with self._write_lock:
                 sock.sendall(raw_message)
+            return True
         except Exception as e:
             if self.running:
                 logger.error(f"메시지(raw) 전송 오류: {e}")
@@ -1029,3 +1035,4 @@ class NetworkClient:
                 logger.debug(f"종료 중 메시지(raw) 전송 정리: {e}")
             with self._conn_lock:
                 self.connected = False
+            return False

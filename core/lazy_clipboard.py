@@ -37,6 +37,7 @@ paste 는 raw 바이트가 아니라 다음을 요구한다 (백엔드 구현 �
 import logging
 import os
 import platform
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
@@ -77,6 +78,80 @@ class FetchedContent:
 FetchCallback = Callable[[str], FetchedContent]
 
 
+class OwnerThreadBusy(Exception):
+    """OwnerThreadCall 이 제한 시간 안에 시작되지 못해 취소됨 (소유 스레드가 바쁨)."""
+
+
+class OwnerThreadCall:
+    """OS 이벤트 루프를 소유한 스레드에 맡긴 호출 1건 — 제한 대기 + 취소 (함정 #46).
+
+    register_offer 는 main 의 네트워크 수신 스레드에서 불리고, 실제 등록은 OS 이벤트
+    루프 소유 스레드(macOS=메인 run loop)가 한다. 그 스레드는 paste 콜백 안에서 네트워크
+    fetch 를 동기로 기다릴 수 있다(Rec 2). 호출 스레드가 결과를 무기한 기다리면
+    «네트워크 스레드 → 소유 스레드 → 네트워크 스레드» 순환 대기가 되고, fetch 가 기다리는
+    청크를 읽을 스레드가 없어 fetch 타임아웃(최대 600s)까지 교착한다.
+
+    그래서 `wait()` 는 timeout 까지만 기다리고, 그 안에 소유 스레드가 집지 못한 호출은
+    취소한다 — 취소하지 않으면 나중에 실행돼 «실패 보고(받기 모드) + 뒤늦은 클립보드
+    가로채기» 이중 상태가 된다. 이미 실행 중(running)이면 끝날 때까지 기다려 실제 결과를
+    돌려준다(진행 중인 등록을 실패로 보고해도 같은 이중 상태).
+
+    상태: pending → running → done, 또는 pending → cancelled.
+    사용: 호출 스레드가 만들고 → 소유 스레드에 `run` 을 게시 → 호출 스레드가 `wait`.
+    """
+
+    PENDING = "pending"
+    RUNNING = "running"
+    DONE = "done"
+    CANCELLED = "cancelled"
+
+    # running 상태에서 완료를 기다리는 상한. fn 은 짧은 클립보드 등록이라 보통 ms 단위 —
+    # 이 상한은 fn 자체가 멈춘 경우에도 호출 스레드를 무기한 잡지 않기 위한 안전망이다.
+    RUNNING_GRACE = 10.0
+
+    def __init__(self, fn: Callable[[], object]):
+        self._fn = fn
+        self._lock = threading.Lock()
+        self._finished = threading.Event()
+        self.state = self.PENDING
+        self._result = None
+        self._error: Optional[BaseException] = None
+
+    def run(self) -> None:
+        """소유 스레드에서 호출. 이미 취소됐으면 아무것도 하지 않는다."""
+        with self._lock:
+            if self.state != self.PENDING:
+                return
+            self.state = self.RUNNING
+        try:
+            self._result = self._fn()
+        except Exception as e:  # noqa: BLE001 — 호출 스레드로 전파
+            self._error = e
+        finally:
+            with self._lock:
+                self.state = self.DONE
+            self._finished.set()
+
+    def wait(self, timeout: float):
+        """호출 스레드에서. fn 의 결과를 반환(예외는 그대로 전파).
+
+        timeout 안에 소유 스레드가 시작하지 못하면 취소하고 OwnerThreadBusy.
+        """
+        if not self._finished.wait(timeout):
+            with self._lock:
+                if self.state == self.PENDING:
+                    self.state = self.CANCELLED
+                    raise OwnerThreadBusy(f"소유 스레드가 {timeout:.1f}s 안에 시작 못 함")
+            # running — 등록이 이미 진행 중. 끝까지 기다려 실제 결과를 돌려준다.
+            if not self._finished.wait(self.RUNNING_GRACE):
+                raise OwnerThreadBusy(
+                    f"소유 스레드 작업이 {timeout + self.RUNNING_GRACE:.1f}s 안에 안 끝남"
+                )
+        if self._error is not None:
+            raise self._error
+        return self._result
+
+
 class LazyClipboardProvider(ABC):
     """OS별 lazy provide 백엔드의 공통 인터페이스.
 
@@ -104,6 +179,11 @@ class LazyClipboardProvider(ABC):
 
         Returns:
             bool: 등록 성공 여부. False 면 main 이 fallback 으로 우회.
+
+        ⚠️ main 의 네트워크 수신 스레드에서 불린다 — 이벤트 루프 스레드를 **무기한**
+        기다리지 말 것(그 스레드가 paste 콜백 안에서 fetch 청크를 기다리면 교착, 함정 #46).
+        제한 시간 안에 등록 못 하면 False 를 반환하고, 그 등록은 나중에 실행되지 않아야
+        한다(`OwnerThreadCall`).
         """
         raise NotImplementedError
 

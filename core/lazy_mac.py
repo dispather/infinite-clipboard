@@ -13,6 +13,11 @@ NSPasteboard data provider 콜백(`provideDataForType:`)은 **앱 메인 스레�
   - pasteboard 등록(clearContents/writeObjects)은 **메인 스레드에서** 수행한다
     (register_offer 가 worker 스레드에서 불리면 `performSelectorOnMainThread:` 로 위임,
     메인 스레드면 직접). AppKit thread-affinity 도 만족.
+  - ⚠️ 위임은 **기다림 상한이 있다**(`_main_wait_timeout`, 함정 #46). 메인 스레드는 paste
+    콜백 안에서 fetch 청크를 기다리는데, 그 청크를 읽는 네트워크 스레드가 register_offer 에서
+    메인을 무기한 기다리면 교착한다(2026-09-28 실기: 64 MiB 두 번째 offer → 256s 타임아웃 +
+    서버 송신 timeout 으로 연결 끊김). 시간 안에 시작 못 한 등록은 취소되고 False → main 이
+    받기 모드로 우회. 메인이 fetch 중이면(`_providing`) 기다리지 않고 바로 False.
   - 콜백을 받으려면 **호스트가 메인 스레드 run loop 를 펌핑**해야 한다. 실제 앱은 Tk
     mainloop(macOS 에선 Cocoa run loop) 가 이를 제공한다 → main 오케스트레이션(Task 6)
     /`.app` 검증(Task 9)에서 통합. 테스트는 NSRunLoop 를 직접 펌핑해 메커니즘을 검증한다.
@@ -42,7 +47,7 @@ from typing import Optional
 
 from core.lazy_clipboard import (
     LazyClipboardProvider, FetchedContent, FetchCallback,
-    KIND_FILE, KIND_IMAGE,
+    KIND_FILE, KIND_IMAGE, OwnerThreadCall, OwnerThreadBusy,
 )
 
 # pyobjc — 부재/비-macOS 면 ImportError → 팩토리가 잡아 None (fallback)
@@ -68,8 +73,9 @@ except Exception:  # 프로토콜 미발견 — 비공식 conform 폴백
 class _Provider(*_BASES, **_KW):
     """paste 시점에 backend._provide 를 호출하는 NSPasteboardItemDataProvider.
 
-    backend(역참조는 backend.self._providers 로 유지)/key(이미지=0, 파일=경로 index)는
-    인스턴스 속성. 콜백은 메인 스레드 run loop 에서 발화.
+    backend(역참조는 backend.self._providers 로 유지)/key(이미지=0, 파일=경로 index)/
+    _reg(이 항목이 속한 등록 1건 — offer·fetch_cb·fetch 결과)는 인스턴스 속성.
+    콜백은 메인 스레드 run loop 에서 발화.
     """
 
     def initWithBackend_key_(self, backend, key):
@@ -81,21 +87,25 @@ class _Provider(*_BASES, **_KW):
         return self
 
     def pasteboard_item_provideDataForType_(self, pasteboard, item, type_):
-        self._backend._provide(item, type_, self._key)
+        self._backend._provide(item, type_, self._key, getattr(self, "_reg", None))
 
 
 class _MainThreadRunner(NSObject):
-    """performSelectorOnMainThread 로 임의 콜러블을 메인 스레드에서 동기 실행."""
+    """performSelectorOnMainThread 로 OwnerThreadCall 을 메인 스레드에서 실행.
 
-    def runHolder_(self, holder):
-        try:
-            holder["result"] = holder["fn"]()
-        except Exception as e:  # noqa: BLE001
-            holder["err"] = e
+    호출 측은 waitUntilDone=False 로 게시하고 call.wait(timeout) 으로 기다린다 —
+    이미 취소된 call 은 run() 이 아무것도 하지 않는다.
+    """
+
+    def runCall_(self, call):
+        call.run()
 
 
 class MacLazyProvider(LazyClipboardProvider):
     """NSPasteboard 를 지연 소유하고 paste(provideDataForType)에 lazy 응답."""
+
+    # 워커 스레드의 등록이 메인 스레드를 기다리는 상한 (X11/Wayland 백엔드와 같은 2.0s).
+    _main_wait_timeout = 2.0
 
     def __init__(self):
         NSApplicationLoad()
@@ -104,12 +114,19 @@ class MacLazyProvider(LazyClipboardProvider):
         self._offer: Optional[dict] = None
         self._fetch_cb: Optional[FetchCallback] = None
         self._cache: Optional[FetchedContent] = None
+        # 현재 등록 1건 {offer, cb, cache} — 항목(_Provider)도 같은 dict 를 쥔다. fetch 결과를
+        # 등록 단위로 묶어, 붙여넣기 도중 clear()/supersede 가 와도 같은 등록의 나머지 항목
+        # (여러 파일 offer 의 2번째 이후)은 이미 받은 결과를 내준다(부분 붙여넣기 방지).
+        self._reg: Optional[dict] = None
         self._providers = []  # GC 방지 ref 유지 (콜백 발화까지 살아있어야)
         self._items = []
         # 등록 시점의 NSPasteboard changeCount. macOS 는 소유권 상실 콜백이 없어,
         # owns_clipboard 는 현재 changeCount 와 비교해 "그 뒤 아무도 안 썼는지"로 판단한다
         # (사용자가 로컬 복사하면 changeCount 가 올라가 자동으로 소유 아님 처리).
         self._change_count: Optional[int] = None
+        # 메인 스레드가 provideDataForType 콜백 안에서 fetch 중인지 — 그동안 워커의 등록은
+        # 메인을 기다리지 않고 바로 실패(→받기 모드)한다(함정 #46).
+        self._providing = False
 
     # ── LazyClipboardProvider 인터페이스 ──────────────────────────────
 
@@ -132,19 +149,29 @@ class MacLazyProvider(LazyClipboardProvider):
         kind = offer.get("kind") if isinstance(offer, dict) else None
         if not self.is_supported(kind):
             return False
-        with self._lock:
-            self._offer = offer
-            self._fetch_cb = fetch_callback
-            self._cache = None
+        # 상태(_offer/_fetch_cb/_cache)는 여기서 바꾸지 않는다 — _do_register 가 메인
+        # 스레드에서 pasteboard 교체와 함께 바꾼다. 여기서 먼저 바꾸면 등록이 늦어지거나
+        # 취소될 때 아직 pasteboard 에 있는 이전 offer 의 항목이 새 offer 를 fetch 한다.
+        if not NSThread.isMainThread():
+            with self._lock:
+                providing = self._providing
+            if providing:
+                logger.info("macOS lazy: 메인 스레드가 붙여넣기 수신 중 — 등록 생략(→받기 모드)")
+                return False
         try:
-            return bool(self._run_on_main(lambda: self._do_register(offer)))
+            return bool(self._run_on_main(lambda: self._do_register(offer, fetch_callback)))
+        except OwnerThreadBusy as e:
+            logger.info(f"macOS lazy: 메인 스레드 바쁨 — 등록 취소(→받기 모드): {e}")
+            return False
         except Exception as e:  # noqa: BLE001
             logger.warning(f"macOS lazy: 등록 실패 — fallback: {e}")
             return False
 
     def clear(self) -> None:
         # 소유는 유지하되 offer=None → provideDataForType 가 아무것도 안 줘 dataForType=None
+        # (단 이미 fetch 를 시작한 등록은 그 결과로 자기 나머지 항목을 끝까지 채운다 — _provide)
         with self._lock:
+            self._reg = None
             self._offer = None
             self._fetch_cb = None
             self._cache = None
@@ -152,6 +179,7 @@ class MacLazyProvider(LazyClipboardProvider):
 
     def stop(self) -> None:
         with self._lock:
+            self._reg = None
             self._offer = None
             self._fetch_cb = None
             self._cache = None
@@ -164,31 +192,40 @@ class MacLazyProvider(LazyClipboardProvider):
         """fn 을 메인 스레드에서 실행(이미 메인이면 직접). 결과 반환/예외 전파.
 
         worker 스레드에서 호출 시 메인 run loop 가 펌핑돼야 완료된다(실앱=Tk mainloop).
+        `_main_wait_timeout` 안에 메인이 시작하지 못하면 취소하고 OwnerThreadBusy —
+        무기한 기다리면 메인이 네트워크 fetch 를 기다리는 동안 교착한다(함정 #46).
         """
         if NSThread.isMainThread():
             return fn()
-        holder = {"fn": fn, "result": None, "err": None}
+        call = OwnerThreadCall(fn)
         self._runner.performSelectorOnMainThread_withObject_waitUntilDone_(
-            "runHolder:", holder, True,
+            "runCall:", call, False,
         )
-        if holder["err"] is not None:
-            raise holder["err"]
-        return holder["result"]
+        return call.wait(self._main_wait_timeout)
 
-    def _do_register(self, offer: dict) -> bool:
+    def _do_register(self, offer: dict, fetch_callback: FetchCallback) -> bool:
         """NSPasteboardItem(들)에 data provider 지연 등록 (메인 스레드에서)."""
         kind = offer.get("kind")
         n = 1 if kind == KIND_IMAGE else max(1, len(offer.get("items") or []))
         types = self._types_for_kind(kind)
+        reg = {"offer": offer, "cb": fetch_callback, "cache": None}
         providers, items = [], []
         for i in range(n):
             prov = _Provider.alloc().initWithBackend_key_(self, i)
+            prov._reg = reg
             item = NSPasteboardItem.alloc().init()
             if not item.setDataProvider_forTypes_(prov, types):
                 logger.warning("macOS lazy: setDataProvider_forTypes_ 실패")
                 return False
             providers.append(prov)
             items.append(item)
+        # 상태 교체는 pasteboard 교체와 같은 메인 스레드 구간에서 — _provide 도 메인에서
+        # 돌므로 둘 사이에 이전 항목의 콜백이 끼어 새 offer 를 읽는 일이 없다.
+        with self._lock:
+            self._reg = reg
+            self._offer = offer
+            self._fetch_cb = fetch_callback
+            self._cache = None
         pb = NSPasteboard.generalPasteboard()
         pb.clearContents()
         wrote = pb.writeObjects_(items)
@@ -204,24 +241,40 @@ class MacLazyProvider(LazyClipboardProvider):
             return [_TYPE_PNG]
         return [_TYPE_FILE_URL]  # KIND_FILE
 
-    def _provide(self, item, type_, key) -> None:
-        """provideDataForType 콜백 본체 (메인 스레드). fetch→직렬화→setData."""
+    def _provide(self, item, type_, key, reg=None) -> None:
+        """provideDataForType 콜백 본체 (메인 스레드). fetch→직렬화→setData.
+
+        reg = 이 항목이 속한 등록. 그 등록이 이미 fetch 결과를 가졌으면 현재 등록이
+        아니어도(clear/supersede 뒤) 그 결과를 내준다 — 한 번의 붙여넣기가 항목별 콜백
+        여러 번으로 오므로, 첫 항목 fetch 도중 clear 가 와도 나머지 항목이 비지 않게.
+        아직 fetch 전인데 현재 등록이 아니면 아무것도 안 준다(clear 의 원래 의미).
+        """
         with self._lock:
-            offer = self._offer
-            cb = self._fetch_cb
-            cache = self._cache
-        if offer is None or cb is None:
+            if reg is None:
+                reg = self._reg
+            current = reg is not None and reg is self._reg
+            cache = reg["cache"] if reg is not None else None
+        if reg is None:
+            return
+        offer, cb = reg["offer"], reg["cb"]
+        if cache is None and (not current or cb is None):
             return
         kind = offer.get("kind")
 
         if cache is None:
+            with self._lock:
+                self._providing = True
             try:
                 fetched = cb(offer.get("offer_id"))
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"macOS lazy fetch 실패 — 미제공(→fallback): {e}")
                 return
+            finally:
+                with self._lock:
+                    self._providing = False
             with self._lock:
-                if self._offer is offer:  # fetch 중 supersede 안 됐으면 캐시
+                reg["cache"] = fetched  # 이 등록의 나머지 항목용 (supersede 돼도 자기 항목만 봄)
+                if self._reg is reg:
                     self._cache = fetched
             cache = fetched
 

@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 
@@ -173,3 +174,126 @@ def test_mac_is_supported():
         assert prov.is_supported("text") is False
     finally:
         prov.stop()
+
+
+# ── 함정 #46: 워커 스레드(실앱의 네트워크 수신 스레드) 등록 경로 ────────────────
+# 위 테스트들은 전부 메인 스레드에서 register_offer 를 불러(NSThread.isMainThread 직행)
+# performSelectorOnMainThread 위임 경로를 한 번도 안 탔다. 실앱은 항상 워커에서 부른다.
+
+
+def _pump(seconds: float) -> None:
+    """메인 스레드 run loop 를 seconds 동안 펌핑 (실앱의 Tk mainloop 역할)."""
+    from Foundation import NSRunLoop, NSDate, NSDefaultRunLoopMode
+
+    rl = NSRunLoop.currentRunLoop()
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        rl.runMode_beforeDate_(
+            NSDefaultRunLoopMode, NSDate.dateWithTimeIntervalSinceNow_(0.05),
+        )
+
+
+def _register_from_worker(prov, offer, fetch) -> dict:
+    """워커 스레드에서 register_offer — 결과·소요 시간 홀더를 즉시 반환."""
+    holder = {"done": threading.Event()}
+
+    def _run():
+        t0 = time.monotonic()
+        try:
+            holder["ok"] = prov.register_offer(offer, fetch)
+        except Exception as e:  # noqa: BLE001
+            holder["error"] = e
+        holder["elapsed"] = time.monotonic() - t0
+        holder["done"].set()
+
+    threading.Thread(target=_run, daemon=True).start()
+    return holder
+
+
+def _png_offer(png: bytes) -> dict:
+    return _make_offer("image", [{"name": "c.png", "size": len(png), "hash": ""}], len(png))
+
+
+def test_mac_register_from_worker_while_main_pumps():
+    """실앱 경로: 워커에서 등록 → 메인 run loop 가 실행 → paste round-trip 정상."""
+    from core.lazy_mac import MacLazyProvider
+    from core.lazy_clipboard import FetchedContent, KIND_IMAGE
+
+    png = b"\x89PNG\r\n\x1a\n" + b"worker-path" * 100
+    prov = MacLazyProvider()
+    try:
+        h = _register_from_worker(
+            prov, _png_offer(png), lambda oid: FetchedContent(kind=KIND_IMAGE, data=png),
+        )
+        deadline = time.monotonic() + 5.0
+        while not h["done"].is_set() and time.monotonic() < deadline:
+            _pump(0.05)
+        assert h["done"].is_set(), "워커 등록이 끝나지 않음"
+        assert h.get("ok") is True, f"워커 등록 실패: {h!r}"
+        assert _paste("png") == png
+    finally:
+        prov.stop()
+
+
+def test_mac_register_from_worker_gives_up_when_main_busy():
+    """메인이 run loop 를 못 돌리면(= paste 콜백 안에서 fetch 대기) 워커 등록은 제한 시간 뒤
+    False. 메인이 돌아와도 취소된 등록은 실행되지 않고, 기존 offer 도 그대로 붙여넣어진다
+    (등록 전에 상태를 바꾸면 기존 항목이 새 offer 를 fetch 했다)."""
+    from AppKit import NSPasteboard
+    from core.lazy_mac import MacLazyProvider
+    from core.lazy_clipboard import FetchedContent, KIND_IMAGE
+
+    png_a = b"\x89PNG\r\n\x1a\n" + b"offer-A" * 100
+    png_b = b"\x89PNG\r\n\x1a\n" + b"offer-B" * 100
+    prov = MacLazyProvider()
+    prov._main_wait_timeout = 0.3
+    try:
+        # A 는 메인에서 등록(직행)
+        offer_a = _png_offer(png_a)
+        assert prov.register_offer(
+            offer_a, lambda oid: FetchedContent(kind=KIND_IMAGE, data=png_a),
+        ) is True
+        before = NSPasteboard.generalPasteboard().changeCount()
+
+        # B 는 워커에서 — 메인 스레드는 run loop 를 돌리지 않고 기다리기만 한다(교착 조건)
+        h = _register_from_worker(
+            prov, _png_offer(png_b), lambda oid: FetchedContent(kind=KIND_IMAGE, data=png_b),
+        )
+        assert h["done"].wait(3.0), "워커 등록이 메인을 무기한 기다림(교착)"
+        assert h.get("ok") is False, f"바쁜 메인에 등록 성공으로 보고: {h!r}"
+        assert h["elapsed"] < 2.0
+
+        _pump(0.5)  # 게시돼 있던 (취소된) 등록이 이제 메인에서 처리된다 — 아무것도 안 해야 함
+        assert NSPasteboard.generalPasteboard().changeCount() == before, \
+            "취소된 등록이 pasteboard 를 바꿈(뒤늦은 가로채기)"
+        assert prov._offer is offer_a, "취소된 등록이 provider 상태를 B 로 바꿈"
+        assert _paste("png") == png_a, "기존 A 항목이 A 를 내주지 않음"
+    finally:
+        prov.stop()
+
+
+def test_mac_register_skips_while_providing():
+    """메인이 paste 콜백 안에서 fetch 중(_providing)이면 워커 등록은 기다리지 않고 False."""
+    from AppKit import NSPasteboard
+    from core.lazy_mac import MacLazyProvider
+    from core.lazy_clipboard import FetchedContent, KIND_IMAGE
+
+    png = b"\x89PNG\r\n\x1a\n" + b"providing" * 100
+    prov = MacLazyProvider()
+    try:
+        before = NSPasteboard.generalPasteboard().changeCount()
+        with prov._lock:
+            prov._providing = True
+        h = _register_from_worker(
+            prov, _png_offer(png), lambda oid: FetchedContent(kind=KIND_IMAGE, data=png),
+        )
+        assert h["done"].wait(1.0)
+        assert h.get("ok") is False
+        assert h["elapsed"] < 0.2, f"fetch 중인데 메인을 기다림: {h['elapsed']:.2f}s"
+        _pump(0.3)
+        assert NSPasteboard.generalPasteboard().changeCount() == before
+    finally:
+        with prov._lock:
+            prov._providing = False
+        prov.stop()
+

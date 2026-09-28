@@ -394,6 +394,7 @@ class InfiniteClipboard:
             f"[서버] 클라이언트 해제: {name} peer={peer_id[:8]}… "
             f"({self.connected_clients}대)"
         )
+        self._fail_active_fetch_on_disconnect(peer_id)
         self._notify_state_changed()
 
     def _verify_sender_identity(self, sock, data, field_name) -> bool:
@@ -572,6 +573,8 @@ class InfiniteClipboard:
         """
         self.connected = False
         logger.info(f"[클라이언트] 서버 연결 끊김{f' ({reason})' if reason else ''}")
+        # 원본은 서버 너머에 있으므로 서버 연결이 끊기면 진행 중 fetch 는 끝난 것이다.
+        self._fail_active_fetch_on_disconnect()
         if "version mismatch" in reason or "hard break" in reason:
             self._notify(
                 t("버전 불일치로 연결 실패", self._lang),
@@ -920,8 +923,11 @@ class InfiniteClipboard:
                 f"type={msg_type} receiver={receiver_peer[:8]}…"
             )
 
-    def _send_raw_to(self, raw_bytes, receiver_peer):
-        """직렬화된(raw) 메시지를 receiver_peer 에게만 (meta 에 receiver_peer 동봉)."""
+    def _send_raw_to(self, raw_bytes, receiver_peer) -> bool:
+        """직렬화된(raw) 메시지를 receiver_peer 에게만 (meta 에 receiver_peer 동봉).
+
+        Returns: 전송 성공 여부(서버=대상 소켓 송신, 클라이언트=서버로 송신).
+        """
         ok = True
         if self.config.mode == "server" and self.server:
             ok = self.server.send_raw_to_peer(receiver_peer, raw_bytes)
@@ -930,12 +936,11 @@ class InfiniteClipboard:
         if ok is False:
             # [diag-largefile] 가설 B — 바이너리 chunk relay 실패가 silently drop 되는지 확인.
             # raw_bytes는 BINARY_MARKER+meta+payload 프레임이라 길이만 남긴다(경로 노출 최소화).
-            # NetworkClient.send_raw()는 반환값이 None이므로, False를 명시 반환하는
-            # 서버 targeted relay 경로만 진단한다.
             logger.warning(
                 f"[diag-largefile] targeted raw 전송 실패(drop 가능): "
                 f"receiver={receiver_peer[:8]}… bytes={len(raw_bytes):,}"
             )
+        return ok is not False
 
     # ── v3.0 S2c: lazy offer/fetch 오케스트레이션 ──────────────────────
 
@@ -1241,7 +1246,9 @@ class InfiniteClipboard:
                     offer_id, self.config.peer_id, receiver_peer=source_peer,
                     resume=resume,
                 )
-                self._send_raw_to(raw, source_peer)
+                if not self._send_raw_to(raw, source_peer):
+                    # 연결이 없으면 응답이 올 길이 없다 — 하드 타임아웃까지 기다리지 않는다.
+                    raise FetchFailure(FETCH_FAIL_OFFLINE, "원본 PC 로 fetch 요청을 보내지 못함")
                 timeout = self._fetch_timeout(total)
                 if not event.wait(timeout=timeout):
                     # [diag-largefile] 가설 C — 타임아웃 실패의 성격 판별.
@@ -1279,6 +1286,29 @@ class InfiniteClipboard:
             finally:
                 with self._active_fetch_lock:
                     self._active_fetch = None
+
+    def _fail_active_fetch_on_disconnect(self, peer_id=None) -> None:
+        """[receiver] 연결이 끊기면 진행 중 fetch 를 즉시 실패시킨다(FETCH_FAIL_OFFLINE).
+
+        끊긴 연결로는 청크가 다시 오지 않는데 알리지 않으면 fetch 는 하드 타임아웃(최대
+        600s)까지 기다린다 — macOS 는 그동안 메인 스레드가 paste 콜백 안에 묶인다
+        (2026-09-28 mac 실기: 재연결 뒤 두 번째 fetch 가 청크 0개로 256s 대기).
+        peer_id 가 주어지면(서버 모드) 그 peer 가 원본인 fetch 만 실패시킨다.
+        연결 플래그를 먼저 내린 뒤 불러야 한다 — fetch 쪽은 요청 송신 실패로 같은 상황을
+        잡으므로(`_fetch_offer`) 둘 사이에 신호가 빠지지 않는다.
+        """
+        with self._active_fetch_lock:
+            af = self._active_fetch
+            transfer_id = af.get("transfer_id") if af else None
+        if not transfer_id:
+            return
+        if peer_id is not None:
+            with self._transfers_lock:
+                source_peer = self._transfer_source_peers.get(transfer_id, "")
+            if source_peer != peer_id:
+                return
+        if self._signal_fetch(transfer_id, fail=FETCH_FAIL_OFFLINE):
+            logger.info(f"[fetch] 연결 끊김 — 진행 중 fetch 실패 처리 offer={transfer_id[:8]}…")
 
     def _signal_fetch(self, transfer_id, paths=None, fail=None) -> bool:
         """[receiver] 진행 중 fetch 에 결과/실패 전달 + 대기 해제. 매칭 시 True."""
