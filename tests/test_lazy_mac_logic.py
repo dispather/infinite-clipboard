@@ -279,6 +279,77 @@ def test_clear_mid_fetch_still_fills_remaining_items_of_same_registration(mac):
     assert _paste(mac) == [b"file:///tmp/a", b"file:///tmp/b"]
 
 
+def test_clear_after_completed_paste_serves_nothing(mac):
+    """붙여넣기가 끝난 뒤의 clear() 는 즉시 해제 — 나중 Cmd+V 에 옛 offer 가 붙지 않는다.
+
+    (등록 단위 결과를 해제 뒤에도 내주면 옛 파일이 붙고, 소유가 풀린 클립보드 모니터가
+    그 경로를 로컬 복사로 읽어 재broadcast 할 수 있다)
+    """
+    prov = mac.prov
+    assert _register_from_worker(prov, _offer("file"), _file_cb(["/tmp/a"]))["done"].wait(2.0)
+    assert _paste(mac) == [b"file:///tmp/a"]
+    prov.clear()
+    assert prov.owns_clipboard() is False
+    for item in mac.board.items:
+        item.data.clear()
+    assert _paste(mac) == [None], "해제된 등록이 옛 결과를 계속 내줌"
+
+
+def test_clear_mid_fetch_keeps_ownership_until_all_items_served(mac):
+    """붙여넣기 도중의 clear() 는 미뤄진다 — 그동안 소유 유지(모니터가 안 읽음),
+    같은 등록의 항목을 다 내주면 해제되고 이후 붙여넣기는 아무것도 안 준다."""
+    prov = mac.prov
+    seen = {}
+    from core.lazy_clipboard import FetchedContent, KIND_FILE
+
+    def _cb(oid):
+        prov.clear()
+        seen["owns_during_fetch"] = prov.owns_clipboard()
+        return FetchedContent(kind=KIND_FILE, paths=["/tmp/a", "/tmp/b"])
+
+    assert _register_from_worker(prov, _offer("file", 2), _cb)["done"].wait(2.0)
+    assert _paste(mac) == [b"file:///tmp/a", b"file:///tmp/b"]
+    assert seen["owns_during_fetch"] is True, "미뤄 둔 해제 동안 소유가 풀림"
+    assert prov.owns_clipboard() is False, "모든 항목을 내준 뒤에도 해제 안 됨"
+    for item in mac.board.items:
+        item.data.clear()
+    assert _paste(mac) == [None, None]
+
+
+def test_deferred_clear_applies_after_timeout_if_rest_never_requested(mac):
+    """붙여넣는 앱이 첫 항목만 읽어도 미뤄 둔 해제는 _drain_timeout 뒤 적용된다."""
+    prov = mac.prov
+    prov._drain_timeout = 0.2
+    from core.lazy_clipboard import FetchedContent, KIND_FILE
+
+    def _cb(oid):
+        prov.clear()
+        return FetchedContent(kind=KIND_FILE, paths=["/tmp/a", "/tmp/b"])
+
+    assert _register_from_worker(prov, _offer("file", 2), _cb)["done"].wait(2.0)
+    first = mac.board.items[0]
+    mac.main.call(lambda: first.provider.pasteboard_item_provideDataForType_(
+        mac.board, first, "public.file-url"))
+    assert first.data.get("public.file-url") == b"file:///tmp/a"
+    assert prov.owns_clipboard() is True  # 아직 둘째 항목 대기 중
+    deadline = time.monotonic() + 2.0
+    while prov.owns_clipboard() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert prov.owns_clipboard() is False, "미뤄 둔 해제가 시간 상한 뒤에도 적용 안 됨"
+
+
+def test_deferred_clear_applies_immediately_when_fetch_fails(mac):
+    prov = mac.prov
+
+    def _cb(oid):
+        prov.clear()
+        raise RuntimeError("fetch 타임아웃")
+
+    assert _register_from_worker(prov, _offer("file", 2), _cb)["done"].wait(2.0)
+    assert _paste(mac) == [None, None]
+    assert prov.owns_clipboard() is False
+
+
 def test_clear_before_paste_serves_nothing(mac):
     """clear 의 원래 의미 유지 — 붙여넣기 전에 해제된 등록은 아무것도 안 준다(fetch 도 안 함)."""
     prov = mac.prov

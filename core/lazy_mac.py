@@ -106,6 +106,8 @@ class MacLazyProvider(LazyClipboardProvider):
 
     # 워커 스레드의 등록이 메인 스레드를 기다리는 상한 (X11/Wayland 백엔드와 같은 2.0s).
     _main_wait_timeout = 2.0
+    # 붙여넣기 중 미뤄 둔 clear() 를 나머지 항목 요청이 안 와도 적용하는 상한(fetch 완료 기준).
+    _drain_timeout = 2.0
 
     def __init__(self):
         NSApplicationLoad()
@@ -127,6 +129,7 @@ class MacLazyProvider(LazyClipboardProvider):
         # 메인 스레드가 provideDataForType 콜백 안에서 fetch 중인지 — 그동안 워커의 등록은
         # 메인을 기다리지 않고 바로 실패(→받기 모드)한다(함정 #46).
         self._providing = False
+        self._fetching_reg: Optional[dict] = None
 
     # ── LazyClipboardProvider 인터페이스 ──────────────────────────────
 
@@ -168,14 +171,35 @@ class MacLazyProvider(LazyClipboardProvider):
             return False
 
     def clear(self) -> None:
-        # 소유는 유지하되 offer=None → provideDataForType 가 아무것도 안 줘 dataForType=None
-        # (단 이미 fetch 를 시작한 등록은 그 결과로 자기 나머지 항목을 끝까지 채운다 — _provide)
+        # 소유는 유지하되 offer=None → provideDataForType 가 아무것도 안 줘 dataForType=None.
+        # 단 지금 이 등록을 붙여넣는 중(fetch 진행)이면 해제를 미룬다: 같은 붙여넣기의 나머지
+        # 항목이 그 결과를 받고(여러 파일 offer 의 부분 붙여넣기 방지), 그동안 소유도 유지돼
+        # 클립보드 모니터가 우리 항목을 로컬 복사로 읽어 재broadcast 하지 않는다. 모든 항목을
+        # 내줬거나 fetch 완료 후 _drain_timeout 이 지나면 해제된다(_finish_drain_locked).
         with self._lock:
-            self._reg = None
-            self._offer = None
-            self._fetch_cb = None
-            self._cache = None
-            self._change_count = None
+            reg = self._reg
+            if reg is not None and self._providing and self._fetching_reg is reg:
+                reg["clear_pending"] = True
+                return
+            self._clear_locked()
+
+    def _clear_locked(self) -> None:
+        self._reg = None
+        self._offer = None
+        self._fetch_cb = None
+        self._cache = None
+        self._change_count = None
+
+    def _finish_drain_locked(self, reg: dict) -> None:
+        """미뤄 둔 clear 를 적용 (self._lock 보유 상태로 호출). 이미 교체된 등록이면 무시."""
+        if reg.get("clear_pending"):
+            reg["clear_pending"] = False
+            if self._reg is reg:
+                self._clear_locked()
+
+    def _finish_drain(self, reg: dict) -> None:
+        with self._lock:
+            self._finish_drain_locked(reg)
 
     def stop(self) -> None:
         with self._lock:
@@ -208,7 +232,8 @@ class MacLazyProvider(LazyClipboardProvider):
         kind = offer.get("kind")
         n = 1 if kind == KIND_IMAGE else max(1, len(offer.get("items") or []))
         types = self._types_for_kind(kind)
-        reg = {"offer": offer, "cb": fetch_callback, "cache": None}
+        reg = {"offer": offer, "cb": fetch_callback, "cache": None,
+               "n": n, "served": set(), "clear_pending": False}
         providers, items = [], []
         for i in range(n):
             prov = _Provider.alloc().initWithBackend_key_(self, i)
@@ -244,40 +269,58 @@ class MacLazyProvider(LazyClipboardProvider):
     def _provide(self, item, type_, key, reg=None) -> None:
         """provideDataForType 콜백 본체 (메인 스레드). fetch→직렬화→setData.
 
-        reg = 이 항목이 속한 등록. 그 등록이 이미 fetch 결과를 가졌으면 현재 등록이
-        아니어도(clear/supersede 뒤) 그 결과를 내준다 — 한 번의 붙여넣기가 항목별 콜백
-        여러 번으로 오므로, 첫 항목 fetch 도중 clear 가 와도 나머지 항목이 비지 않게.
-        아직 fetch 전인데 현재 등록이 아니면 아무것도 안 준다(clear 의 원래 의미).
+        reg = 이 항목이 속한 등록. 현재 등록일 때만 내준다 — 해제(clear)·교체된 등록의 항목은
+        아무것도 안 준다. 붙여넣기 도중 온 clear() 는 미뤄지므로(clear 참조) 한 번의
+        붙여넣기(항목별 콜백 여러 번)는 끝까지 같은 fetch 결과로 채워진다.
         """
         with self._lock:
             if reg is None:
                 reg = self._reg
-            current = reg is not None and reg is self._reg
-            cache = reg["cache"] if reg is not None else None
-        if reg is None:
-            return
+            if reg is None or reg is not self._reg:
+                return
+            cache = reg["cache"]
         offer, cb = reg["offer"], reg["cb"]
-        if cache is None and (not current or cb is None):
+        if cache is None and cb is None:
             return
         kind = offer.get("kind")
 
-        if cache is None:
-            with self._lock:
-                self._providing = True
-            try:
-                fetched = cb(offer.get("offer_id"))
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"macOS lazy fetch 실패 — 미제공(→fallback): {e}")
-                return
-            finally:
+        try:
+            if cache is None:
                 with self._lock:
-                    self._providing = False
+                    self._providing = True
+                    self._fetching_reg = reg
+                fetched = None
+                try:
+                    fetched = cb(offer.get("offer_id"))
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"macOS lazy fetch 실패 — 미제공(→fallback): {e}")
+                finally:
+                    with self._lock:
+                        self._providing = False
+                        self._fetching_reg = None
+                        if fetched is not None:
+                            reg["cache"] = fetched
+                            self._cache = fetched
+                        drain_pending = reg.get("clear_pending", False)
+                        if drain_pending and fetched is None:
+                            self._finish_drain_locked(reg)  # 내줄 결과가 없으니 바로 해제
+                if fetched is None:
+                    return
+                if drain_pending:
+                    # 나머지 항목 요청이 안 와도(붙여넣는 앱이 첫 항목만 읽음) 해제되게
+                    t = threading.Timer(self._drain_timeout, self._finish_drain, args=(reg,))
+                    t.daemon = True
+                    t.start()
+                cache = fetched
+            self._serve(item, type_, key, kind, cache)
+        finally:
             with self._lock:
-                reg["cache"] = fetched  # 이 등록의 나머지 항목용 (supersede 돼도 자기 항목만 봄)
-                if self._reg is reg:
-                    self._cache = fetched
-            cache = fetched
+                reg["served"].add(key)
+                if reg.get("clear_pending") and len(reg["served"]) >= reg["n"]:
+                    self._finish_drain_locked(reg)
 
+    def _serve(self, item, type_, key, kind, cache) -> None:
+        """fetch 결과 → 이 항목의 UTI 데이터로 setData."""
         if not isinstance(cache, FetchedContent):
             return
         data = None
