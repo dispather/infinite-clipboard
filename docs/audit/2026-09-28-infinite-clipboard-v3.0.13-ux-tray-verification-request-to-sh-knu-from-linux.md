@@ -1,8 +1,10 @@
 ---
 round_trip: request
-round_trip_status: open
-ball: sh-knu-ai
-expects_reply: true
+round_trip_status: closed
+ball: none
+expects_reply: false
+closed_at: 2026-09-28
+closed_by: "withdrawn — 사용자 결정으로 Windows 확인은 a5000(desktop-oorqtct)이 맡음: docs/audit/2026-09-28-infinite-clipboard-v3.0.13-ux-tray-verification-request-to-a5000-from-linux.md (infinite-clipboard·a5000-workspace)"
 from: infinite-clipboard (linux-desktop)
 to: sh-knu-ai (sh-knu)
 from_host: linux-desktop
@@ -12,6 +14,9 @@ created: 2026-09-28
 task_ref: infinite-clipboard::ux-batch1-crosshost-verify
 mirror: "두 사본 내용 동일 (infinite-clipboard / sh-knu-ai), 각 레포 docs/audit/2026-09-28-infinite-clipboard-v3.0.13-ux-tray-verification-request-to-sh-knu-from-linux.md"
 ---
+
+> **[2026-09-28 철회 — 조치 불필요]** 사용자가 sh-knu 를 직접 쓰고 있어 이 확인은 **a5000** 이 맡기로 했습니다.
+> 이 문서에 대해 할 일은 없습니다(설치·키 변경 모두 하지 마세요). 아래 원문은 기록용으로 남깁니다.
 
 # [linux → sh-knu] v3.0.13 draft — 트레이 상태 줄·배지 실기 확인 요청 (+ 키 불일치 표시)
 
