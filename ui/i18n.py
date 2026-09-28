@@ -120,6 +120,32 @@ STRINGS: dict[str, dict[str, str]] = {
         "Tailscale LAN 클립보드/파일 공유": "Real-time clipboard & file sharing over Tailscale LAN",
         "닫기": "Close",
 
+        # ui/tray.py 메뉴 + ui/tray_status.py 상태 줄 (2026-09-28 UX 검토 B1)
+        "로그 보기": "View Log",
+        "종료": "Quit",
+        "✕ 서버 시작 실패 — 포트 {port} 사용 불가": "✕ Server failed to start — port {port} unavailable",
+        "● 서버 실행 중 — 기기 {n}대 연결": "● Server running — {n} device(s) connected",
+        "외 {n}대": "{n} more",
+        "● 서버 실행 중 — 연결된 기기 없음": "● Server running — no devices connected",
+        "● 서버에 연결됨 — {host}": "● Connected to server — {host}",
+        "○ 서버에 연결 안 됨 — {host}:{port}": "○ Not connected to server — {host}:{port}",
+        "연결 시도 중…": "Connecting…",
+        "버전이 달라요 — 양쪽 모두 최신 버전으로 업데이트하세요": (
+            "Version mismatch — update both PCs to the latest version"
+        ),
+        "인증 키가 서버와 다를 수 있어요": "Auth key may not match the server",
+        "서버가 연결을 거부했어요 — 서버 PC 에서 앱이 실행 중인지 확인하세요": (
+            "Server refused the connection — check the app is running on the server PC"
+        ),
+        "서버에 닿지 않아요 — 주소와 Tailscale 연결을 확인하세요": (
+            "Can't reach the server — check the address and Tailscale"
+        ),
+        "연결에 실패했어요 — 로그 보기에서 확인하세요": "Connection failed — see View Log",
+        "↑ 보내는 중: {name}": "↑ Sending: {name}",
+        "↓ 받는 중: {name}": "↓ Receiving: {name}",
+        "외 {n}건": "+{n} more",
+        "최근 받음: {name} ({size}) · {time}": "Last received: {name} ({size}) · {time}",
+
         # main.py (_notify)
         "버전 불일치로 연결 실패": "Connection Failed: Version Mismatch",
         "받기 실패": "Receive Failed",

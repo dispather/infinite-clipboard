@@ -713,6 +713,11 @@ class NetworkClient:
         # 정적인 문제라 was_connected 게이트를 우회하되, 5초마다 재시도하며
         # 매번 알리면 스팸이 되므로 동일 사유는 1회만 통지한다.
         self._last_notified_disconnect_reason: Optional[str] = None
+        # 2026-09-28 UX 검토 B1: 마지막 연결 실패 사유(성공 시 ""). on_disconnected 는
+        # 한 번도 연결된 적 없는 첫 시도의 실패(키 불일치·거부·타임아웃)엔 불리지 않아
+        # UI 가 "왜 안 붙는지"를 보여줄 수 없었다 — 사유가 바뀔 때만(5초 재시도마다가
+        # 아니라) on_error_changed 로 알린다.
+        self.last_error: str = ""
 
         # 콜백 속성 (상위 계층에서 설정)
         self.on_connected: Optional[Callable] = None           # ()
@@ -722,6 +727,17 @@ class NetworkClient:
         # "연결 끊김"이라는 일반 문구뿐이었음).
         self.on_disconnected: Optional[Callable] = None        # (reason: str = "")
         self.on_message_received: Optional[Callable] = None    # (message)
+        self.on_error_changed: Optional[Callable] = None       # () — last_error 변경 시
+
+    def _set_last_error(self, error: str) -> None:
+        if error == self.last_error:
+            return
+        self.last_error = error
+        if self.on_error_changed:
+            try:
+                self.on_error_changed()
+            except Exception as e:
+                logger.error(f"on_error_changed 콜백 오류: {e}")
 
     def start(self):
         """
@@ -866,6 +882,7 @@ class NetworkClient:
             # 성공했으니 이전에 억눌렀던 disconnect 사유를 초기화 — 나중에
             # 다시 같은(또는 다른) hard break 가 나면 다시 1회 통지해야 하므로.
             self._last_notified_disconnect_reason = None
+            self._set_last_error("")
 
             logger.info(
                 f"서버 연결 성공 (HMAC v{PROTOCOL_VERSION}): {self.host}:{self.port} "
@@ -902,6 +919,9 @@ class NetworkClient:
             # 않기 위함). 대신 5초 재시도 루프가 매번 알리는 스팸을 막기 위해
             # 동일 사유는 1회만 통지.
             reason = str(e)
+            if self.running:
+                # 빈 메시지 예외(예: 일부 timeout)는 타입명으로 — "" 는 "오류 없음" 이다
+                self._set_last_error(reason or type(e).__name__)
             is_hard_break = "hard break" in reason or "version mismatch" in reason
             should_notify = was_connected or (
                 is_hard_break and reason != self._last_notified_disconnect_reason

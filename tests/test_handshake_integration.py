@@ -496,3 +496,51 @@ def test_client_disconnected_reason_does_not_spam_on_repeated_retries():
         except OSError:
             pass
         server_thread.join(timeout=2)
+
+
+# ── 2026-09-28 UX 검토 B1: 첫 연결 실패 사유가 UI 로 올라와야 함 ──────────
+
+def test_wrong_key_first_attempt_sets_last_error_and_notifies_once():
+    """한 번도 연결된 적 없는 첫 시도의 키 불일치는 on_disconnected 가 안 불린다 —
+    그래서 트레이가 "왜 안 붙는지" 를 몰랐다. last_error + on_error_changed 로 올린다."""
+    from ui.tray_status import classify_client_error
+
+    port = _free_port()
+    server = NetworkServer(
+        port=port, auth_key="server-key", tailscale_trust=False, bind_address="127.0.0.1",
+    )
+    server.start()
+    client = NetworkClient(
+        host="127.0.0.1", port=port, auth_key="WRONG-CLIENT-KEY", device_name="dev",
+    )
+    calls = []
+    client.on_error_changed = lambda: calls.append(client.last_error)
+    client.reconnect_interval = 0.2   # 재시도 여러 번 — 같은 사유는 1회만 통지돼야 함
+    client.start()
+    try:
+        assert _wait_until(lambda: bool(client.last_error), timeout=3.0), "last_error 가 안 채워짐"
+        time.sleep(1.0)  # 재시도 몇 번 더 돌게
+        assert classify_client_error(client.last_error) == "auth", client.last_error
+        assert len(calls) == 1, f"같은 사유가 재시도마다 통지됨: {calls}"
+    finally:
+        client.stop()
+        server.stop()
+
+
+def test_successful_connect_clears_last_error():
+    port = _free_port()
+    client = NetworkClient(host="127.0.0.1", port=port, auth_key="k", device_name="dev")
+    client.reconnect_interval = 0.2
+    client.start()   # 아직 서버 없음 → 거부
+    server = None
+    try:
+        assert _wait_until(lambda: bool(client.last_error), timeout=3.0)
+        server = NetworkServer(port=port, auth_key="k", tailscale_trust=False,
+                               bind_address="127.0.0.1")
+        server.start()
+        assert _wait_until(lambda: client.connected, timeout=5.0)
+        assert client.last_error == ""
+    finally:
+        client.stop()
+        if server:
+            server.stop()

@@ -21,6 +21,8 @@ import pystray
 from PIL import Image, ImageDraw
 
 from ui import theme as t
+from ui import tray_status
+from ui.i18n import t as tr
 
 if TYPE_CHECKING:
     from main import InfiniteClipboard
@@ -70,13 +72,44 @@ def _fallback_icon(color_hex: str) -> Image.Image:
     return image
 
 
-def create_icon_image(color: str = "green") -> Image.Image:
+# 2026-09-28 UX 검토 B2/B5: 활동 배지 색 — 연결 색(아이콘 본체)과 겹치지 않는 색
+_BADGE_COLORS = {"busy": t.signal_busy, "new": t.signal_new}
+
+
+def _with_badge(base: Image.Image, badge: str) -> Image.Image:
+    """우하단에 어두운 테두리를 두른 원형 배지를 합성한다.
+
+    16~22px 트레이에서도 보이도록 지름을 아이콘의 약 45% 로 크게 잡고, 본체 색과
+    섞이지 않게 앱 캔버스색(tray_bg) 테두리로 분리한다.
+    """
+    img = base.copy()
+    w, h = img.size
+    d = int(min(w, h) * 0.46)
+    ring = max(1, int(min(w, h) * 0.07))
+    x0, y0 = w - d, h - d
+    draw = ImageDraw.Draw(img)
+    draw.ellipse([x0, y0, w - 1, h - 1], fill=t.tray_bg)
+    draw.ellipse([x0 + ring, y0 + ring, w - 1 - ring, h - 1 - ring],
+                 fill=_BADGE_COLORS.get(badge, t.signal_new))
+    return img
+
+
+def create_icon_image(color: str = "green", badge: str | None = None) -> Image.Image:
     """상태 색상에 해당하는 트레이 아이콘을 로드한다.
 
     Args:
         color: "green" / "amber"(또는 "yellow") / "red" / "gray" 중 하나.
                 미지정·오타 시 "gray"로 폴백.
+        badge: None / "busy"(전송 중) / "new"(방금 받음) — 연결 색 위에 겹치는 활동 표시.
     """
+    if badge:
+        key = f"{color}+{badge}"
+        cached = _icon_cache.get(key)
+        if cached is None:
+            cached = _with_badge(create_icon_image(color), badge)
+            _icon_cache[key] = cached
+        return cached
+
     cached = _icon_cache.get(color)
     if cached is not None:
         return cached
@@ -115,25 +148,21 @@ class TrayApp:
         # (중복 창 생성 가드). 값은 subprocess.Popen 객체 또는 _SPAWNING sentinel.
         self._window_procs: dict = {}
         self._window_procs_lock = threading.Lock()
+        # B1: 메뉴 맨 위 상태 줄(마지막으로 반영한 값) — 바뀔 때만 update_menu
+        self._status_lines: list = []
+        self._badge_timer: threading.Timer | None = None
 
     def run(self) -> None:
         """트레이 아이콘 생성 및 실행 (블로킹)"""
-        menu = pystray.Menu(
-            pystray.MenuItem("Clipboard History", self._show_history),
-            pystray.MenuItem("Transfers", self._show_transfers),
-            pystray.MenuItem("Settings", self._show_settings),
-            pystray.MenuItem("View Log", self._view_log),
-            pystray.MenuItem("Cleanup Staging", self._cleanup_staging),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("About", self._show_about),
-            pystray.MenuItem("Quit", self._quit),
-        )
-
+        # B1(2026-09-28): 동적 메뉴 — 맨 위에 연결 상태 줄(비활성 항목)을 두고,
+        # update_icon 이 상태가 바뀔 때 update_menu() 로 다시 만든다(AppIndicator 는
+        # 메뉴를 보여줄 때가 아니라 update_menu 시점에 생성 — pystray 문서).
+        # 메뉴 라벨은 예전엔 영어 고정이었다 — 설정 언어를 따른다.
         self.icon = pystray.Icon(
             name="infinite-clipboard",
             icon=create_icon_image("gray"),
             title="Infinite Clipboard",
-            menu=menu,
+            menu=pystray.Menu(self._menu_items),
         )
 
         # setup 콜백: Windows에서 네이티브 아이콘 생성 후 호출됨
@@ -148,33 +177,96 @@ class TrayApp:
 
     def stop(self) -> None:
         """트레이 아이콘 중지"""
+        if self._badge_timer is not None:
+            self._badge_timer.cancel()
         if self.icon is not None:
             self.icon.stop()
 
-    def update_icon(self) -> None:
-        """앱 상태에 따라 트레이 아이콘 색상 변경.
+    def _lang(self) -> str:
+        return getattr(self.app, "_lang", "ko") or "ko"
 
-        v2.2.1 B3: active transfer 가 있으면 amber 우선 — connection 상태와 무관하게
-        "지금 뭔가 진행 중" 신호. 완료/취소 시 connection 기반 색상으로 복귀.
+    def _snapshot(self) -> dict:
+        getter = getattr(self.app, "status_snapshot", None)
+        if getter is None:
+            return {}
+        try:
+            return getter()
+        except Exception as e:
+            logger.debug(f"[트레이] 상태 스냅샷 실패: {e}")
+            return {}
+
+    def _menu_items(self):
+        """pystray 동적 메뉴 — update_menu() 때마다 다시 평가된다."""
+        lang = self._lang()
+        for line in self._status_lines:
+            yield pystray.MenuItem(line, None, enabled=False)
+        if self._status_lines:
+            yield pystray.Menu.SEPARATOR
+        yield pystray.MenuItem(tr("클립보드 이력", lang), self._show_history)
+        yield pystray.MenuItem(tr("파일 전송", lang), self._show_transfers)
+        yield pystray.MenuItem(tr("설정", lang), self._show_settings)
+        yield pystray.MenuItem(tr("로그 보기", lang), self._view_log)
+        yield pystray.MenuItem(tr("임시 파일 정리", lang), self._cleanup_staging)
+        yield pystray.Menu.SEPARATOR
+        yield pystray.MenuItem(tr("정보", lang), self._show_about)
+        yield pystray.MenuItem(tr("종료", lang), self._quit)
+
+    @staticmethod
+    def _on_ui_thread(fn) -> None:
+        """macOS 는 pystray 가 AppKit(setMenu_/setToolTip_) 을 호출 스레드에서 바로
+        부른다 — 네트워크 스레드에서 오는 갱신을 메인 run loop 로 넘긴다. AppIndicator
+        는 pystray 가 이미 GLib idle 로 넘기고(@mainloop), Win32 는 Shell_NotifyIcon/
+        HMENU 가 스레드 무관이라 그대로 호출한다."""
+        if platform.system() == "Darwin":
+            try:
+                from PyObjCTools import AppHelper
+                AppHelper.callAfter(fn)
+                return
+            except Exception:
+                pass
+        fn()
+
+    def update_icon(self) -> None:
+        """앱 상태 → 트레이 아이콘(색+배지) · 툴팁 · 메뉴 상태 줄 갱신.
+
+        2026-09-28 UX 검토 B2: 예전엔 전송 중이면 아이콘 전체를 amber 로 바꿔
+        "서버: 접속 기기 0대(대기)" 와 같은 색이 됐다. 이제 색은 연결 상태만
+        뜻하고, 전송 중(busy)·방금 받음(new) 은 우하단 배지로 겹친다.
         """
         if self.icon is None:
             return
-
-        # v2.2.1 B3: active transfer 우선
-        if hasattr(self.app, "_has_active_transfer") and self.app._has_active_transfer():
-            self.icon.icon = create_icon_image("amber")
+        snap = self._snapshot()
+        if not snap:
             return
+        lang = self._lang()
+        color, badge = tray_status.icon_state(snap)
+        lines = tray_status.status_lines(snap, lang)
+        title = tray_status.tooltip_text(snap, lang)
+        image = create_icon_image(color, badge)
 
-        if self.app.config.mode == "server":
-            if self.app.connected_clients > 0:
-                self.icon.icon = create_icon_image("green")
-            else:
-                self.icon.icon = create_icon_image("yellow")
-        else:
-            if self.app.connected:
-                self.icon.icon = create_icon_image("green")
-            else:
-                self.icon.icon = create_icon_image("red")
+        def _apply() -> None:
+            icon = self.icon
+            if icon is None:
+                return
+            icon.icon = image
+            if icon.title != title:
+                icon.title = title
+            if lines != self._status_lines:
+                self._status_lines = lines
+                icon.update_menu()
+
+        self._on_ui_thread(_apply)
+
+        # B5: "방금 받음" 배지는 시간이 지나면 스스로 꺼져야 한다 — 만료 시점에 한 번 더 갱신
+        if badge == "new":
+            last = snap.get("last_received") or {}
+            import time as _time
+            remaining = tray_status.RECEIVED_BADGE_SECONDS - (_time.time() - float(last.get("at", 0)))
+            if self._badge_timer is not None:
+                self._badge_timer.cancel()
+            self._badge_timer = threading.Timer(max(0.5, remaining + 0.2), self.update_icon)
+            self._badge_timer.daemon = True
+            self._badge_timer.start()
 
     def notify(self, title: str, message: str) -> None:
         """OS 토스트 알림"""

@@ -144,3 +144,23 @@ def test_non_text_entries_are_not_deduplicated(tmp_path, monkeypatch):
     app._add_to_history("image", "base64data")
     app._add_to_history("image", "base64data")
     assert len(app.clipboard_history) == 2
+
+
+# ── 2026-09-28 UX 검토 B1/B5: 트레이 상태 스냅샷 ─────────────────────────
+
+def test_status_snapshot_and_last_received_only_for_receive(tmp_path):
+    app = _make_app()
+    snap = app.status_snapshot()
+    assert snap["mode"] == "client" and snap["last_received"] is None
+    assert snap["active"] == [] and snap["client_error"] == ""
+
+    app._track_transfer("t-send", "out.txt", 10, "send")
+    assert app.status_snapshot()["active"] == [{"filename": "out.txt", "direction": "send"}]
+    app._finish_transfer("t-send")
+    assert app.last_received is None, "보낸 전송은 '최근 받음' 이 아니다"
+
+    app._track_transfer("t-recv", "in.png", 20, "receive")
+    app._finish_transfer("t-recv")
+    last = app.status_snapshot()["last_received"]
+    assert last["name"] == "in.png" and last["size"] == 20
+    assert app.status_snapshot()["active"] == []

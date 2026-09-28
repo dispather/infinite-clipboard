@@ -195,6 +195,10 @@ class InfiniteClipboard:
         # 서버 모드: {peer_id: name} 연결된 클라이언트들. 클라이언트 모드: 서버
         # peer_id 는 self.client.server_peer_id 에 보관되므로 여기선 비워 둔다.
         self.peers = {}
+        # 2026-09-28 UX 검토 B5: 마지막으로 받은 파일 {name, size, at} — 문턱 미만
+        # 자동 수신은 전송창 팝업도 OS 알림도 없어 "도착했나" 를 알 방법이 없었다.
+        # 트레이 메뉴 상태 줄 + "방금 받음" 배지가 이 값을 읽는다(ui/tray_status.py).
+        self.last_received = None
 
         # ── v3.0 S2c lazy 오케스트레이션 ────────────────────────────────
         # [source 측] 현재 내가 제공 중인 offer (copy 시점 경로/메타만 보관, 데이터 X).
@@ -542,6 +546,9 @@ class InfiniteClipboard:
         self.client.on_connected = self._on_client_connected
         self.client.on_disconnected = self._on_client_disconnected
         self.client.on_message_received = self._on_client_message
+        # B1: 첫 연결 실패(키 불일치·거부 등)는 on_disconnected 가 안 불리므로
+        # 사유 변경을 따로 받아 트레이 상태 줄을 갱신한다.
+        self.client.on_error_changed = self._notify_state_changed
 
         self.client.start()
 
@@ -2333,11 +2340,6 @@ class InfiniteClipboard:
         if direction == "receive" and total_size >= self._NOTIFY_SIZE_THRESHOLD:
             self._launch_transfer_window()
 
-    def _has_active_transfer(self) -> bool:
-        """v2.2.1 B3: 진행 중 transfer 가 있는지. 트레이 amber 결정."""
-        with self._progress_lock:
-            return bool(self._transfer_progress)
-
     def _launch_transfer_window(self):
         """v2.2.1 B3: TransferWindow 를 별도 프로세스로 띄운다.
 
@@ -2432,6 +2434,13 @@ class InfiniteClipboard:
                 if len(self._completed_transfers) > 20:
                     self._completed_transfers = self._completed_transfers[-20:]
                 finished_info = info
+                if info["direction"] == "receive":
+                    # B5: 모든 수신 경로(paste·자동 peek·이미지·[받기])가 여기로 모인다
+                    # (_handle_transfer_complete). 크기 무관 — 작은 파일일수록 신호가 없었다.
+                    self.last_received = {
+                        "name": info["filename"], "size": info["total_size"],
+                        "at": time.time(),
+                    }
         self._save_transfer_state(force=True)
         # v2.2.1 B1: 완료 알림
         if finished_info:
@@ -2508,6 +2517,31 @@ class InfiniteClipboard:
             import shutil
             shutil.rmtree(temp_dir, ignore_errors=True)
             logger.info(f"[파일] 임시 디렉토리 삭제: {temp_dir}")
+
+    def status_snapshot(self) -> dict:
+        """트레이 상태 표시용 스냅샷(2026-09-28 UX 검토 B1/B2/B5).
+
+        ui/tray_status.py 의 순수 함수가 이 dict 만 보고 아이콘/메뉴/툴팁을 만든다 —
+        UI 가 InfiniteClipboard 내부 필드를 직접 읽지 않게 하는 경계.
+        """
+        with self._progress_lock:
+            active = [
+                {"filename": i.get("filename", ""), "direction": i.get("direction", "")}
+                for i in self._transfer_progress.values()
+            ]
+        client = self.client
+        return {
+            "mode": self.config.mode,
+            "connected": bool(self.connected),
+            "server_host": self.config.server_host,
+            "port": self.config.port,
+            # 서버 모드에서만 채워짐({peer_id: name}) — 복사본으로 넘긴다
+            "peers": sorted(dict(self.peers).values()),
+            "startup_error": bool(self._startup_error),
+            "client_error": getattr(client, "last_error", "") if client else "",
+            "active": active,
+            "last_received": dict(self.last_received) if self.last_received else None,
+        }
 
     def _notify_state_changed(self):
         """상태 변경 시 UI 콜백 호출"""
