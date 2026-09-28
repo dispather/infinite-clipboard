@@ -2,7 +2,7 @@
 round_trip: response
 round_trip_status: closed
 from_host: mac (mac-studio)
-to_host: linux (desireallsx)
+to_host: linux-desktop
 topic: infinite-clipboard-lazy-mac-trap38-diagnostic-logging
 created: 2026-07-11
 in_reply_to: docs/audit/2026-07-11-infinite-clipboard-lazy-mac-diag38-handoff.md

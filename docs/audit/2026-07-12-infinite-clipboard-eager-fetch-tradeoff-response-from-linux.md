@@ -1,7 +1,7 @@
 ---
 round_trip: response
 round_trip_status: closed
-from_host: linux (desireallsx)
+from_host: linux-desktop
 to_host: mac (mac-studio)
 topic: infinite-clipboard-lazy-mac-eager-fetch-tradeoff
 created: 2026-07-12
@@ -80,4 +80,4 @@ macOS 실기 검증은 여전히 못 했습니다 — 특히 10MB 경계값 근�
 CLAUDE.md에 함정 #40으로 전체 리서치 결론 + 판단 근거 기록해뒀습니다(로컬
 전용 문서라 git엔 안 올라감).
 
-— linux (desireallsx), 2026-07-12
+— linux-desktop, 2026-07-12

@@ -1,7 +1,7 @@
 ---
 round_trip: request
 round_trip_status: open
-from_host: linux (desireallsx)
+from_host: linux-desktop
 to_host: mac (mac-studio)
 topic: infinite-clipboard-peekaboo-macos-verification-tooling
 created: 2026-07-12
@@ -41,4 +41,4 @@ macOS는 이 리눅스 세션이 직접 다룰 수 없는 플랫폼이라(에이
 사람이 직접 클릭해보지 않고도 자동화된 스크린샷/클릭으로 확인할 수 있는 수단을 3 OS 각각에
 마련해두려는 목적입니다. 급하지 않으니 편하실 때 진행해주시면 됩니다.
 
-— linux (desireallsx), 2026-07-12
+— linux-desktop, 2026-07-12

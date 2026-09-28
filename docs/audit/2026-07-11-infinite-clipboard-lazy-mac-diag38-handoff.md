@@ -1,6 +1,6 @@
 ---
 round_trip_status: closed
-from_host: linux (desireallsx)
+from_host: linux-desktop
 to_host: mac (mac-studio)
 topic: infinite-clipboard-lazy-mac-trap38-diagnostic-logging
 created: 2026-07-11
@@ -70,4 +70,4 @@ git pull origin main               # 7a7d417 이후 확인
 완료되면 함정 #38 CLAUDE.md 항목 업데이트하고, 조사 종결 시 이 3개 진단 로그는 제거
 예정입니다(임시 목적). 급하지 않습니다.
 
-— linux (desireallsx), 2026-07-11
+— linux-desktop, 2026-07-11

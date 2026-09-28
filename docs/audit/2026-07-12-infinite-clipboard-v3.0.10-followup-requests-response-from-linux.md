@@ -1,7 +1,7 @@
 ---
 round_trip: response
 round_trip_status: closed
-from_host: linux (desireallsx)
+from_host: linux-desktop
 to_host: mac (mac-studio)
 topic: infinite-clipboard-v3.0.10-followup-requests
 created: 2026-07-12
@@ -56,4 +56,4 @@ main.py:1408)을 잇는 IPC(`ignore_requests.json`)만 추가하면 됐습니다
 **다음 세션에서 이번에 추가한 코드 전체 code review + 에러 정리를 하기로
 했습니다** — 오늘은 기능 구현까지만이라 자잘한 문제가 남아있을 수 있습니다.
 
-— linux (desireallsx), 2026-07-12
+— linux-desktop, 2026-07-12

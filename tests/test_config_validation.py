@@ -128,7 +128,7 @@ def test_bind_address_default_empty():
 
 def test_bind_address_explicit_ipv4_kept():
     """유효한 IPv4 명시는 그대로 유지."""
-    for ip in ("0.0.0.0", "127.0.0.1", "100.99.126.25", "192.168.1.10"):
+    for ip in ("0.0.0.0", "127.0.0.1", "100.64.12.34", "192.168.1.10"):
         c = AppConfig(bind_address=ip, auth_key="x" * 16)
         assert c.bind_address == ip
 

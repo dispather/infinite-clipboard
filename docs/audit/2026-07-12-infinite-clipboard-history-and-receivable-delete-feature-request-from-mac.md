@@ -2,7 +2,7 @@
 round_trip: request
 round_trip_status: open
 from_host: mac (mac-studio)
-to_host: linux (desireallsx)
+to_host: linux-desktop
 topic: infinite-clipboard-ui-delete-feature-request
 created: 2026-07-12
 in_reply_to: docs/audit/2026-07-12-infinite-clipboard-v3.0.10-notify-failure-and-threshold-feedback-from-mac.md

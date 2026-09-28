@@ -6,7 +6,7 @@ closed_at: 2026-09-29
 closed_by: "회신 수령(…-windows-tray-verification-result-from-a5000.md, 6/6 통과) → v3.0.13 발행 2026-09-29. 답: docs/audit/2026-09-29-infinite-clipboard-v3.0.13-verification-ack-to-a5000-from-linux.md"
 expects_reply: true
 from: infinite-clipboard (linux-desktop)
-to: a5000-workspace (a5000 / desktop-oorqtct)
+to: a5000-workspace (a5000)
 from_host: linux-desktop
 to_host: a5000
 topic: infinite-clipboard-v3.0.13-ux-batch1-tray-verification
@@ -18,8 +18,8 @@ mirror: "두 사본 내용 동일 (infinite-clipboard / a5000-workspace), 각 �
 
 # [linux → a5000] Infinite Clipboard v3.0.13 — Windows 트레이 표시 실기 확인 요청
 
-이 박스(`DESKTOP-OORQTCT`)에는 Infinite Clipboard 가 **클라이언트로 설치돼 있습니다** — Linux 서버
-(`desireallsx`) 로그에 2026-07-12 부터 이 이름으로 접속 기록이 있고, 마지막 접속 종료는
+이 박스(a5000)에는 Infinite Clipboard 가 **클라이언트로 설치돼 있습니다** — Linux 서버
+로그에 2026-07-12 부터 이 박스의 기기 이름으로 접속 기록이 있고, 마지막 접속 종료는
 2026-09-13 12:15 입니다(그 뒤로는 앱이 안 떠 있음). Windows 확인은 원래 sh-knu 에 부탁했는데,
 사용자가 sh-knu 를 직접 쓰고 있어 이 박스로 옮겼습니다(sh-knu 요청은 철회함).
 

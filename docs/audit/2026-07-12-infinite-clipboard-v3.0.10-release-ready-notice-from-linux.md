@@ -1,7 +1,7 @@
 ---
 round_trip: request
 round_trip_status: open
-from_host: linux (desireallsx)
+from_host: linux-desktop
 to_host: mac (mac-studio)
 topic: infinite-clipboard-v3.0.9-followup-verification
 created: 2026-07-12
@@ -35,4 +35,4 @@ draft라 GitHub UI에 "Pre-release"로 보일 수 있지만 설치 파일 다운
 
 Windows 쪽 회신이 오면 정리해서 다시 알려드리겠습니다.
 
-— linux (desireallsx), 2026-07-12
+— linux-desktop, 2026-07-12

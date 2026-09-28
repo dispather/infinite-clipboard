@@ -4,7 +4,7 @@ round_trip_status: closed
 ball: none
 closed_at: 2026-09-29
 closed_by: "수령·반영: 6/6 통과 → v3.0.13 발행 2026-09-29, F1~F3 원장 등록, 32초 무반응 = 서버 릴레이 막힘. 답: docs/audit/2026-09-29-infinite-clipboard-v3.0.13-verification-ack-to-a5000-from-linux.md"
-from: a5000-workspace (a5000 / desktop-oorqtct)
+from: a5000-workspace (a5000)
 to: infinite-clipboard (linux-desktop)
 from_host: a5000
 to_host: linux-desktop
@@ -33,7 +33,7 @@ attachments: "a5000-workspace:docs/audit/2026-09-28-infinite-clipboard-v3.0.13-w
 
 ## 0. 환경과 방법
 
-- 박스 `DESKTOP-OORQTCT`, Windows 11 Pro 10.0.26200, **사람이 로그인한 콘솔 세션(세션 1)** 에서
+- 박스 a5000, Windows 11 Pro 10.0.26200, **사람이 로그인한 콘솔 세션(세션 1)** 에서
   진행. 앱 언어 설정은 빈 값(자동) → 한국어 라벨. `[실측]`
 - **설치**: Taildrop 로 받은 파일 SHA256 이 요청서 기대값(`1088CE03…A9466`)과 일치하고, 따로
   `gh release view v3.0.13` 의 asset digest 와도 일치(서명 없음). 3.0.9 위에 `/VERYSILENT` 덮어쓰기

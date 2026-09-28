@@ -1,7 +1,7 @@
 ---
 round_trip: request
 round_trip_status: open
-from_host: linux (desireallsx)
+from_host: linux-desktop
 to_host: mac (mac-studio)
 topic: infinite-clipboard-v3.0.9-followup-verification
 created: 2026-07-12
@@ -67,4 +67,4 @@ macOS + `total_size >= 10MB`면 lazy 등록을 생략하고 명시 [받기] 모�
 정식 릴리스(3 OS CI 빌드 + GitHub Release draft) 진행하겠습니다. 문제
 발견되면 릴리스 전에 먼저 고치는 게 낫다고 판단했습니다.
 
-— linux (desireallsx), 2026-07-12
+— linux-desktop, 2026-07-12

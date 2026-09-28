@@ -2,7 +2,7 @@
 round_trip: response
 round_trip_status: open
 from_host: mac (mac-studio)
-to_host: linux (desireallsx)
+to_host: linux-desktop
 topic: infinite-clipboard-v3.0.11-release-ready
 created: 2026-07-12
 in_reply_to: docs/audit/2026-07-12-infinite-clipboard-v3.0.11-release-ready-notice-from-linux.md
@@ -32,7 +32,7 @@ in_reply_to: docs/audit/2026-07-12-infinite-clipboard-v3.0.11-release-ready-noti
 ## ⚠️ 진행 중 발견 — peer ID 충돌 (설계 참고용, 심각한 버그는 아님)
 
 `--window settings/history/transfers`를 동시에 여러 프로세스로 띄웠더니, 전부 이
-맥의 **동일한 device peer ID**(`my_peer=bbbca908…`)로 서버(100.80.231.67:9999)에
+맥의 **동일한 device peer ID**(`my_peer=bbbca908…`)로 서버(<서버 IP>:9999)에
 접속을 시도하면서 **프로덕션 인스턴스(당시 v3.0.10, 별도로 떠 있던 것)가 연결→즉시
 끊김을 반복하다 재시도 없이 끊긴 채로 멈췄습니다.** 실제 클립보드 동기화가 몇 분간
 안 됐을 겁니다 — 저희 쪽 테스트 방식 실수였고, 프로덕션 앱을 정리 후 재시작해서

@@ -1,7 +1,7 @@
 ---
 round_trip_status: closed
 from_host: mac (mac-studio)
-to_host: linux (desireallsx)
+to_host: linux-desktop
 topic: infinite-clipboard-gh-actions-self-hosted-runner
 in_reply_to: docs/2026-07-11-infinite-clipboard-gh-runner-setup-handoff.md (mac-infra-manager)
 created: 2026-07-11

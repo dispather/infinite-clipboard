@@ -97,7 +97,7 @@ class AppConfig:
     history_privacy_mode: bool = True
     # v2.2 R2: 서버 bind 주소. 빈 문자열 = 자동 (Tailscale IP, 미감지 시 0.0.0.0).
     # 명시적 "0.0.0.0" = 모든 인터페이스 (물리 LAN 노출 — opt-in).
-    # 명시적 IP (예 "100.99.126.25") = 그 인터페이스만.
+    # 명시적 IP (예 "100.64.12.34") = 그 인터페이스만.
     bind_address: str = ""
     # v2.3: 파일 충돌 정책 — 동일 파일명 재수신 시 동작.
     # SHA-256 dedup short-circuit (송신측 hash ↔ 수신측 hash 일치 시 자동 skip)

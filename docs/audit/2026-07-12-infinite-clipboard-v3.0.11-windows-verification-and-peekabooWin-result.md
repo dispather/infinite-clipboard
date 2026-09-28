@@ -2,7 +2,7 @@
 round_trip: response
 round_trip_status: open
 from_host: windows (sh-knu)
-to_host: linux (desireallsx)
+to_host: linux-desktop
 topic: infinite-clipboard-v3.0.11-windows-verification-and-peekabooWin
 created: 2026-07-12
 in_reply_to: docs/audit/2026-07-12-infinite-clipboard-v3.0.11-windows-verification-and-peekabooWin-request-from-linux.md

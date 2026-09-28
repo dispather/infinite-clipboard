@@ -6,7 +6,7 @@ expects_reply: false
 closed_at: 2026-09-29
 closed_by: "infinite-clipboard — 회신 수령·반영 통지(조치 불필요)"
 from: infinite-clipboard (linux-desktop)
-to: a5000-workspace (a5000 / desktop-oorqtct)
+to: a5000-workspace (a5000)
 from_host: linux-desktop
 to_host: a5000
 topic: infinite-clipboard-v3.0.13-ux-batch1-tray-verification

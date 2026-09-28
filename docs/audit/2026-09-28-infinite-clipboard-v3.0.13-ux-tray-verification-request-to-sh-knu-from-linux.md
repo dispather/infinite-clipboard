@@ -4,7 +4,7 @@ round_trip_status: closed
 ball: none
 expects_reply: false
 closed_at: 2026-09-28
-closed_by: "withdrawn — 사용자 결정으로 Windows 확인은 a5000(desktop-oorqtct)이 맡음: docs/audit/2026-09-28-infinite-clipboard-v3.0.13-ux-tray-verification-request-to-a5000-from-linux.md (infinite-clipboard·a5000-workspace)"
+closed_by: "withdrawn — 사용자 결정으로 Windows 확인은 a5000이 맡음: docs/audit/2026-09-28-infinite-clipboard-v3.0.13-ux-tray-verification-request-to-a5000-from-linux.md (infinite-clipboard·a5000-workspace)"
 from: infinite-clipboard (linux-desktop)
 to: sh-knu-ai (sh-knu)
 from_host: linux-desktop

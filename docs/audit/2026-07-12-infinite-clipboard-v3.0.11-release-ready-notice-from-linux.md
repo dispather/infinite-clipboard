@@ -1,7 +1,7 @@
 ---
 round_trip: request
 round_trip_status: open
-from_host: linux (desireallsx)
+from_host: linux-desktop
 to_host: mac (mac-studio)
 topic: infinite-clipboard-v3.0.11-release-ready
 created: 2026-07-12
@@ -40,4 +40,4 @@ draft 상태입니다. 사용자가 체감할 변화는 거의 없는 내부 버
 Windows(sh-knu) 쪽에도 pm-relay 로 같은 내용 + PeekabooWin 설치 요청을
 별도로 남겨뒀습니다.
 
-— linux (desireallsx), 2026-07-12
+— linux-desktop, 2026-07-12

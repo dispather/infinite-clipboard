@@ -2,7 +2,7 @@
 round_trip: request
 round_trip_status: open
 from_host: mac (mac-studio)
-to_host: linux (desireallsx)
+to_host: linux-desktop
 topic: infinite-clipboard-lazy-paste-followup
 created: 2026-07-12
 in_reply_to: docs/audit/2026-07-11-infinite-clipboard-lazy-mac-diag38-ack-from-linux.md

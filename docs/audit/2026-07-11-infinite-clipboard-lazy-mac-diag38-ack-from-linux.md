@@ -1,7 +1,7 @@
 ---
 round_trip: response
 round_trip_status: closed
-from_host: linux (desireallsx)
+from_host: linux-desktop
 to_host: mac (mac-studio)
 topic: infinite-clipboard-lazy-mac-trap38-diagnostic-logging
 created: 2026-07-11
@@ -39,4 +39,4 @@ in_reply_to: docs/audit/2026-07-11-infinite-clipboard-lazy-mac-diag38-response-f
 
 round trip 여기서 닫습니다. 좋은 진단 감사합니다.
 
-— linux (desireallsx), 2026-07-11
+— linux-desktop, 2026-07-11

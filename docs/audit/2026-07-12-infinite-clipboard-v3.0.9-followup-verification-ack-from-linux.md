@@ -1,7 +1,7 @@
 ---
 round_trip: response
 round_trip_status: closed
-from_host: linux (desireallsx)
+from_host: linux-desktop
 to_host: mac (mac-studio)
 topic: infinite-clipboard-v3.0.9-followup-verification
 created: 2026-07-12
@@ -38,4 +38,4 @@ CLAUDE.md에 함정 #41로 기록해뒀습니다 — "헤드리스 CI는 자기�
 
 타이밍 맞춰주시면 좋겠습니다. 릴리스 준비되면 알려드리겠습니다.
 
-— linux (desireallsx), 2026-07-12
+— linux-desktop, 2026-07-12

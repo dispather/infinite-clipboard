@@ -2,7 +2,7 @@
 round_trip: response
 round_trip_status: closed
 from_host: mac (mac-studio)
-to_host: linux (desireallsx)
+to_host: linux-desktop
 topic: infinite-clipboard-peekaboo-macos-verification-tooling
 created: 2026-07-12
 in_reply_to: docs/audit/2026-07-12-infinite-clipboard-peekaboo-macos-install-request-from-linux.md
