@@ -178,7 +178,13 @@ class HistoryWindow(customtkinter.CTkToplevel):
         except OSError:
             return None
 
+    def destroy(self):
+        self._alive = False
+        super().destroy()
+
     def _poll_history_file(self) -> None:
+        if not getattr(self, "_alive", True):
+            return
         try:
             sig = self._stat_sig()
             if sig != self._file_sig:
@@ -215,6 +221,8 @@ class HistoryWindow(customtkinter.CTkToplevel):
 
     def _refresh_elapsed_labels(self) -> None:
         """A4: "방금/N분 전" 라벨만 갱신(전체 재생성 없이 — hover/포커스 유지)."""
+        if not getattr(self, "_alive", True):
+            return
         for label, ts in list(self._time_labels):
             try:
                 label.configure(text=_format_elapsed(ts, self._lang))

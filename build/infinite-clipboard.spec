@@ -109,6 +109,10 @@ elif IS_MAC:
         "plyer.platforms.macosx.notification",
         # PyObjC 프레임워크 심볼
         "AppKit", "Foundation", "Quartz", "objc",
+        # 트레이 갱신을 메인 run loop 로 넘기는 ui/tray.py _on_ui_thread (2026-09-28 B1).
+        # pystray._darwin 은 PyObjCTools.MachSignals 만 import 해 AppHelper 가 번들에
+        # 들어간다는 보장이 없다 — 누락 시 조용히 직접 호출로 폴백(로그로만 구분).
+        "PyObjCTools.AppHelper",
         # 알림 액션 버튼용 UNUserNotificationCenter 프레임워크 (2026-07-10).
         # 코드 서명 필요 — build_mac.sh 의 애드혹 codesign 단계 참조.
         "UserNotifications",

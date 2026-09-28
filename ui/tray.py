@@ -34,6 +34,10 @@ logger = logging.getLogger("infinite-clipboard.tray")
 # 요청했다"는 상태를 표현한다 (동시 호출 race 차단용).
 _SPAWNING = object()
 
+# macOS 트레이 갱신 경로를 1회만 로그 — 실패해도 조용히 직접 호출로 떨어지므로
+# 실기 검증 때 "메인스레드 경유가 실제로 됐는지" 를 로그로만 구분할 수 있다.
+_ui_dispatch_logged = False
+
 
 # ── 아이콘 이미지 로드 ─────────────────────────────────────────────────
 
@@ -217,13 +221,19 @@ class TrayApp:
         부른다 — 네트워크 스레드에서 오는 갱신을 메인 run loop 로 넘긴다. AppIndicator
         는 pystray 가 이미 GLib idle 로 넘기고(@mainloop), Win32 는 Shell_NotifyIcon/
         HMENU 가 스레드 무관이라 그대로 호출한다."""
+        global _ui_dispatch_logged
         if platform.system() == "Darwin":
             try:
                 from PyObjCTools import AppHelper
                 AppHelper.callAfter(fn)
+                if not _ui_dispatch_logged:
+                    _ui_dispatch_logged = True
+                    logger.info("[트레이] macOS 갱신 경로: AppHelper.callAfter(메인 run loop)")
                 return
-            except Exception:
-                pass
+            except Exception as e:
+                if not _ui_dispatch_logged:
+                    _ui_dispatch_logged = True
+                    logger.warning(f"[트레이] macOS 갱신 경로: 직접 호출 폴백 — AppHelper 사용 불가: {e}")
         fn()
 
     def update_icon(self) -> None:
