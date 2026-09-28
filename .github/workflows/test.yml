@@ -112,6 +112,15 @@ jobs:
         # 실 Windows 검증 수단 — 실제 InteractableWindowsToaster.show_toast 호출 +
         # on_activated 받기/무시 디스패치 로직 검증 (2026-07-10).
         run: python -m pytest tests/test_notify_win.py -v
+      - name: Run tray status + handshake tests (Windows 소켓 종료 동작)
+        # 키 불일치 시 서버가 소켓을 닫는 방식이 Windows 에선 정상 종료가 아니라
+        # 리셋(WinError 10054)으로 보일 수 있다 — 그러면 classify_client_error 가
+        # 'auth' 가 아니라 'other' 로 떨어진다. Linux 잡만으로는 못 가르므로 여기서
+        # 실측한다(2026-09-28 UX 1차 실기 검증). tray_status 는 core.file_transfer
+        # 경유로 xxhash 가 필요하다.
+        run: |
+          python -m pip install xxhash
+          python -m pytest tests/test_handshake_integration.py tests/test_tray_status.py -v
 
   macos:
     name: macOS (NSPasteboard data provider)
