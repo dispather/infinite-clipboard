@@ -249,12 +249,14 @@ def test_spawn_post_exit_detached_with_clean_env(tmp_path, monkeypatch):
 
 @windows_only
 @pytest.mark.parametrize("setup_rc", [0, 1])
-def test_windows_helper_relaunches_regardless_of_setup_exit(weird_dir, setup_rc):
-    marker = weird_dir / "relaunched.txt"
+def test_windows_helper_relaunches_regardless_of_setup_exit(weird_dir, tmp_path, setup_rc):
+    # helper·setup·app «위치»는 weird_dir(공백·'·한글 — PS 인용 검증). 마커는 ASCII 경로 —
+    # cmd.exe 는 .cmd «내용»을 콘솔 OEM 코드페이지(영문 러너 cp437)로 읽어 한글이 깨진다.
+    marker = tmp_path / "relaunched.txt"
     setup = weird_dir / "infinite-clipboard-setup-3.0.99.cmd"
     setup.write_text(f"@echo off\r\nexit /b {setup_rc}\r\n", encoding="ascii")
     app = weird_dir / "app.cmd"
-    app.write_text(f'@echo off\r\necho ran> "{marker}"\r\n', encoding="utf-8")
+    app.write_text(f'@echo off\r\necho ran> "{marker}"\r\n', encoding="ascii")
     log = weird_dir / "update-helper.log"
     cmd = updater.post_exit_command("Windows", "silent", 999999, setup,
                                     executable=str(app), log_path=log, workdir=weird_dir)
