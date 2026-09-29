@@ -60,6 +60,7 @@ from core.privacy import detect_sensitive_kind
 # v3.0 lazy provider (OS 별 백엔드 팩토리 — 헤드리스/미지원 시 None graceful)
 from core.lazy_clipboard import get_lazy_provider, FetchedContent, KIND_FILE, KIND_IMAGE
 from core.actionable_notify import get_actionable_notifier
+from core import updater
 from ui.i18n import get_language, t
 
 # 로깅 설정 — 콘솔 + 파일 이중 출력
@@ -150,6 +151,16 @@ class InfiniteClipboard:
         self._lang = get_language(self.config)
         self.running = False
         self._restart_requested = False
+        # 2026-09-29 자동 업데이트(core/updater.py): 앱 종료 «후» 실행할 설치 helper 명령.
+        # 설정 재시작(_restart_requested)과 같은 자리 — main() 끝 — 에서 소비한다.
+        self._post_exit = None
+        self.update_available = None          # core.updater.UpdateInfo | None
+        # "idle" | "downloading" — 중복 클릭 가드. idle 복귀의 소유자는 _prepare_update_and_exit
+        self._update_phase = "idle"
+        self._update_lock = threading.Lock()  # phase 판정·전이에만 짧게 쥔다
+        # 받을 파일이 있을 때 1차 클릭이 연 «재클릭 허용» 창의 끝 시각(지나면 자동 만료)
+        self._update_confirm_until = 0.0
+        self._releases_url = updater.RELEASES_API
 
         # 프로토콜 (바이너리 청크 생성용)
         self.protocol = Protocol(config.auth_key)
@@ -280,6 +291,11 @@ class InfiniteClipboard:
         # 2026-07-12 mac-studio 기능 요청: TransferWindow "받을 파일" 목록 무시 버튼 IPC 폴링
         ignore_thread = threading.Thread(target=self._watch_ignore_requests, daemon=True)
         ignore_thread.start()
+
+        # 2026-09-29 자동 업데이트 확인 (시작 30초 후 + 24시간마다). 꺼져 있어도
+        # 트레이 «업데이트 확인» 수동 확인은 동작한다.
+        if self.config.auto_update_check:
+            threading.Thread(target=self._update_check_loop, daemon=True).start()
 
         logger.info("Infinite Clipboard 동작 시작")
 
@@ -2571,7 +2587,181 @@ class InfiniteClipboard:
             "client_error": getattr(client, "last_error", "") if client else "",
             "active": active,
             "last_received": dict(self.last_received) if self.last_received else None,
+            "update": {
+                "version": self.update_available.version if self.update_available else None,
+                "phase": self._update_phase,
+                "confirm_pending": time.time() < self._update_confirm_until,
+                "pending_receivables": len(self.receivable_offers),
+            },
         }
+
+    # ── 자동 업데이트 (2026-09-29, core/updater.py) ───────────────────────
+
+    # UpdateError.reason → 사용자 문구 (한국어 원문 — t() 로 번역)
+    _UPDATE_FAIL_TEXT = {
+        "network": "네트워크 연결 실패",
+        "rate_limited": "GitHub 요청 한도 초과 — 잠시 후 다시",
+        "bad_response": "서버 응답 이상",
+    }
+    # 받을 파일이 있을 때 1차 클릭 뒤 재클릭을 받아 주는 시간(초)
+    _UPDATE_CONFIRM_SECONDS = 120
+
+    def check_for_update(self, manual: bool = False):
+        """GitHub 릴리스 확인 → self.update_available 갱신 → 트레이 메뉴 갱신.
+
+        자동 확인(manual=False): 실패는 로그만, 새 버전은 버전당 알림 1회(notified_version).
+        수동 확인(트레이 «업데이트 확인»): 결과를 항상 알림으로 알린다.
+        """
+        from version import __version__
+        try:
+            releases = updater.fetch_releases(self._releases_url)
+        except updater.UpdateError as e:
+            logger.info(f"[업데이트] 확인 실패({'수동' if manual else '자동'}): {e}")
+            if manual:
+                reason = t(self._UPDATE_FAIL_TEXT.get(e.reason, "서버 응답 이상"), self._lang)
+                self._notify(t("업데이트", self._lang),
+                             t("업데이트 확인 실패: {reason}", self._lang).format(reason=reason))
+            return None
+
+        info = updater.pick_update(releases, __version__, platform.system(), platform.machine())
+        state = updater.update_state(last_check_at=time.time())
+        self.update_available = info
+        if info is None:
+            logger.info(f"[업데이트] 최신 버전 (v{__version__})")
+            if manual:
+                self._notify(t("업데이트", self._lang),
+                             t("최신 버전입니다 (v{version})", self._lang).format(version=__version__))
+        else:
+            logger.info(f"[업데이트] 새 버전 v{info.version} — {info.asset_name}")
+            if manual or state.get("notified_version") != info.version:
+                self._notify(t("업데이트", self._lang),
+                             t("새 버전 v{version} 이 있습니다 — 트레이 메뉴에서 설치",
+                               self._lang).format(version=info.version))
+                updater.update_state(notified_version=info.version)
+        self._notify_state_changed()
+        return info
+
+    def _update_check_loop(self):
+        """시작 FIRST_CHECK_DELAY_SECONDS 뒤 1회, 이후 CHECK_INTERVAL_SECONDS 마다 (데몬 스레드)."""
+        next_at = time.time() + updater.FIRST_CHECK_DELAY_SECONDS
+        while self.running:
+            if time.time() >= next_at:
+                try:
+                    self.check_for_update(manual=False)
+                except Exception as e:   # 확인 실패가 앱을 죽이지 않게
+                    logger.warning(f"[업데이트] 자동 확인 중 예외: {e}")
+                next_at = time.time() + updater.CHECK_INTERVAL_SECONDS
+            time.sleep(1)
+
+    def request_update_install(self):
+        """트레이 «업데이트 설치 (vX)» 콜백 — 즉시 반환, 다운로드는 별도 스레드.
+
+        가드(설계 «가드와 그 수명»):
+          - 진행 중(phase != idle) → 무시 (중복 클릭)
+          - 전송 진행 중 → 거부 + 알림 (전송은 스스로 끝남 — 매 클릭 판정)
+          - 받을 파일 N>0 → 1차 클릭은 경고만, _UPDATE_CONFIRM_SECONDS 안의 재클릭만 진행
+            (재시작하면 receivable_offers 가 사라진다). 창은 시간으로 자동 만료.
+        """
+        import shutil
+        import webbrowser
+        info = self.update_available
+        if info is None:
+            return
+        notice = None
+        refresh_later = False
+        start = False
+        with self._update_lock:
+            if self._update_phase != "idle":
+                return
+            with self._progress_lock:
+                busy = bool(self._transfer_progress)
+            pending = len(self.receivable_offers)
+            now = time.time()
+            if busy:
+                notice = t("전송 중에는 업데이트할 수 없습니다 — 끝난 뒤 다시 누르세요", self._lang)
+            elif pending and now > self._update_confirm_until:
+                self._update_confirm_until = now + self._UPDATE_CONFIRM_SECONDS
+                notice = t("받을 파일 {n}개가 재시작하면 사라집니다 — 계속하려면 2분 안에 한 번 더 누르세요",
+                           self._lang).format(n=pending)
+                refresh_later = True
+            else:
+                mode = updater.install_mode(
+                    platform.system(), sys.executable,
+                    frozen=bool(getattr(sys, "frozen", False)),
+                    env=dict(os.environ), which=shutil.which,
+                )
+                if mode == "page":
+                    logger.info(f"[업데이트] 자가 설치 불가 환경 — 릴리스 페이지 열기: {info.html_url}")
+                    webbrowser.open(info.html_url)
+                    return
+                self._update_phase = "downloading"
+                self._update_confirm_until = 0.0
+                start = True
+                notice = t("v{version} 다운로드 중 — 끝나면 앱이 재시작됩니다",
+                           self._lang).format(version=info.version)
+        if notice:
+            self._notify(t("업데이트", self._lang), notice)
+        self._notify_state_changed()
+        if refresh_later:
+            # 창이 만료되면 메뉴 라벨(«그래도 업데이트 설치»)을 원래대로 되돌린다
+            timer = threading.Timer(self._UPDATE_CONFIRM_SECONDS + 0.5, self._notify_state_changed)
+            timer.daemon = True
+            timer.start()
+        if start:
+            threading.Thread(target=self._prepare_update_and_exit, args=(info, mode),
+                             daemon=True).start()
+
+    def _prepare_update_and_exit(self, info, mode):
+        """다운로드·sha256 대조·(mac) 새 번들 준비 → 종료 후 명령 예약 → 앱 정지.
+
+        파일 교체는 하지 않는다 — 앱이 종료된 «뒤» helper 가 한다(main() 끝의 _post_exit).
+        실패하면 앱은 계속 실행되고 phase 가 idle 로 돌아가 재시도할 수 있다.
+        """
+        import shutil
+        import webbrowser
+        system = platform.system()
+        workdir = Path(tempfile.mkdtemp(prefix="ic_update_"))
+        try:
+            asset = updater.download_verified(info, workdir)
+            if system == "Darwin":
+                updater.prepare_mac_bundle(asset, updater.app_bundle_path(sys.executable))
+                try:
+                    asset.unlink()   # 번들은 <target>.new 로 복사됨 — DMG 는 더 필요 없음
+                except OSError:
+                    pass
+            cmd = updater.post_exit_command(
+                system, mode, os.getpid(), asset, executable=sys.executable,
+                log_path=Path(LOG_FILE).parent / "update-helper.log", workdir=workdir,
+            )
+        except Exception as e:
+            reason = getattr(e, "reason", "error")
+            logger.warning(f"[업데이트] 준비 실패 ({reason}): {e}")
+            shutil.rmtree(workdir, ignore_errors=True)
+            if reason == "corrupt":
+                msg = t("다운로드 파일을 확인할 수 없어 설치를 중단했습니다", self._lang)
+            elif reason in self._UPDATE_FAIL_TEXT:
+                msg = t("업데이트 확인 실패: {reason}", self._lang).format(
+                    reason=t(self._UPDATE_FAIL_TEXT[reason], self._lang))
+            else:   # unverifiable / prepare / 예상 밖 — 수동 설치로 안내
+                msg = t("업데이트 준비 실패 — 릴리스 페이지를 엽니다", self._lang)
+                webbrowser.open(info.html_url)
+            with self._update_lock:
+                self._update_phase = "idle"
+            self._notify(t("업데이트", self._lang), msg)
+            self._notify_state_changed()
+            return
+
+        # 내구 기록을 먼저 — 재시작 후 검증(_consume_update_result)의 근거
+        updater.update_state(installing_version=info.version)
+        self._post_exit = cmd
+        logger.info(f"[업데이트] v{info.version} 준비 완료 — 앱 종료 후 설치: {cmd[0]}")
+        tray = self.tray
+        if tray is not None:
+            # macOS: pystray stop 은 AppKit 호출 — 메인 run loop 로 넘긴다.
+            # tray.run() 이 돌아오면 main() 의 finally 가 app.stop() 을 부른다.
+            tray._on_ui_thread(tray.stop)
+        else:
+            self.stop()
 
     def _notify_state_changed(self):
         """상태 변경 시 UI 콜백 호출"""
@@ -2771,6 +2961,25 @@ def _run_window_only(window_type: str) -> None:
     root.mainloop()
 
 
+def _consume_update_result(lang):
+    """재시작 후 검증 — 직전 실행이 업데이트를 예약했으면(installing_version) 결과 문구 1회.
+
+    helper 는 설치 성공·실패와 무관하게 앱을 다시 띄우므로, 지금 버전이 목표 버전과
+    같은지로 성공을 판정한다. 필드는 읽는 즉시 지운다(알림 1회).
+    """
+    from version import __version__
+    target = updater.load_state().get("installing_version")
+    if not target:
+        return None
+    updater.update_state(installing_version=None)
+    if target == __version__:
+        logger.info(f"[업데이트] v{target} 설치 확인")
+        return t("v{version} 로 업데이트됐습니다", lang).format(version=target)
+    log_path = Path(LOG_FILE).parent / "update-helper.log"
+    logger.warning(f"[업데이트] v{target} 설치 안 됨 (현재 v{__version__}) — {log_path}")
+    return t("업데이트가 설치되지 않았습니다 (로그: {path})", lang).format(path=log_path)
+
+
 def main():
     """메인 함수"""
     from version import __version__, __app_name__
@@ -2830,6 +3039,9 @@ def main():
     app.start()
     if app._startup_error:
         startup_warnings.append(app._startup_error)
+    update_result = _consume_update_result(app._lang)
+    if update_result:
+        startup_warnings.append(update_result)
 
     if args.no_tray:
         # 설정 변경 감시 시작
@@ -2867,6 +3079,19 @@ def main():
             logger.info("종료 요청 (Ctrl+C)")
         finally:
             app.stop()
+
+    # 2026-09-29 자동 업데이트: 앱이 멈춘 «뒤» 설치 helper 실행(파일 교체·재실행은 helper 몫).
+    # helper 를 못 띄우면 설정 재시작 경로로 대체 — 앱이 꺼진 채 남지 않게(재시작 후 검증이
+    # «설치되지 않았습니다» 로 알린다).
+    if app._post_exit:
+        logger.info(f"[업데이트] 종료 후 설치 helper 실행: {app._post_exit}")
+        try:
+            updater.spawn_post_exit(app._post_exit, platform.system())
+        except Exception as e:
+            logger.error(f"[업데이트] helper 실행 실패 — 재시작으로 대체: {e}")
+            app._restart_requested = True
+        else:
+            sys.exit(0)
 
     # 재시작 요청 시 새 프로세스 시작 후 현재 프로세스 종료
     if app._restart_requested:

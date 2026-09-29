@@ -154,6 +154,9 @@ class TrayApp:
         self._window_procs_lock = threading.Lock()
         # B1: 메뉴 맨 위 상태 줄(마지막으로 반영한 값) — 바뀔 때만 update_menu
         self._status_lines: list = []
+        # 2026-09-29 자동 업데이트: «업데이트 설치» 항목 라벨(None=항목 없음)·진행 중 여부
+        self._update_label: str | None = None
+        self._update_busy = False
         self._badge_timer: threading.Timer | None = None
 
     def run(self) -> None:
@@ -212,6 +215,11 @@ class TrayApp:
         yield pystray.MenuItem(tr("로그 보기", lang), self._view_log)
         yield pystray.MenuItem(tr("임시 파일 정리", lang), self._cleanup_staging)
         yield pystray.Menu.SEPARATOR
+        # 2026-09-29 자동 업데이트 — 새 버전이 있을 때만 «업데이트 설치 (vX)»
+        if self._update_label:
+            yield pystray.MenuItem(self._update_label, self._install_update,
+                                   enabled=not self._update_busy)
+        yield pystray.MenuItem(tr("업데이트 확인", lang), self._check_update)
         yield pystray.MenuItem(tr("정보", lang), self._show_about)
         yield pystray.MenuItem(tr("종료", lang), self._quit)
 
@@ -252,6 +260,8 @@ class TrayApp:
         color, badge = tray_status.icon_state(snap)
         lines = tray_status.status_lines(snap, lang)
         title = tray_status.tooltip_text(snap, lang)
+        update_label = tray_status.update_menu_label(snap, lang)
+        update_busy = (snap.get("update") or {}).get("phase") == "downloading"
         image = create_icon_image(color, badge)
 
         def _apply() -> None:
@@ -261,8 +271,12 @@ class TrayApp:
             icon.icon = image
             if icon.title != title:
                 icon.title = title
-            if lines != self._status_lines:
+            # 상태 줄·업데이트 항목이 바뀔 때만 메뉴 재생성(열린 메뉴가 닫히는 빈도를 늘리지 않게)
+            if (lines != self._status_lines or update_label != self._update_label
+                    or update_busy != self._update_busy):
                 self._status_lines = lines
+                self._update_label = update_label
+                self._update_busy = update_busy
                 icon.update_menu()
 
         self._on_ui_thread(_apply)
@@ -361,6 +375,15 @@ class TrayApp:
             self.app._cleanup_staging(notify=True)
         except Exception as e:
             logger.warning(f"[트레이] cleanup 트리거 실패: {e}")
+
+    def _check_update(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
+        """2026-09-29: 수동 업데이트 확인 — 네트워크 요청이라 메뉴 스레드를 막지 않게 스레드로."""
+        threading.Thread(target=self.app.check_for_update, kwargs={"manual": True},
+                         daemon=True).start()
+
+    def _install_update(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
+        """2026-09-29: «업데이트 설치» — 가드·다운로드는 app 이 판정(즉시 반환)."""
+        self.app.request_update_install()
 
     def _show_about(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
         """About 모달 창 표시 — 별도 프로세스(--window about)로 띄움.

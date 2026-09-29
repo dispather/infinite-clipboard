@@ -82,6 +82,7 @@ Settings file locations:
 - **History**: right-click the tray icon → Clipboard History
 - **Transfer progress / receiving**: right-click the tray icon → Transfers
 - **Autostart**: toggle "Start automatically" in the settings window
+- **Updates** (v3.0.14+): the app checks GitHub for a new release 30 seconds after it starts and then once a day. When one is out, the tray menu shows **Install Update (vX.Y.Z)** — one click downloads it, verifies its SHA-256 checksum, installs it, and restarts the app. You can also use **Check for Updates** in the tray menu at any time, or turn off the automatic check in the settings window
 
 <p align="center">
   <img src="assets/screenshots/settings.png" alt="Settings window" width="300">
@@ -146,7 +147,17 @@ Automatic resume is built in. Restart the app and it'll pick up from the checkpo
 ### SmartScreen warning on the Windows installer
 Happens because there's no proper code-signing certificate. Click "More info" → "Run anyway". If you need code signing, buy a certificate and sign with `signtool`.
 
-### Check the installed version
+### Updating
+From **v3.0.14** on, update from the tray menu (**Install Update (vX.Y.Z)**, or **Check for Updates** first). **If you're on v3.0.13 or older, install v3.0.14 manually once** — the updater ships inside the app, so older versions don't have it.
+
+- **Windows**: installs silently and relaunches the app. If you installed "for all users" (Program Files), the installer opens normally instead so Windows can ask for permission
+- **Linux (Arch package)**: a system password prompt appears once (the package is installed with `pacman -U`). If you cancel, the current version simply starts again
+- **macOS**: the app in `/Applications` is replaced and relaunched — no quarantine command needed for updates
+- The update is refused while a file transfer is in progress. If you have files waiting to be received, the first click warns you (they'd be lost on restart) and a second click within 2 minutes proceeds
+- Running from source, or installed somewhere the app can't write to? The menu item opens the release page instead
+- The installer's log is `update-helper.log` next to the app's log file; after restarting, the app tells you whether the update was installed
+
+Check the installed version:
 ```bash
 infinite-clipboard --version
 ```

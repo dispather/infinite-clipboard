@@ -81,3 +81,29 @@ def test_menu_items_are_translated_and_status_first():
     assert texts[0].startswith("● Server running")
     assert items[0].enabled is False
     assert "Clipboard History" in texts and "Quit" in texts
+
+
+def test_update_menu_items_and_refresh_on_update_change():
+    """2026-09-29 자동 업데이트: «업데이트 확인» 은 항상, «업데이트 설치 (vX)» 는 새 버전이 있을 때만.
+    업데이트 상태가 바뀌면(상태 줄은 그대로여도) 메뉴를 다시 만든다."""
+    app, tray = _make()
+    app.snap["update"] = {"version": None, "phase": "idle", "confirm_pending": False,
+                          "pending_receivables": 0}
+    tray.update_icon()
+    texts = [getattr(i, "text", None) for i in tray._menu_items()]
+    assert "Check for Updates" in texts
+    assert not any(isinstance(x, str) and x.startswith("Install Update") for x in texts)
+    before = tray.icon.menu_updates
+
+    app.snap["update"] = dict(app.snap["update"], version="3.0.99")
+    tray.update_icon()
+    assert tray.icon.menu_updates == before + 1
+    items = list(tray._menu_items())
+    install = [i for i in items if getattr(i, "text", "") == "Install Update (v3.0.99)"]
+    assert len(install) == 1 and install[0].enabled
+
+    app.snap["update"] = dict(app.snap["update"], phase="downloading")
+    tray.update_icon()
+    items = list(tray._menu_items())
+    dl = [i for i in items if getattr(i, "text", "") == "Downloading Update…"]
+    assert len(dl) == 1 and dl[0].enabled is False

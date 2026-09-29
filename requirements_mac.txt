@@ -3,3 +3,7 @@ pyobjc-framework-Cocoa>=10.0
 pyobjc-framework-Quartz>=10.0
 # 알림 "받기"/"무시" 액션 버튼 (UNUserNotificationCenter) — 코드 서명 필요, build_mac.sh 참조
 pyobjc-framework-UserNotifications>=10.0
+# 자동 업데이트 HTTPS 검증 CA 묶음 (2026-09-29, core/updater.py _ssl_context) — frozen mac Python 은
+# pyenv + Homebrew OpenSSL 로 빌드돼 기본 CA 경로가 /opt/homebrew/… 를 가리킬 수 있어
+# Homebrew 없는 Mac 에서 인증서 검증이 실패할 수 있다[추정]. PyInstaller hook-certifi 가 cacert.pem 을 번들.
+certifi>=2024.2.2

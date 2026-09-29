@@ -129,3 +129,26 @@ def test_auto_detect_button_click_is_non_blocking(gui_root, monkeypatch):
         )
     finally:
         win.destroy()
+
+
+def test_auto_update_switch_saves_to_config(gui_root, monkeypatch):
+    """2026-09-29 자동 업데이트: «업데이트 자동 확인» 스위치를 끄고 저장하면 config 에 False.
+
+    _save 는 실제 OS 자동 실행 등록(core.autostart.set_enabled)과 settings.json 을 건드리므로
+    둘 다 가짜로 바꾼다 — 이 PC 는 실사용 앱이 도는 개발 환경이다.
+    """
+    import core.autostart as autostart
+    import ui.settings_window as sw
+    from config import AppConfig
+
+    monkeypatch.setattr(sw, "_detect_tailscale_ip", lambda: "")
+    monkeypatch.setattr(autostart, "set_enabled", lambda enabled: True)
+    saved = []
+    monkeypatch.setattr(sw, "save_config", lambda cfg: saved.append(cfg.auto_update_check))
+
+    win = sw.SettingsWindow(AppConfig(auth_key="x" * 32, language="ko", auto_update_check=True))
+    win.update()
+    assert win._auto_update_var.get() is True
+    win._auto_update_var.set(False)
+    win._save()   # 저장 후 창을 스스로 destroy 한다
+    assert saved == [False]

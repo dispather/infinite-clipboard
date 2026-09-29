@@ -168,6 +168,35 @@ STRINGS: dict[str, dict[str, str]] = {
         "{names} — 기존 파일 유지됨 (교체 안 됨, 사용 중이거나 권한 문제)": (
             "{names} — existing files kept (not replaced; in use or permission issue)"
         ),
+
+        # 2026-09-29 자동 업데이트 — ui/tray.py 메뉴, ui/tray_status.py, main.py 알림, 설정창
+        "업데이트 확인": "Check for Updates",
+        "업데이트 설치 (v{version})": "Install Update (v{version})",
+        "업데이트 다운로드 중…": "Downloading Update…",
+        "그래도 업데이트 설치 — 받을 파일 {n}개 사라짐": "Install Anyway — {n} pending file(s) will be lost",
+        "업데이트 자동 확인": "Check for updates automatically",
+        "업데이트": "Update",
+        "새 버전 v{version} 이 있습니다 — 트레이 메뉴에서 설치": (
+            "Version v{version} is available — install it from the tray menu"
+        ),
+        "최신 버전입니다 (v{version})": "You're up to date (v{version})",
+        "업데이트 확인 실패: {reason}": "Update check failed: {reason}",
+        "네트워크 연결 실패": "network error",
+        "GitHub 요청 한도 초과 — 잠시 후 다시": "GitHub rate limit — try again later",
+        "서버 응답 이상": "unexpected server response",
+        "전송 중에는 업데이트할 수 없습니다 — 끝난 뒤 다시 누르세요": (
+            "Can't update during a transfer — try again when it finishes"
+        ),
+        "받을 파일 {n}개가 재시작하면 사라집니다 — 계속하려면 2분 안에 한 번 더 누르세요": (
+            "{n} pending file(s) will be lost on restart — click again within 2 minutes to continue"
+        ),
+        "v{version} 다운로드 중 — 끝나면 앱이 재시작됩니다": (
+            "Downloading v{version} — the app will restart when it's done"
+        ),
+        "다운로드 파일을 확인할 수 없어 설치를 중단했습니다": "Couldn't verify the download — update cancelled",
+        "업데이트 준비 실패 — 릴리스 페이지를 엽니다": "Update preparation failed — opening the release page",
+        "v{version} 로 업데이트됐습니다": "Updated to v{version}",
+        "업데이트가 설치되지 않았습니다 (로그: {path})": "The update was not installed (log: {path})",
     },
 }
 

@@ -534,6 +534,23 @@ class SettingsWindow(customtkinter.CTkToplevel):
             sw.configure(state="disabled")
         row.pack(fill="x")
 
+        # 2026-09-29 자동 업데이트: 새 버전 자동 확인(시작 30초 후 + 24시간마다).
+        # 꺼도 트레이 «업데이트 확인» 으로 수동 확인·설치는 된다.
+        self._auto_update_var = customtkinter.BooleanVar(value=self._config.auto_update_check)
+        row_upd = customtkinter.CTkFrame(inner, fg_color="transparent")
+        upd_img = load_icon("arrow-down", size=16, color="dim")
+        if upd_img is not None:
+            customtkinter.CTkLabel(row_upd, text="", image=upd_img).pack(side="left", padx=(0, t.SP[2] - 2))
+        customtkinter.CTkSwitch(
+            row_upd, text=tr("업데이트 자동 확인", self._lang),
+            variable=self._auto_update_var, onvalue=True, offvalue=False,
+            text_color=t.terminal_text,
+            font=t.FONT_BODY,
+            progress_color=t.signal_ok,
+            fg_color=t.relay_raised,
+        ).pack(side="left", fill="x", expand=True)
+        row_upd.pack(fill="x", pady=(t.SP[2], 0))
+
     # ─── 헬퍼 ──────────────────────────────────────────────────
 
     def _cleanup_staging_now(self) -> None:
@@ -713,6 +730,8 @@ class SettingsWindow(customtkinter.CTkToplevel):
 
         # 2026-07-12 mac-studio 오딧 #3: lazy_paste 스위치 반영
         self._config.lazy_paste = bool(self._lazy_paste_var.get())
+        # 2026-09-29 자동 업데이트 확인 스위치
+        self._config.auto_update_check = bool(self._auto_update_var.get())
 
         # 2026-07-12: 자동 수신 문턱(macOS 전용 위젯 — Darwin 아니면 속성 자체가 없음)
         if hasattr(self, "_lazy_threshold_entry"):

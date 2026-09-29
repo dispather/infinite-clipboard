@@ -134,6 +134,10 @@ class AppConfig:
     # UI 표시 언어. 빈 문자열이면 OS 로케일 자동감지("en"/"ko" 명시 가능).
     # server_host/bind_address 등과 동일한 "빈 문자열=자동" 컨벤션.
     language: str = ""
+    # 2026-09-29 자동 업데이트: 시작 30초 후 + 24시간마다 GitHub 릴리스 확인(core/updater.py).
+    # 마지막 확인 시각 등 런타임 상태는 update_state.json 에 둔다 — settings.json 은
+    # mtime 이 바뀌면 앱이 재시작되므로(main._watch_config_for_restart) 여기엔 사용자 토글만.
+    auto_update_check: bool = True
 
     def __post_init__(self):
         if not self.device_name:
@@ -290,6 +294,14 @@ class AppConfig:
             self.fetch_grace_seconds = 2.0
         else:
             self.fetch_grace_seconds = float(self.fetch_grace_seconds)
+
+        # 2026-09-29: auto_update_check 는 bool 만 — 수동 편집 실수("false" 문자열 등)는
+        # 기본값 True 로. (기존 bool 필드들은 검증이 없다 — 이 필드부터 적용, 소급은 범위 밖)
+        if not isinstance(self.auto_update_check, bool):
+            _logger.warning(
+                f"auto_update_check={self.auto_update_check!r} not bool, reset to True"
+            )
+            self.auto_update_check = True
 
         # v3.0: peer_id 형식 검증 (32-char lowercase hex). settings.json 이
         # 손상된 값을 담고 있으면 재생성 — 라우팅이 깨진 id 로 동작하는 것 방지.

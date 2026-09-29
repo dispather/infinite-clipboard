@@ -139,3 +139,32 @@ def test_english_has_no_korean(snap):
     lines = ts.status_lines(snap, "en") + [ts.tooltip_text(snap, "en")]
     leaked = [l for l in lines if HANGUL.search(l)]
     assert not leaked, leaked
+
+
+# ── 2026-09-29 자동 업데이트: 메뉴 라벨 ──────────────────────────
+
+
+def _upd(version="3.0.99", phase="idle", confirm_pending=False, n=0):
+    return {"update": {"version": version, "phase": phase,
+                       "confirm_pending": confirm_pending, "pending_receivables": n}}
+
+
+def test_update_label_none_without_update():
+    assert ts.update_menu_label({}, "ko") is None
+    assert ts.update_menu_label(_upd(version=None), "ko") is None
+
+
+def test_update_label_states_ko():
+    assert ts.update_menu_label(_upd(), "ko") == "업데이트 설치 (v3.0.99)"
+    assert ts.update_menu_label(_upd(phase="downloading"), "ko") == "업데이트 다운로드 중…"
+    assert ts.update_menu_label(_upd(confirm_pending=True, n=2), "ko") == \
+        "그래도 업데이트 설치 — 받을 파일 2개 사라짐"
+
+
+@pytest.mark.parametrize("snap", [
+    _upd(), _upd(phase="downloading"), _upd(confirm_pending=True, n=3),
+])
+def test_update_label_english_has_no_korean(snap):
+    label = ts.update_menu_label(snap, "en")
+    assert label and not HANGUL.search(label), label
+    assert not HANGUL.search(ts.tr("업데이트 확인", "en"))

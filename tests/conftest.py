@@ -79,3 +79,12 @@ def _no_real_actionable_notifications(monkeypatch):
     except ImportError:
         return
     monkeypatch.setattr(main, "get_actionable_notifier", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_update_check(monkeypatch):
+    """2026-09-29 자동 업데이트: InfiniteClipboard.start() 가 띄우는 확인 스레드가 테스트 중
+    실제 GitHub 에 요청하지 않게 첫 확인 지연을 사실상 무한으로. 확인 로직 테스트는
+    check_for_update() 를 직접 호출한다(tests/test_update_orchestration.py)."""
+    from core import updater
+    monkeypatch.setattr(updater, "FIRST_CHECK_DELAY_SECONDS", 10 ** 9)

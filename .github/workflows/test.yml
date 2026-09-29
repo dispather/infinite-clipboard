@@ -121,6 +121,11 @@ jobs:
         run: |
           python -m pip install xxhash
           python -m pytest tests/test_handshake_integration.py tests/test_tray_status.py -v
+      - name: Run auto-update tests (PowerShell helper 실제 실행)
+        # 2026-09-29 자동 업데이트: Windows helper(.ps1)는 이 잡이 유일한 실 powershell.exe
+        # 실행 검증 — 가짜 setup(.cmd, exit 0/1)으로 «설치 결과와 무관하게 재실행»을 본다.
+        # 설치 가능 판정·자산 선택·검증 다운로드(로컬 http.server)도 Windows 경로로 함께.
+        run: python -m pytest tests/test_updater.py tests/test_updater_net.py tests/test_updater_post_exit.py tests/test_update_asset_contract.py -v
 
   macos:
     name: macOS (NSPasteboard data provider)
