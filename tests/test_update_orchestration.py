@@ -43,7 +43,10 @@ def _routes(releases_json, body=ASSET_BODY):
 def app(monkeypatch):
     monkeypatch.setattr(platform_module, "system", lambda: "Linux")   # 함정 #41 — 분기 명시
     monkeypatch.setattr(platform_module, "machine", lambda: "x86_64")
-    a = InfiniteClipboard(AppConfig(mode="client", auth_key="x" * 32, peer_id=generate_peer_id()))
+    # 알림 문구를 한국어로 단언하므로 언어를 고정 — 빈 값(자동감지)이면 OS 로케일을 따라
+    # 영어 러너(CI)에서 영어 문구가 나온다(2026-10-01 test.yml Linux 잡 5건 실패)
+    a = InfiniteClipboard(AppConfig(mode="client", auth_key="x" * 32, peer_id=generate_peer_id(),
+                                    language="ko"))
     a.running = True
     notes = []
     monkeypatch.setattr(a, "_notify", lambda title, msg: notes.append(msg))
