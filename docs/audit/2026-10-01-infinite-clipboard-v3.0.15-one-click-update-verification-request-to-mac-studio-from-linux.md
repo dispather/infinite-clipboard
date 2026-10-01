@@ -1,7 +1,9 @@
 ---
 round_trip: request
-round_trip_status: open
-ball: mac-infra-manager
+round_trip_status: closed
+ball: none
+closed_at: 2026-10-01
+closed_by: "회신 수령: 설치·교체 통과(시스템 대화상자 없음), 자동 재기동 실패(고아 «파일 전송» 창 → open 이 기존 인스턴스 활성화), 관찰 A 수정 3회 통과 + 양성 대조(docs/audit/2026-10-01-infinite-clipboard-v3.0.15-one-click-update-result-from-mac.md) → 재기동은 infinite-clipboard::update-relaunch-orphan-window"
 expects_reply: true
 from: infinite-clipboard (linux-desktop)
 to: mac-infra-manager (mac-studio)
