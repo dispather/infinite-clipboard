@@ -742,15 +742,17 @@ class SettingsWindow(customtkinter.CTkToplevel):
         # 언어 — 재시작 시 전 UI 에 적용 ("English"/"한국어" autonym → en/ko)
         self._config.language = "en" if self._lang_var.get() == "English" else "ko"
 
-        save_config(self._config)
-
-        # 자동 시작 토글 반영 (실패해도 설정 저장은 진행)
+        # 자동 시작 토글 반영 (실패해도 설정 저장은 진행). save_config «앞»에 둔다 — 설정 파일이
+        # 바뀌면 메인이 재시작하면서 이 창 프로세스를 닫으므로(main._close_windows, 함정 #50)
+        # 설정 저장이 이 창의 마지막 부작용이어야 한다.
         try:
             from core.autostart import set_enabled as _autostart_set
             _autostart_set(bool(self._autostart_var.get()))
         except Exception as e:
             import logging
             logging.getLogger(__name__).warning(f"자동 시작 설정 실패: {e}")
+
+        save_config(self._config)
 
         if self._on_save_callback:
             self._on_save_callback(self._config)

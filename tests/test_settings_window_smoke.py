@@ -152,3 +152,21 @@ def test_auto_update_switch_saves_to_config(gui_root, monkeypatch):
     win._auto_update_var.set(False)
     win._save()   # 저장 후 창을 스스로 destroy 한다
     assert saved == [False]
+
+
+def test_save_writes_settings_file_last(gui_root, monkeypatch):
+    """설정 파일 쓰기가 이 창의 마지막 부작용이어야 한다 — 파일이 바뀌면 메인이 재시작하면서
+    창 프로세스를 닫으므로(main._close_windows, 함정 #50) 그 뒤의 일(자동 시작 등록)은 잘릴 수 있다."""
+    import core.autostart as autostart
+    import ui.settings_window as sw
+    from config import AppConfig
+
+    order = []
+    monkeypatch.setattr(sw, "_detect_tailscale_ip", lambda: "")
+    monkeypatch.setattr(autostart, "set_enabled", lambda enabled: order.append("autostart") or True)
+    monkeypatch.setattr(sw, "save_config", lambda cfg: order.append("save_config"))
+
+    win = sw.SettingsWindow(AppConfig(auth_key="x" * 32, language="ko"))
+    win.update()
+    win._save()
+    assert order == ["autostart", "save_config"]
