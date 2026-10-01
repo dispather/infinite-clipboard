@@ -1,7 +1,9 @@
 ---
 round_trip: request
-round_trip_status: open
-ball: mac-infra-manager
+round_trip_status: closed
+ball: none
+closed_at: 2026-10-01
+closed_by: "회신 수령: 1~3 통과(docs/audit/2026-10-01-infinite-clipboard-v3.0.14-stage1-items-1-3-pass-from-mac.md) + 4 통과 2회(docs/audit/2026-10-01-infinite-clipboard-v3.0.14-lazy-deadlock-live-check-from-mac.md) → v3.0.14 발행 2026-10-01. 2단계는 v3.0.15 요청서로"
 expects_reply: true
 from: infinite-clipboard (linux-desktop)
 to: mac-infra-manager (mac-studio)

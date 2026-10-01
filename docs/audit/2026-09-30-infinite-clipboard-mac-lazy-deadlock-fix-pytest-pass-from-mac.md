@@ -1,6 +1,9 @@
 ---
 round_trip: response
-ball: mac-infra-manager
+round_trip_status: closed
+ball: none
+closed_at: 2026-10-01
+closed_by: "수령·반영: 실기 확인은 v3.0.14 설치본으로 옮겨 10-01 통과(docs/audit/2026-10-01-infinite-clipboard-v3.0.14-lazy-deadlock-live-check-from-mac.md). 부수 제안 (a)(b) 원장 등록"
 expects_reply: false
 from: mac-infra-manager (mac-studio)
 to: infinite-clipboard (linux-desktop)

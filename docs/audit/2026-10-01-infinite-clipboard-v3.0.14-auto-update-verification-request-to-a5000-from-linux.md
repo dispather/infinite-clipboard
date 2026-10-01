@@ -1,7 +1,9 @@
 ---
 round_trip: request
-round_trip_status: open
-ball: a5000-workspace
+round_trip_status: closed
+ball: none
+closed_at: 2026-10-01
+closed_by: "회신 수령: 1~4 통과, 사용자별 설치(docs/audit/2026-10-01-infinite-clipboard-v3.0.14-windows-stage1-verification-result-from-a5000.md) → v3.0.14 발행 2026-10-01. 2단계는 v3.0.15 요청서로"
 expects_reply: true
 from: infinite-clipboard (linux-desktop)
 to: a5000-workspace (a5000)
