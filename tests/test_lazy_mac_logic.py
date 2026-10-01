@@ -280,37 +280,40 @@ def test_clear_mid_fetch_still_fills_remaining_items_of_same_registration(mac):
 
 
 def test_clear_after_completed_paste_serves_nothing(mac):
-    """붙여넣기가 끝난 뒤의 clear() 는 즉시 해제 — 나중 Cmd+V 에 옛 offer 가 붙지 않는다.
-
-    (등록 단위 결과를 해제 뒤에도 내주면 옛 파일이 붙고, 소유가 풀린 클립보드 모니터가
-    그 경로를 로컬 복사로 읽어 재broadcast 할 수 있다)
+    """붙여넣기가 끝난 뒤의 clear() 는 즉시 해제 — 해제된 등록은 다시 요청받아도 아무것도
+    안 준다. 소유 판정은 해제와 별개(pasteboard 가 그대로면 여전히 우리 것 — 모니터가 우리
+    항목을 로컬 복사로 읽어 재broadcast 하지 않게, 관찰 A).
     """
     prov = mac.prov
     assert _register_from_worker(prov, _offer("file"), _file_cb(["/tmp/a"]))["done"].wait(2.0)
     assert _paste(mac) == [b"file:///tmp/a"]
     prov.clear()
-    assert prov.owns_clipboard() is False
+    assert prov._reg is None
+    assert prov.owns_clipboard() is True
     for item in mac.board.items:
         item.data.clear()
     assert _paste(mac) == [None], "해제된 등록이 옛 결과를 계속 내줌"
 
 
-def test_clear_mid_fetch_keeps_ownership_until_all_items_served(mac):
-    """붙여넣기 도중의 clear() 는 미뤄진다 — 그동안 소유 유지(모니터가 안 읽음),
-    같은 등록의 항목을 다 내주면 해제되고 이후 붙여넣기는 아무것도 안 준다."""
+def test_clear_mid_fetch_defers_release_until_all_items_served(mac):
+    """붙여넣기 도중의 clear() 는 미뤄진다 — 같은 등록의 항목을 다 내주면 해제되고 이후
+    붙여넣기는 아무것도 안 준다. 소유는 그 내내(해제 뒤에도) 유지된다."""
     prov = mac.prov
     seen = {}
     from core.lazy_clipboard import FetchedContent, KIND_FILE
 
     def _cb(oid):
         prov.clear()
+        seen["reg_during_fetch"] = prov._reg is not None
         seen["owns_during_fetch"] = prov.owns_clipboard()
         return FetchedContent(kind=KIND_FILE, paths=["/tmp/a", "/tmp/b"])
 
     assert _register_from_worker(prov, _offer("file", 2), _cb)["done"].wait(2.0)
     assert _paste(mac) == [b"file:///tmp/a", b"file:///tmp/b"]
+    assert seen["reg_during_fetch"] is True, "붙여넣기 도중 clear() 가 바로 해제됨"
     assert seen["owns_during_fetch"] is True, "미뤄 둔 해제 동안 소유가 풀림"
-    assert prov.owns_clipboard() is False, "모든 항목을 내준 뒤에도 해제 안 됨"
+    assert prov._reg is None, "모든 항목을 내준 뒤에도 해제 안 됨"
+    assert prov.owns_clipboard() is True, "해제 뒤 소유가 풀림(관찰 A)"
     for item in mac.board.items:
         item.data.clear()
     assert _paste(mac) == [None, None]
@@ -331,11 +334,16 @@ def test_deferred_clear_applies_after_timeout_if_rest_never_requested(mac):
     mac.main.call(lambda: first.provider.pasteboard_item_provideDataForType_(
         mac.board, first, "public.file-url"))
     assert first.data.get("public.file-url") == b"file:///tmp/a"
-    assert prov.owns_clipboard() is True  # 아직 둘째 항목 대기 중
+    assert prov._reg is not None  # 아직 둘째 항목 대기 중
     deadline = time.monotonic() + 2.0
-    while prov.owns_clipboard() and time.monotonic() < deadline:
+    while prov._reg is not None and time.monotonic() < deadline:
         time.sleep(0.02)
-    assert prov.owns_clipboard() is False, "미뤄 둔 해제가 시간 상한 뒤에도 적용 안 됨"
+    assert prov._reg is None, "미뤄 둔 해제가 시간 상한 뒤에도 적용 안 됨"
+    second = mac.board.items[1]
+    mac.main.call(lambda: second.provider.pasteboard_item_provideDataForType_(
+        mac.board, second, "public.file-url"))
+    assert second.data.get("public.file-url") is None, "해제 뒤 나머지 항목을 내줌"
+    assert prov.owns_clipboard() is True
 
 
 def test_deferred_clear_applies_immediately_when_fetch_fails(mac):
@@ -347,7 +355,7 @@ def test_deferred_clear_applies_immediately_when_fetch_fails(mac):
 
     assert _register_from_worker(prov, _offer("file", 2), _cb)["done"].wait(2.0)
     assert _paste(mac) == [None, None]
-    assert prov.owns_clipboard() is False
+    assert prov._reg is None
 
 
 def test_clear_before_paste_serves_nothing(mac):
@@ -364,6 +372,55 @@ def test_clear_before_paste_serves_nothing(mac):
     prov.clear()
     assert _paste(mac) == [None]
     assert fetched == []
+
+
+def test_overlap_second_offer_keeps_clipboard_owned_after_paste(mac, caplog):
+    """붙여넣기 도중 둘째 offer(main 이 clear() 후 register_offer → «등록 생략») 뒤에도
+    pasteboard 가 우리 것인 동안은 소유를 유지한다 — 미뤄 둔 해제가 적용돼 소유가 풀리면
+    클립보드 모니터가 방금 받은 파일을 로컬 복사로 읽어 재broadcast 한다
+    (2026-10-01 mac 실기 관찰 A: 2/2 재broadcast, 서버도 그 offer 2건 수신)."""
+    import logging
+    caplog.set_level(logging.INFO, logger="core.lazy_mac")
+    prov = mac.prov
+    from core.lazy_clipboard import FetchedContent, KIND_FILE
+    second = {}
+
+    def _cb(oid):
+        # 네트워크 스레드가 둘째 offer 를 처리하는 모양 그대로(main._handle_clip_offer)
+        def _net():
+            prov.clear()
+            second["ok"] = prov.register_offer(_offer("file"), _file_cb(["/tmp/b"]))
+        t = threading.Thread(target=_net)
+        t.start()
+        t.join(2.0)
+        return FetchedContent(kind=KIND_FILE, paths=["/tmp/a"])
+
+    assert _register_from_worker(prov, _offer("file"), _cb)["done"].wait(2.0)
+    assert _paste(mac) == [b"file:///tmp/a"]
+    assert second["ok"] is False
+    assert "등록 생략" in caplog.text, "겹침 경로를 안 탐 — 이 테스트가 시험하려는 상태가 아니다"
+    assert prov._reg is None, "미뤄 둔 해제가 적용되지 않음"
+    assert prov.owns_clipboard() is True, "해제 뒤 소유가 풀림 → 모니터가 받은 파일을 재broadcast"
+    for item in mac.board.items:
+        item.data.clear()
+    assert _paste(mac) == [None], "해제된 등록이 옛 결과를 계속 내줌"
+
+
+def test_local_copy_after_registration_ends_ownership(mac):
+    """소유 판정의 반대쪽 — 다른 곳(로컬 복사)이 pasteboard 를 쓰면 등록 중이든 해제 뒤든
+    소유가 아니다. 이게 깨지면 맥이 자기 복사를 영영 안 보낸다(에러 없이)."""
+    prov = mac.prov
+    assert _register_from_worker(prov, _offer("file"), _file_cb(["/tmp/a"]))["done"].wait(2.0)
+    assert prov.owns_clipboard() is True
+    mac.board.clearContents()  # 사용자가 Finder 에서 복사
+    mac.board.writeObjects_([])
+    assert prov.owns_clipboard() is False, "로컬 복사 뒤에도 소유로 판정 — 모니터가 멈춤"
+
+    assert _register_from_worker(prov, _offer("file"), _file_cb(["/tmp/b"]))["done"].wait(2.0)
+    assert _paste(mac) == [b"file:///tmp/b"]
+    prov.clear()
+    mac.board.clearContents()
+    assert prov.owns_clipboard() is False, "해제 뒤 로컬 복사를 소유로 판정"
 
 
 def test_fake_modules_do_not_leak():

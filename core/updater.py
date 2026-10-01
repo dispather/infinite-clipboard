@@ -293,7 +293,12 @@ def _ssl_context() -> ssl.SSLContext:
         source = f"certifi {certifi.where()}"
     except (ImportError, OSError):
         ctx = ssl.create_default_context()
-        source = f"system {ssl.get_default_verify_paths()}"
+        if os.name == "nt":
+            # Windows 는 create_default_context 가 시스템 인증서 저장소를 읽는다 — 아래 OpenSSL
+            # 기본 경로는 이 PC 에 없는 값이라 «CA 없음»으로 오해를 부른다(a5000 실기 2026-10-01)
+            source = "system Windows 인증서 저장소"
+        else:
+            source = f"system {ssl.get_default_verify_paths()}"
     if not _ca_source_logged:
         _ca_source_logged = True
         logger.info(f"[업데이트] HTTPS CA: {source}")

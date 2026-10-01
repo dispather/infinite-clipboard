@@ -137,12 +137,15 @@ class MacLazyProvider(LazyClipboardProvider):
         return kind in (KIND_FILE, KIND_IMAGE)
 
     def owns_clipboard(self) -> bool:
-        # 활성 offer + 등록 후 pasteboard 가 그대로(changeCount 불변)면 우리가 소유 중.
+        # 마지막으로 우리가 쓴 뒤 pasteboard 가 그대로(changeCount 불변)면 지금 내용은 우리 것.
+        # 등록을 해제(clear)한 뒤에도 마찬가지다 — 이미 내준 항목은 pasteboard 에 데이터로 남아,
+        # 여기서 False 를 주면 클립보드 모니터가 방금 받은 파일을 로컬 복사로 읽어 재broadcast
+        # 한다(붙여넣기 도중 둘째 offer → 미뤄 둔 해제, 2026-10-01 mac 실기 관찰 A).
         # changeCount 가 올라갔으면 다른 곳(로컬 복사 등)이 덮어쓴 것 → 소유 아님.
         with self._lock:
-            if self._offer is None or self._change_count is None:
-                return False
             expected = self._change_count
+            if expected is None:
+                return False
         try:
             return NSPasteboard.generalPasteboard().changeCount() == expected
         except Exception:
@@ -172,9 +175,9 @@ class MacLazyProvider(LazyClipboardProvider):
 
     def clear(self) -> None:
         # 소유는 유지하되 offer=None → provideDataForType 가 아무것도 안 줘 dataForType=None.
+        # (소유 판정은 해제와 무관하게 changeCount 로 한다 — owns_clipboard 참조)
         # 단 지금 이 등록을 붙여넣는 중(fetch 진행)이면 해제를 미룬다: 같은 붙여넣기의 나머지
-        # 항목이 그 결과를 받고(여러 파일 offer 의 부분 붙여넣기 방지), 그동안 소유도 유지돼
-        # 클립보드 모니터가 우리 항목을 로컬 복사로 읽어 재broadcast 하지 않는다. 모든 항목을
+        # 항목이 그 결과를 받는다(여러 파일 offer 의 부분 붙여넣기 방지). 모든 항목을
         # 내줬거나 fetch 완료 후 _drain_timeout 이 지나면 해제된다(_finish_drain_locked).
         with self._lock:
             reg = self._reg
@@ -184,11 +187,11 @@ class MacLazyProvider(LazyClipboardProvider):
             self._clear_locked()
 
     def _clear_locked(self) -> None:
+        # _change_count 는 남긴다 — pasteboard 에는 여전히 우리가 쓴 항목이 있다(owns_clipboard)
         self._reg = None
         self._offer = None
         self._fetch_cb = None
         self._cache = None
-        self._change_count = None
 
     def _finish_drain_locked(self, reg: dict) -> None:
         """미뤄 둔 clear 를 적용 (self._lock 보유 상태로 호출). 이미 교체된 등록이면 무시."""
@@ -207,6 +210,7 @@ class MacLazyProvider(LazyClipboardProvider):
             self._offer = None
             self._fetch_cb = None
             self._cache = None
+            self._change_count = None
             self._providers = []
             self._items = []
 

@@ -209,7 +209,9 @@ class LazyClipboardProvider(ABC):
 
         기본 False (소유 추적을 안 하는 백엔드/더미). 각 OS 백엔드는 활성 offer 유무로
         override 한다 — abstractmethod 가 아니라 concrete 기본값이라, 일부 메서드만 구현한
-        구식 더미/테스트 서브클래스는 영향 없음.
+        구식 더미/테스트 서브클래스는 영향 없음. macOS 는 예외로 «마지막으로 우리가 쓴 뒤
+        pasteboard 가 그대로인가»로 판정한다(소유 상실 콜백이 없고, 해제한 뒤에도 이미 내준
+        항목이 pasteboard 에 데이터로 남는다 — core/lazy_mac.py owns_clipboard).
         """
         return False
 
