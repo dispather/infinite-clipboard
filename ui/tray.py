@@ -152,6 +152,7 @@ class TrayApp:
         # (중복 창 생성 가드). 값은 subprocess.Popen 객체 또는 _SPAWNING sentinel.
         self._window_procs: dict = {}
         self._window_procs_lock = threading.Lock()
+        self._closing = False   # take_window_procs 뒤 — 새 창을 띄우지 않는다
         # B1: 메뉴 맨 위 상태 줄(마지막으로 반영한 값) — 바뀔 때만 update_menu
         self._status_lines: list = []
         # 2026-09-29 자동 업데이트: «업데이트 설치» 항목 라벨(None=항목 없음)·진행 중 여부
@@ -324,6 +325,8 @@ class TrayApp:
         # check-then-mark 를 lock 안에서 원자적으로 수행해 두 트리거가
         # 거의 동시에 들어와도 race 없이 하나만 spawn 된다.
         with self._window_procs_lock:
+            if self._closing:
+                return
             entry = self._window_procs.get(window_type)
             if entry is not None and (entry is _SPAWNING or entry.poll() is None):
                 logger.debug(f"[트레이] {window_type} 창이 이미 떠있어(또는 준비 중) 재실행 생략")
@@ -353,9 +356,25 @@ class TrayApp:
                     self._window_procs.pop(window_type, None)
                 raise
             with self._window_procs_lock:
-                self._window_procs[window_type] = proc
+                closing = self._closing
+                if not closing:
+                    self._window_procs[window_type] = proc
+            if closing:   # 종료 중에 spawn 이 끝났다 — 남기지 않는다
+                proc.terminate()
 
         threading.Thread(target=_spawn, daemon=True).start()
+
+    def take_window_procs(self) -> list:
+        """앱 종료 때: 이 트레이가 띄운 창 프로세스를 넘기고, 이후 새 창은 띄우지 않는다.
+
+        창은 독립 프로세스(start_new_session)라 메인이 끝나도 남는다 — 닫는 건 호출자
+        (main.InfiniteClipboard.stop)가 한다.
+        """
+        with self._window_procs_lock:
+            self._closing = True
+            procs = [p for p in self._window_procs.values() if p is not _SPAWNING]
+            self._window_procs.clear()
+        return procs
 
     def _show_history(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
         self._launch_window("history")

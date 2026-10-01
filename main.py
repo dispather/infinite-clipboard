@@ -254,6 +254,8 @@ class InfiniteClipboard:
         # 트레이 핸들 (main() 에서 TrayApp 생성 후 주입). v2.3 audit P2 cleanup
         # 알림 송출에 사용. headless / 테스트 환경에선 None 이므로 가드 필요.
         self.tray = None
+        # 트레이 없이(콘솔 모드) 띄운 창 프로세스 — 종료 때 닫는다(stop → _close_windows)
+        self._fallback_window_procs = []
 
     def start(self):
         """앱 시작"""
@@ -352,11 +354,28 @@ class InfiniteClipboard:
                 pass
         # v3.0 S3: 이미지 offer 스냅샷 temp 정리
         self._cleanup_offer_image()
+        self._close_windows()
         if self.server:
             self.server.stop()
         if self.client:
             self.client.stop()
         logger.info("Infinite Clipboard 종료")
+
+    def _close_windows(self):
+        """띄운 UI 창 프로세스를 닫는다 — 트레이 «종료»·업데이트·설정 재시작 공통(stop 경유).
+
+        창은 start_new_session 독립 프로세스라 메인이 끝나도 옛 버전 코드로 남는다. macOS 는
+        같은 번들 ID 의 남은 창 때문에 업데이트 helper 의 open 이 새 앱을 띄우지 않았다
+        (2026-10-01 mac 실기). 두 번 불려도 된다(트레이 «종료» → main finally).
+        """
+        procs = list(self._fallback_window_procs)
+        self._fallback_window_procs.clear()
+        if self.tray is not None:
+            try:
+                procs += self.tray.take_window_procs()
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"창 프로세스 목록 실패: {e}")
+        _terminate_window_procs(procs)
 
     # ── 서버 모드 ──────────────────────────────────────────────────────
 
@@ -2406,10 +2425,14 @@ class InfiniteClipboard:
             else:
                 main_py = os.path.abspath(__file__)
                 cmd = [sys.executable, main_py, "--window", "transfers"]
-            threading.Thread(
-                target=lambda: subprocess.Popen(cmd, start_new_session=True),
-                daemon=True,
-            ).start()
+            def _spawn():
+                proc = subprocess.Popen(cmd, start_new_session=True)
+                if self.running:
+                    self._fallback_window_procs.append(proc)
+                else:   # 종료 중에 떴다 — 남기지 않는다
+                    proc.terminate()
+
+            threading.Thread(target=_spawn, daemon=True).start()
         except Exception as e:
             logger.debug(f"transfer_window 자동 표시 실패: {e}")
 
@@ -2959,6 +2982,32 @@ def _run_window_only(window_type: str) -> None:
     win.after(150, win.focus_force)
     win.protocol("WM_DELETE_WINDOW", lambda: _close_all(win))
     root.mainloop()
+
+
+def _terminate_window_procs(procs, timeout: float = 1.0) -> None:
+    """창 프로세스들에 종료 신호 → 합쳐서 timeout 안에 안 끝나면 강제 종료. 예외는 삼킨다(종료 경로)."""
+    import subprocess
+    live = []
+    for p in procs:
+        try:
+            if p.poll() is None:
+                p.terminate()
+                live.append(p)
+        except Exception:  # noqa: BLE001
+            pass
+    deadline = time.monotonic() + timeout
+    for p in live:
+        try:
+            p.wait(max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            try:
+                p.kill()
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception:  # noqa: BLE001
+            pass
+    if live:
+        logger.info(f"UI 창 프로세스 {len(live)}개 닫음")
 
 
 def _consume_update_result(lang):

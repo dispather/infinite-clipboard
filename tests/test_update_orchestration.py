@@ -8,6 +8,7 @@ _isolate_config_dir 가 tmp_path 로 격리한다(실사용 앱의 update_state.
 import hashlib
 import json
 import platform as platform_module
+import sys
 import time
 
 import pytest
@@ -314,3 +315,41 @@ def test_start_skips_check_thread_when_disabled(monkeypatch):
     time.sleep(0.2)
     a.running = False
     assert started == []
+
+
+# ── 종료 때 창 프로세스 정리 (2026-10-01 mac 실기: 남은 창 때문에 업데이트 뒤 재실행 실패) ──
+
+
+def _sleeper():
+    import subprocess
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+
+
+class _FakeTray:
+    def __init__(self, procs):
+        self.procs = procs
+        self.taken = 0
+
+    def take_window_procs(self):
+        self.taken += 1
+        out, self.procs = self.procs, []
+        return out
+
+
+def test_stop_closes_window_processes_from_tray_and_fallback(app):
+    """app.stop()(트레이 «종료»·업데이트·설정 재시작 공통) 이 띄운 창 프로세스를 닫는다 —
+    창은 start_new_session 독립 프로세스라 안 닫으면 옛 버전으로 남고, macOS 는 그 창 때문에
+    업데이트 뒤 open 이 새 앱을 안 띄운다."""
+    tray_proc, fallback_proc = _sleeper(), _sleeper()
+    try:
+        app.tray = _FakeTray([tray_proc])
+        app._fallback_window_procs.append(fallback_proc)
+        app.stop()
+        assert tray_proc.wait(5) is not None, "트레이가 띄운 창이 남음"
+        assert fallback_proc.wait(5) is not None, "트레이 없이 띄운 창이 남음"
+        assert app.tray.taken == 1
+        app.stop()   # 두 번 불려도(트레이 «종료» → main finally) 문제없음
+    finally:
+        for p in (tray_proc, fallback_proc):
+            if p.poll() is None:
+                p.kill()

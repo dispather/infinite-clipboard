@@ -403,6 +403,7 @@ def download_verified(info: UpdateInfo, dest_dir, progress: Optional[Callable[[i
 # 실행돼, 실패·취소 시 앱이 꺼진 채 남는다 — 2026-09-29 spec review.)
 
 _PID_WAIT_TICKS = 200          # 0.3s × 200 = 최대 60초 대기 (PID 재사용 대비 상한)
+_RELAUNCH_WAIT_TICKS = 20      # mac: 0.5s × 20 = 최대 10초 — open 뒤 새 메인 프로세스가 뜨는지
 MAC_APP_NAME = "Infinite Clipboard.app"   # DMG 안의 번들 이름 (build/make_dmg.sh APP_NAME)
 
 
@@ -437,6 +438,7 @@ def _mac_helper(pid: int, target: Path, log: Path) -> str:
 # Infinite Clipboard 업데이트 helper (macOS) — core/updater.py 가 생성
 exec >>{q(str(log))} 2>&1
 T={q(t)}
+B={q(target.name)}
 N={q(t + ".new")}
 O={q(t + ".old")}
 echo "[update-helper] $(date '+%F %T') start pid={pid}"
@@ -452,8 +454,23 @@ else
   rm -rf "$N"
 fi
 xattr -dr com.apple.quarantine "$T" 2>/dev/null
-open "$T"
-echo "[update-helper] relaunched"
+# -n: 같은 번들 ID 의 프로세스(앱 종료 뒤 남은 옛 창)가 있어도 새 인스턴스를 띄운다 — 없으면
+# open 이 그 창을 앞으로 가져오기만 하고 앱은 안 뜬다(2026-10-01 mac 실기)
+open -n "$T"
+i=0
+while [ "$i" -lt {_RELAUNCH_WAIT_TICKS} ]; do
+  # 새 메인 = 번들 실행 파일이면서 --window(창 프로세스)가 아닌 것. 전체 경로가 아니라
+  # «/<번들 이름>/Contents/MacOS/» 로 찾는다 — UTF-8 로케일이 없으면(GUI 앱 env, 함정 #14)
+  # ps 가 경로의 비 ASCII 를 '?' 로 바꿔 전체 경로 비교가 실패한다(LANG=C 테스트로 실측)
+  if ps -axww -o command= | {{ while IFS= read -r c; do
+      case "$c" in *"/$B/Contents/MacOS/"*--window*) ;; *"/$B/Contents/MacOS/"*) exit 0 ;; esac
+    done; exit 1; }}; then
+    echo "[update-helper] relaunched"
+    exit 0
+  fi
+  sleep 0.5; i=$((i+1))
+done
+echo "[update-helper] relaunch not confirmed"
 """
 
 

@@ -129,3 +129,47 @@ def test_launch_window_concurrent_calls_spawn_only_once(monkeypatch):
         time.sleep(0.02)
 
     assert len(calls) == 1, f"동시 호출 5회인데 spawn 이 {len(calls)}회 발생함"
+
+
+def test_take_window_procs_hands_over_live_windows_and_stops_new_spawns(monkeypatch):
+    """종료 때 트레이가 띄운 창을 넘기고, 그 뒤(또는 spawn 도중) 생긴 창은 바로 닫는다."""
+    import threading as _th
+    started = _th.Event()
+    release = _th.Event()
+
+    class _P:
+        def __init__(self):
+            self.terminated = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+    made = []
+
+    def slow_popen(cmd, **kwargs):
+        started.set()
+        release.wait(2.0)
+        p = _P()
+        made.append(p)
+        return p
+
+    monkeypatch.setattr(subprocess, "Popen", slow_popen)
+    tray = _make_tray()
+    live = _P()
+    tray._window_procs["history"] = live
+    tray._launch_window("transfers")          # spawn 진행 중
+    assert started.wait(2.0)
+    taken = tray.take_window_procs()
+    assert taken == [live]
+    release.set()
+    deadline = time.time() + 2.0
+    while time.time() < deadline and not made:
+        time.sleep(0.02)
+    time.sleep(0.1)
+    assert made and made[0].terminated, "종료 중 spawn 이 끝난 창이 남음"
+    tray._launch_window("settings")           # 종료 뒤 새 창 요청은 무시
+    time.sleep(0.2)
+    assert len(made) == 1

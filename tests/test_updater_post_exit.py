@@ -152,7 +152,7 @@ def _mac_fixture(weird_dir):
     fake_bin = weird_dir / "bin"
     fake_bin.mkdir()
     opened = weird_dir / "opened.txt"
-    _write_exec(fake_bin / "open", f'printf "%s\\n" "$1" >> {shlex.quote(str(opened))}\n')
+    _write_exec(fake_bin / "open", f'printf "%s\\n" "$*" >> {shlex.quote(str(opened))}\n')
     _write_exec(fake_bin / "xattr", "exit 0\n")
     apps = weird_dir / "Applications"
     apps.mkdir()
@@ -167,7 +167,8 @@ def _mac_fixture(weird_dir):
 
 
 @posix_only
-def test_mac_helper_swaps_bundle_and_opens(weird_dir):
+def test_mac_helper_swaps_bundle_and_opens(weird_dir, monkeypatch):
+    monkeypatch.setattr(updater, "_RELAUNCH_WAIT_TICKS", 1)   # 가짜 open 은 앱을 안 띄운다
     fake_bin, opened, apps, target, new, exe = _mac_fixture(weird_dir)
     cmd = updater.post_exit_command("Darwin", "silent", 999999, weird_dir / "x.dmg",
                                     executable=str(exe), log_path=weird_dir / "h.log",
@@ -176,12 +177,70 @@ def test_mac_helper_swaps_bundle_and_opens(weird_dir):
     subprocess.run(cmd, env=env, timeout=30, check=True)
     assert (target / "Contents" / "v").read_text(encoding="utf-8") == "new"
     assert sorted(p.name for p in apps.iterdir()) == ["Infinite Clipboard.app"]
-    assert _wait_for(opened) and opened.read_text(encoding="utf-8").strip() == str(target)
+    assert _wait_for(opened) and opened.read_text(encoding="utf-8").strip() == f"-n {target}"
+
+
+def _fake_bundle_process(exe: Path, *args):
+    """ps 의 command 열이 «<번들>/Contents/MacOS/…» 로 시작하는 가짜 프로세스(bash exec -a)."""
+    # argv[0] 하나에 인자까지 담는다 — ps 는 argv 를 공백으로 이어 보여 준다(«<exe> --window transfers 20»)
+    return subprocess.Popen(["bash", "-c", 'exec -a "$0" sleep 20', " ".join([str(exe), *args])])
+
+
+@posix_only
+def test_mac_helper_confirms_relaunch_by_new_main_process(weird_dir):
+    """open 뒤 «--window» 없는 새 메인 프로세스가 보이면 relaunched."""
+    fake_bin, opened, apps, target, new, exe = _mac_fixture(weird_dir)
+    pidfile = weird_dir / "main.pid"
+    _write_exec(fake_bin / "open",
+                f'printf "%s\\n" "$*" >> {shlex.quote(str(opened))}\n'
+                f'bash -c \'exec -a "$0" sleep 20\' {shlex.quote(str(exe))} </dev/null >/dev/null 2>&1 &\n'
+                f'echo $! > {shlex.quote(str(pidfile))}\n')
+    log = weird_dir / "h.log"
+    cmd = updater.post_exit_command("Darwin", "silent", 999999, weird_dir / "x.dmg",
+                                    executable=str(exe), log_path=log, workdir=weird_dir)
+    env = dict(os.environ, PATH=f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+    try:
+        subprocess.run(cmd, env=env, timeout=30, check=True)
+        text = log.read_text(encoding="utf-8")
+        assert "[update-helper] relaunched" in text
+        assert "relaunch not confirmed" not in text
+    finally:
+        # PID 로 정리 — 다음 테스트가 이 가짜 메인을 «재실행됨»으로 오인하지 않게
+        # (pkill -f 패턴은 C 로케일에서 비 ASCII 경로와 안 맞아 남았다)
+        if pidfile.exists():
+            try:
+                os.kill(int(pidfile.read_text().strip()), 9)
+            except (ProcessLookupError, ValueError):
+                pass
+
+
+@posix_only
+def test_mac_helper_leftover_window_is_not_taken_as_relaunch(weird_dir, monkeypatch):
+    """앱 종료 뒤 남은 옛 창(--window) 이 있어도 새 인스턴스를 띄우고(open -n), 그 창을
+    재실행으로 오인하지 않는다 — 2026-10-01 mac 실기: open 이 남은 «파일 전송» 창을 활성화만 하고
+    새 앱을 안 띄웠는데 helper 는 relaunched 를 찍었다."""
+    monkeypatch.setattr(updater, "_RELAUNCH_WAIT_TICKS", 4)
+    fake_bin, opened, apps, target, new, exe = _mac_fixture(weird_dir)
+    log = weird_dir / "h.log"
+    cmd = updater.post_exit_command("Darwin", "silent", 999999, weird_dir / "x.dmg",
+                                    executable=str(exe), log_path=log, workdir=weird_dir)
+    env = dict(os.environ, PATH=f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+    orphan = _fake_bundle_process(exe, "--window", "transfers")
+    try:
+        subprocess.run(cmd, env=env, timeout=30, check=True)
+    finally:
+        orphan.kill()
+        orphan.wait()
+    assert opened.read_text(encoding="utf-8").strip() == f"-n {target}", "남은 창이 있으면 open 은 -n 이어야"
+    text = log.read_text(encoding="utf-8")
+    assert "relaunch not confirmed" in text
+    assert "[update-helper] relaunched" not in text
 
 
 @posix_only
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root 는 권한 무시")
-def test_mac_helper_failure_keeps_old_bundle_and_opens_it(weird_dir):
+def test_mac_helper_failure_keeps_old_bundle_and_opens_it(weird_dir, monkeypatch):
+    monkeypatch.setattr(updater, "_RELAUNCH_WAIT_TICKS", 1)
     fake_bin, opened, apps, target, new, exe = _mac_fixture(weird_dir)
     cmd = updater.post_exit_command("Darwin", "silent", 999999, weird_dir / "x.dmg",
                                     executable=str(exe), log_path=weird_dir / "h.log",
@@ -193,7 +252,7 @@ def test_mac_helper_failure_keeps_old_bundle_and_opens_it(weird_dir):
     finally:
         apps.chmod(0o755)
     assert (target / "Contents" / "v").read_text(encoding="utf-8") == "old"
-    assert _wait_for(opened) and opened.read_text(encoding="utf-8").strip() == str(target)
+    assert _wait_for(opened) and opened.read_text(encoding="utf-8").strip() == f"-n {target}"
     assert "install failed" in (weird_dir / "h.log").read_text(encoding="utf-8")
 
 
