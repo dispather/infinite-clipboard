@@ -491,7 +491,12 @@ class NetworkServer:
 
         except Exception as e:
             # v2.1: 의식적 종료 (stop) 중에는 socket close → recv OSError 가 자연스러움
-            if self.running:
+            # 교체된 옛 연결도 같다 — Windows 는 다른 스레드의 shutdown 이 대기 중인
+            # recv 를 깨우지 않아, 다음 수신 타임아웃(≤CLIENT_RECV_TIMEOUT)의 PING 송신이나
+            # 상대 종료 때 WinError 10058 로 끝난다(2026-10-01 Windows CI 실측)
+            if info is not None and info.get("evicted"):
+                logger.debug(f"교체된 옛 연결 수신 종료 ({client_name}): {e}")
+            elif self.running:
                 logger.error(f"클라이언트 처리 오류 ({client_name}): {e}")
             else:
                 logger.debug(f"종료 중 client recv 정리: {client_name}")

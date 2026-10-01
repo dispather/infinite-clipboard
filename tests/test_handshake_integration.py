@@ -368,19 +368,25 @@ def test_stale_duplicate_peer_id_is_replaced_by_new_connection(caplog):
 
         new.start()
         assert _wait_until(lambda: new.connected, timeout=5.0), "새 연결이 받아들여지지 않음"
-        assert _wait_until(lambda: not old.connected, timeout=5.0), "옛 연결이 닫히지 않음"
-        # 옛 핸들러의 finally 진입 신호 — 콜백 분기 «앞»에 찍히는 줄이라 그 분기와 독립
-        assert _wait_until(
-            lambda: any(r.getMessage() == "클라이언트 연결 종료: old" for r in caplog.records),
-            timeout=3.0), "옛 핸들러의 finally 가 돌지 않음"
-        time.sleep(0.2)
-
         with server.clients_lock:
             registered = list(server.clients.values())
         assert [r["name"] for r in registered] == ["new"]
         with events_lock:
             assert events == [("connected", "old"), ("disconnected", "old"), ("connected", "new")], events
+
+        # 옛 핸들러가 «끝난 뒤»에도 해제 콜백이 다시 안 와야 한다. Windows 는 shutdown 이
+        # 대기 중인 recv 를 깨우지 않아 그 핸들러가 다음 수신 타임아웃(30s)까지 남으므로,
+        # 끊긴 상대가 결국 사라지는 것을 옛 클라이언트 종료로 대신한다(Linux 는 이미 끝나 있다).
+        old.stop()
+        # finally 진입 신호 — 콜백 분기 «앞»에 찍히는 줄이라 그 분기와 독립
+        assert _wait_until(
+            lambda: any(r.getMessage() == "클라이언트 연결 종료: old" for r in caplog.records),
+            timeout=5.0), "옛 핸들러의 finally 가 돌지 않음"
+        time.sleep(0.2)
+        with events_lock:
+            assert events == [("connected", "old"), ("disconnected", "old"), ("connected", "new")], events
             assert peers == {peer_id: "new"}, "옛 연결 해제가 새 연결의 등록을 지움"
+        assert new.connected, "옛 연결 정리가 새 연결을 끊음"
         msgs = [r.getMessage() for r in caplog.records]
         assert any("옛 연결 교체" in m for m in msgs), msgs
         assert not any("핸드셰이크 거부" in m for m in msgs), "조용한 옛 연결인데 거부됨"
