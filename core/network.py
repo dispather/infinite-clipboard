@@ -37,6 +37,18 @@ MAX_MESSAGE_SIZE = 32 * 1024 * 1024
 # 스레드/fd 를 고갈시키는 slow-loris 류 공격을 차단 (H6).
 MAX_PENDING_CONNECTIONS = 32
 
+# 클라이언트 소켓 수신 타임아웃 — 이 시간 동안 아무것도 안 오면 PING 을 보낸다.
+# 양쪽 다 PING 을 받으면 PONG 으로 답하므로, 살아 있는 연결은 이 주기 + 왕복
+# 시간보다 오래 조용할 수 없다.
+CLIENT_RECV_TIMEOUT = 30
+
+# 같은 peer_id 의 기존 연결이 이 시간 넘게 아무것도 안 보냈으면 끊긴 연결(half-open)
+# 로 보고 새 연결로 교체한다(H1 의 예외). 네트워크가 끊기면 서버 쪽 옛 소켓은 PING
+# 이 커널 버퍼에 들어가 «성공»하므로 TCP 재전송 한도(Linux 약 15분)까지 안 닫히고,
+# 그동안 같은 PC 의 재접속이 5초마다 거부됐다(2026-07~10 서버 로그 12회).
+# PING 주기의 2배 — 살아 있는 연결은 여기에 닿지 않아 H1(살아 있는 중복 거부)은 유지.
+STALE_PEER_SECONDS = 2 * CLIENT_RECV_TIMEOUT
+
 
 def _recv_all(sock: socket.socket, length: int) -> bytes:
     """
@@ -261,7 +273,7 @@ class NetworkServer:
         while self.running:
             try:
                 client_socket, address = self.server_socket.accept()
-                client_socket.settimeout(30)
+                client_socket.settimeout(CLIENT_RECV_TIMEOUT)
 
                 # H6: handshake 미완료 연결이 스레드/fd 를 무한히 점유하는
                 # slow-loris 방어 — 상한 초과 시 스레드를 만들지 않고 즉시 거부.
@@ -304,6 +316,7 @@ class NetworkServer:
         """
         client_name = f"{address[0]}:{address[1]}"
         client_peer_id = ""  # v3.0: response 파싱 후 채워짐 (disconnect 콜백까지 유지)
+        info = None  # 등록 성공 시 self.clients[sock] 과 같은 dict (last_rx·evicted 공유)
 
         try:
             # ── v2.2 R3: 3-step mutual HMAC handshake (v3.0: + peer_id) ──
@@ -374,13 +387,29 @@ class NetworkServer:
             # 등록 성공 이후에만 채운다 — 거부된 시도의 peer_id 로 finally 가
             # main.py 의 self.peers.pop(peer_id) 를 잘못 호출해 진짜 피해자의
             # 등록을 지우는 것을 방지한다 (HMAC 실패 시의 기존 처리와 동일 패턴).
+            # 예외: 기존 연결이 STALE_PEER_SECONDS 넘게 조용하면 끊긴 연결로 보고
+            # 그 연결을 내보내고 새 연결을 받는다 — 살아 있는 중복만 거부한다.
+            now = time.monotonic()
+            stale = []
             with self.clients_lock:
-                conflict = any(
-                    s is not sock and info.get("peer_id") == claimed_peer_id
-                    for s, info in self.clients.items()
-                )
+                conflict = False
+                for s, existing in self.clients.items():
+                    if s is sock or existing.get("peer_id") != claimed_peer_id:
+                        continue
+                    if now - existing.get("last_rx", now) > STALE_PEER_SECONDS:
+                        stale.append((s, existing))
+                    else:
+                        conflict = True
                 if not conflict:
-                    self.clients[sock] = {"name": client_name, "peer_id": claimed_peer_id}
+                    for s, existing in stale:
+                        # 옛 핸들러의 finally 가 disconnect 콜백을 다시 부르지 않게
+                        # 표시 — 그 콜백은 아래에서 새 연결 등록 «전» 순서로 부른다.
+                        existing["evicted"] = True
+                        del self.clients[s]
+                        self._write_locks.pop(s, None)
+                    info = {"name": client_name, "peer_id": claimed_peer_id,
+                            "address": address, "last_rx": now}
+                    self.clients[sock] = info
                     self._write_locks[sock] = threading.Lock()
 
             if conflict:
@@ -391,6 +420,25 @@ class NetworkServer:
                 return
 
             client_peer_id = claimed_peer_id
+
+            for old_sock, old in stale:
+                logger.warning(
+                    f"옛 연결 교체 — {old['name']} peer={claimed_peer_id[:8]}… 옛 연결이 "
+                    f"{now - old['last_rx']:.0f}초 동안 조용함(끊긴 연결로 판단): "
+                    f"{old.get('address')} → {address}"
+                )
+                # shutdown 만 — 옛 핸들러의 recv 가 깨어나 자기 finally 에서 close 한다.
+                # 그 소켓에 막혀 있던 sendall(중계 등)도 함께 풀린다.
+                try:
+                    old_sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                if self.on_client_disconnected:
+                    try:
+                        self.on_client_disconnected(
+                            old_sock, old.get("address"), old["name"], claimed_peer_id)
+                    except Exception as e:
+                        logger.error(f"on_client_disconnected 콜백 오류: {e}")
 
             logger.info(
                 f"클라이언트 연결됨 (HMAC v{PROTOCOL_VERSION}): "
@@ -415,6 +463,7 @@ class NetworkServer:
                     data = _recv_all(sock, msg_len)
                     if len(data) < msg_len:
                         break
+                    info["last_rx"] = time.monotonic()
 
                     message = self.protocol.parse_message(data)
                     if message:
@@ -465,8 +514,12 @@ class NetworkServer:
 
             logger.info(f"클라이언트 연결 종료: {client_name}")
 
-            # on_client_disconnected 콜백 호출
-            if self.on_client_disconnected:
+            # on_client_disconnected 콜백 호출 — 새 연결에 교체된 옛 연결은 제외
+            # (교체한 쪽이 새 등록 직후 이미 불렀다. 여기서 또 부르면 같은 peer_id 로
+            # main 의 peers.pop 이 새 연결의 등록을 지운다)
+            if info is not None and info.get("evicted"):
+                logger.info(f"교체된 옛 연결 정리 완료: {client_name}")
+            elif self.on_client_disconnected:
                 try:
                     self.on_client_disconnected(sock, address, client_name, client_peer_id)
                 except Exception as e:

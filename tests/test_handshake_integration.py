@@ -317,6 +317,79 @@ def test_duplicate_peer_id_second_connection_rejected(caplog):
         server.stop()
 
 
+def test_stale_duplicate_peer_id_is_replaced_by_new_connection(caplog):
+    """같은 peer_id 의 기존 연결이 STALE_PEER_SECONDS 넘게 조용하면(네트워크가 끊겨
+    서버만 옛 소켓을 쥔 half-open) 새 연결이 그 자리를 넘겨받아야 한다 — 전엔 TCP
+    재전송 한도(약 15분)까지 5초마다 «identity squatting 의심»으로 거부됐다.
+
+    콜백은 main.py 의 peers 레지스트리와 같은 규칙(연결=기록, 해제=pop)으로 흉내 낸다:
+    옛 연결의 해제는 새 연결 등록 «전»에 정확히 1번 — 옛 핸들러가 나중에 또 부르면
+    같은 peer_id 로 새 연결의 기록이 지워진다."""
+    import core.network as network_mod
+    caplog.set_level(logging.INFO, logger="core.network")
+    port = _free_port()
+    peers, events = {}, []
+    events_lock = threading.Lock()
+
+    def on_connected(sock, address, name, peer_id):
+        with events_lock:
+            events.append(("connected", name))
+            peers[peer_id] = name
+
+    def on_disconnected(sock, address, name, peer_id):
+        with events_lock:
+            events.append(("disconnected", name))
+            peers.pop(peer_id, None)
+
+    server = NetworkServer(
+        port=port, auth_key="shared-secret",
+        tailscale_trust=False, bind_address="127.0.0.1",
+    )
+    server.on_client_connected = on_connected
+    server.on_client_disconnected = on_disconnected
+    server.start()
+
+    peer_id = generate_peer_id()
+    old = NetworkClient(host="127.0.0.1", port=port, auth_key="shared-secret",
+                        device_name="old", peer_id=peer_id)
+    old.reconnect_interval = 60  # 교체당한 뒤 다시 붙으려 하지 않게
+    new = NetworkClient(host="127.0.0.1", port=port, auth_key="shared-secret",
+                        device_name="new", peer_id=peer_id)
+    new.reconnect_interval = 0.3
+    try:
+        old.start()
+        assert _wait_until(lambda: old.connected, timeout=3.0)
+        assert _wait_until(lambda: len(server.clients) == 1, timeout=2.0)
+
+        # 옛 연결을 «조용한 지 오래»로 만든다 — 실제로는 네트워크 단절 뒤 PING 주기가 지나며 생긴다
+        with server.clients_lock:
+            info = next(iter(server.clients.values()))
+            info["last_rx"] -= network_mod.STALE_PEER_SECONDS + 1
+
+        new.start()
+        assert _wait_until(lambda: new.connected, timeout=5.0), "새 연결이 받아들여지지 않음"
+        assert _wait_until(lambda: not old.connected, timeout=5.0), "옛 연결이 닫히지 않음"
+        # 옛 핸들러의 finally 진입 신호 — 콜백 분기 «앞»에 찍히는 줄이라 그 분기와 독립
+        assert _wait_until(
+            lambda: any(r.getMessage() == "클라이언트 연결 종료: old" for r in caplog.records),
+            timeout=3.0), "옛 핸들러의 finally 가 돌지 않음"
+        time.sleep(0.2)
+
+        with server.clients_lock:
+            registered = list(server.clients.values())
+        assert [r["name"] for r in registered] == ["new"]
+        with events_lock:
+            assert events == [("connected", "old"), ("disconnected", "old"), ("connected", "new")], events
+            assert peers == {peer_id: "new"}, "옛 연결 해제가 새 연결의 등록을 지움"
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("옛 연결 교체" in m for m in msgs), msgs
+        assert not any("핸드셰이크 거부" in m for m in msgs), "조용한 옛 연결인데 거부됨"
+    finally:
+        new.stop()
+        old.stop()
+        server.stop()
+
+
 # ─── M9: 버전 불일치 disconnect 사유가 콜백으로 전달되는지 ─────────────
 
 def test_client_disconnected_reason_reports_version_mismatch():
