@@ -396,6 +396,63 @@ def test_stale_duplicate_peer_id_is_replaced_by_new_connection(caplog):
         server.stop()
 
 
+def test_duplicate_peer_id_rejected_when_existing_connection_recently_spoke(caplog):
+    """H1 이 «살아 있는» 중복에는 그대로 걸리는지 — 교체 판정의 근거는 수신 루프가
+    프레임마다 갱신하는 last_rx 하나다. 위 거부 테스트는 등록 직후(last_rx = 등록 시각)에
+    두 번째 연결을 붙여 그 갱신 없이도 통과하므로, 여기선 last_rx 를 먼저 오래된 값으로
+    돌린 뒤 피해자가 프레임 1개를 보내 «살아 있음»을 갱신하게 한다. 갱신이 빠지면 등록
+    60초 뒤부터 살아 있는 연결도 내쫓긴다."""
+    import core.network as network_mod
+    from core.protocol import MSG_PING
+    caplog.set_level(logging.INFO, logger="core.network")
+    port = _free_port()
+    disconnects = []
+    server = NetworkServer(
+        port=port, auth_key="shared-secret",
+        tailscale_trust=False, bind_address="127.0.0.1",
+    )
+    server.on_client_disconnected = lambda s, a, name, pid: disconnects.append(name)
+    server.start()
+
+    peer_id = generate_peer_id()
+    victim = NetworkClient(host="127.0.0.1", port=port, auth_key="shared-secret",
+                           device_name="victim", peer_id=peer_id)
+    attacker = NetworkClient(host="127.0.0.1", port=port, auth_key="shared-secret",
+                             device_name="attacker", peer_id=peer_id)
+    attacker.reconnect_interval = 60  # 한 번만 시도
+    try:
+        victim.start()
+        assert _wait_until(lambda: victim.connected, timeout=3.0)
+        assert _wait_until(lambda: len(server.clients) == 1, timeout=2.0)
+
+        def _victim_age():
+            with server.clients_lock:
+                return time.monotonic() - next(iter(server.clients.values()))["last_rx"]
+
+        with server.clients_lock:
+            next(iter(server.clients.values()))["last_rx"] -= network_mod.STALE_PEER_SECONDS + 1
+        assert _victim_age() > network_mod.STALE_PEER_SECONDS
+        victim.send(MSG_PING)  # 살아 있는 연결이 보내는 프레임 — 수신 루프가 last_rx 를 갱신해야 한다
+        assert _wait_until(lambda: _victim_age() < 5, timeout=3.0), "프레임 수신 뒤에도 last_rx 가 갱신되지 않음"
+
+        attacker.start()
+        assert _wait_until(
+            lambda: any("핸드셰이크 거부" in r.getMessage() for r in caplog.records), timeout=3.0
+        ), "살아 있는 연결과 같은 peer_id 인데 거부되지 않음"
+        time.sleep(0.3)
+        with server.clients_lock:
+            assert [i["name"] for i in server.clients.values()] == ["victim"]
+        assert victim.connected
+        # 거부된 시도도 finally 에서 해제 콜백을 (빈 peer_id 로) 부른다 — 수정 전부터의 동작.
+        # 여기서 볼 것은 피해자 쪽 해제가 없다는 것뿐
+        assert "victim" not in disconnects, disconnects
+        assert not any("옛 연결 교체" in r.getMessage() for r in caplog.records)
+    finally:
+        attacker.stop()
+        victim.stop()
+        server.stop()
+
+
 # ─── M9: 버전 불일치 disconnect 사유가 콜백으로 전달되는지 ─────────────
 
 def test_client_disconnected_reason_reports_version_mismatch():
