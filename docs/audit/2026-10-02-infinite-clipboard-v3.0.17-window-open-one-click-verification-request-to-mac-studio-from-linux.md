@@ -1,7 +1,9 @@
 ---
 round_trip: request
-round_trip_status: open
-ball: mac-infra-manager
+round_trip_status: closed
+closed_at: 2026-10-02
+closed_by: "회신 수령: 1 통과(창 2종 연 채 원클릭, helper relaunched, 8.1초), 2 해당 없음 — docs/audit/2026-10-02-infinite-clipboard-v3.0.17-window-open-one-click-result-from-mac.md"
+ball: none
 expects_reply: true
 from: infinite-clipboard (linux-desktop)
 to: mac-infra-manager (mac-studio)

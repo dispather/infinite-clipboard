@@ -1,7 +1,9 @@
 ---
 round_trip: request
-round_trip_status: open
-ball: a5000-workspace
+round_trip_status: closed
+closed_at: 2026-10-02
+closed_by: "회신 수령: 1~4 통과(복원 1개·버림 0, 설정 재시작 복원, 받기 sha256 일치) — docs/audit/2026-10-02-infinite-clipboard-v3.0.17-receivable-restore-and-update-verification-result-from-a5000.md"
+ball: none
 expects_reply: true
 from: infinite-clipboard (linux-desktop)
 to: a5000-workspace (a5000)
