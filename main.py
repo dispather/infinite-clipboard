@@ -261,6 +261,9 @@ class InfiniteClipboard:
         """앱 시작"""
         self.running = True
 
+        # 재시작 전 받을 파일 목록 — 네트워크·IPC 폴러보다 먼저(함정 #51)
+        self._restore_receivables()
+
         # v2.3 audit P2: staging TTL cleanup (시작 시 1회).
         # 진행 중 transfer 는 temp_dir 에 있고 staging 에는 완료 파일만 들어가므로
         # 시작 시 1회로 충분 — 주기 스레드 불필요. 사용자가 즉시 정리하려면
@@ -1511,18 +1514,27 @@ class InfiniteClipboard:
         first = items[0].get("name") or "파일"
         return first if len(items) == 1 else f"{first} 외 {len(items) - 1}개"
 
+    @staticmethod
+    def _receivable_entry(offer, name) -> dict:
+        """receivable_offers 항목 — transfer_state.json 으로 창에 보이고 재시작 때 복원 원천.
+
+        items 는 창이 안 쓰지만 복원 뒤 이어받기(_load_resume_for_offer)용으로 같이 남긴다.
+        """
+        return {
+            "offer_id": offer["offer_id"],
+            "source_peer": offer["source_peer"],
+            "name": name,
+            "kind": offer["kind"],
+            "total_size": int(offer.get("total_size", 0)),
+            "created_at": offer.get("created_at", time.time()),
+            "items": offer.get("items") or [],
+        }
+
     def _add_receivable(self, offer) -> None:
         """받기 fallback 대상 등록 + 알림 + 전송창 갱신용 상태 저장."""
         name = self._offer_display_name(offer)
         with self._offer_lock:
-            self.receivable_offers[offer["offer_id"]] = {
-                "offer_id": offer["offer_id"],
-                "source_peer": offer["source_peer"],
-                "name": name,
-                "kind": offer["kind"],
-                "total_size": int(offer.get("total_size", 0)),
-                "created_at": offer.get("created_at", time.time()),
-            }
+            self.receivable_offers[offer["offer_id"]] = self._receivable_entry(offer, name)
         self._save_transfer_state(force=True)
 
         offer_id = offer["offer_id"]
@@ -1550,6 +1562,49 @@ class InfiniteClipboard:
                 title,
                 t("{name} — 전송 창에서 [받기]", self._lang).format(name=name),
             )
+
+    def _restore_receivables(self) -> None:
+        """재시작 전 «받을 파일» 목록 복원 — 그 «뒤»에 상태 파일을 한 번 쓴다 (함정 #51).
+
+        receivable_offers 는 메모리뿐이라 재시작(설정 저장·업데이트)마다 사라졌고, 전송창은
+        시작 때 다시 쓰이지 않은 transfer_state.json 의 옛 목록을 계속 보여 줬다(받기 →
+        unknown_offer). 받기(_fetch_offer)는 offer 의 source_peer·total_size 만 쓰므로 요약
+        항목으로 복원된다 — 3.0.16 이하가 쓴 항목엔 items 가 없어 이어받기 없이 처음부터.
+        발신자가 그 사이 재시작·재복사했으면 받기 때 superseded 로 정리된다(M6).
+        start() 맨 앞에서 부른다 — 받기 IPC 폴러가 먼저 돌면 남아 있던 받기 요청이
+        unknown_offer(terminal)로 실패하며 복원할 항목을 지운다.
+        """
+        import json
+        entries = []
+        try:
+            with open(self._get_transfer_state_file(), encoding="utf-8") as f:
+                state = json.load(f)
+            if isinstance(state, dict) and isinstance(state.get("receivable"), list):
+                entries = state["receivable"]
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as e:
+            logger.warning(f"[받기] 이전 목록 읽기 실패 — 복원 안 함: {e}")
+        ttl = self.config.offer_ttl_hours * 3600
+        now = time.time()
+        restored = dropped = 0
+        with self._offer_lock:
+            for entry in entries:
+                offer = self.protocol.parse_clip_offer(entry, require_items=False)
+                if (offer is None or offer["source_peer"] == self.config.peer_id
+                        or now - offer["created_at"] > ttl):
+                    dropped += 1
+                    continue
+                name = entry.get("name")
+                if not isinstance(name, str) or not name:
+                    name = self._offer_display_name(offer)
+                self.received_offers[offer["offer_id"]] = offer
+                self.receivable_offers[offer["offer_id"]] = self._receivable_entry(offer, name)
+                restored += 1
+        # 복원 «뒤» — 먼저 쓰면 복원 원천을 덮는다. 창의 받기 개수 = 받을 수 있는 개수(N5)
+        self._save_transfer_state(force=True)
+        if restored or dropped:
+            logger.info(f"[받기] 재시작 전 목록 복원: {restored}개 (버림 {dropped}개 — 만료·형식 오류)")
 
     def _clear_receivable(self, offer_id) -> None:
         with self._offer_lock:

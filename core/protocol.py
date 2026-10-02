@@ -646,8 +646,12 @@ class Protocol:
         })
 
     @staticmethod
-    def parse_clip_offer(data: object) -> Optional[Dict[str, Any]]:
-        """검증 통과 시 offer dict, 실패 시 None (silent ignore 신호)."""
+    def parse_clip_offer(data: object, require_items: bool = True) -> Optional[Dict[str, Any]]:
+        """검증 통과 시 offer dict, 실패 시 None (silent ignore 신호).
+
+        require_items=False 는 재시작 복원 전용(main._restore_receivables) — 3.0.16 이하가
+        저장한 받기 항목엔 items 가 없고, 그걸 복원해 다시 저장하면 [] 다. 네트워크 수신은 항상 기본값.
+        """
         if not isinstance(data, dict):
             return None
         offer_id = data.get("offer_id")
@@ -662,7 +666,9 @@ class Protocol:
             return None
         if kind not in _CLIP_OFFER_KINDS:
             return None
-        if not isinstance(items, list) or not items:
+        if not require_items and items in (None, []):
+            items = []
+        elif not isinstance(items, list) or not items:
             return None
         if not all(Protocol._is_valid_offer_item(it) for it in items):
             return None
