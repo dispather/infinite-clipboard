@@ -173,7 +173,6 @@ STRINGS: dict[str, dict[str, str]] = {
         "업데이트 확인": "Check for Updates",
         "업데이트 설치 (v{version})": "Install Update (v{version})",
         "업데이트 다운로드 중…": "Downloading Update…",
-        "그래도 업데이트 설치 — 받을 파일 {n}개 사라짐": "Install Anyway — {n} pending file(s) will be lost",
         "업데이트 자동 확인": "Check for updates automatically",
         "업데이트": "Update",
         "새 버전 v{version} 이 있습니다 — 트레이 메뉴에서 설치": (
@@ -186,9 +185,6 @@ STRINGS: dict[str, dict[str, str]] = {
         "서버 응답 이상": "unexpected server response",
         "전송 중에는 업데이트할 수 없습니다 — 끝난 뒤 다시 누르세요": (
             "Can't update during a transfer — try again when it finishes"
-        ),
-        "받을 파일 {n}개가 재시작하면 사라집니다 — 계속하려면 2분 안에 한 번 더 누르세요": (
-            "{n} pending file(s) will be lost on restart — click again within 2 minutes to continue"
         ),
         "v{version} 다운로드 중 — 끝나면 앱이 재시작됩니다": (
             "Downloading v{version} — the app will restart when it's done"

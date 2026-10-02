@@ -158,8 +158,6 @@ class InfiniteClipboard:
         # "idle" | "downloading" — 중복 클릭 가드. idle 복귀의 소유자는 _prepare_update_and_exit
         self._update_phase = "idle"
         self._update_lock = threading.Lock()  # phase 판정·전이에만 짧게 쥔다
-        # 받을 파일이 있을 때 1차 클릭이 연 «재클릭 허용» 창의 끝 시각(지나면 자동 만료)
-        self._update_confirm_until = 0.0
         self._releases_url = updater.RELEASES_API
 
         # 프로토콜 (바이너리 청크 생성용)
@@ -2668,8 +2666,6 @@ class InfiniteClipboard:
             "update": {
                 "version": self.update_available.version if self.update_available else None,
                 "phase": self._update_phase,
-                "confirm_pending": time.time() < self._update_confirm_until,
-                "pending_receivables": len(self.receivable_offers),
             },
         }
 
@@ -2681,9 +2677,6 @@ class InfiniteClipboard:
         "rate_limited": "GitHub 요청 한도 초과 — 잠시 후 다시",
         "bad_response": "서버 응답 이상",
     }
-    # 받을 파일이 있을 때 1차 클릭 뒤 재클릭을 받아 주는 시간(초)
-    _UPDATE_CONFIRM_SECONDS = 120
-
     def check_for_update(self, manual: bool = False):
         """GitHub 릴리스 확인 → self.update_available 갱신 → 트레이 메뉴 갱신.
 
@@ -2737,8 +2730,7 @@ class InfiniteClipboard:
         가드(설계 «가드와 그 수명»):
           - 진행 중(phase != idle) → 무시 (중복 클릭)
           - 전송 진행 중 → 거부 + 알림 (전송은 스스로 끝남 — 매 클릭 판정)
-          - 받을 파일 N>0 → 1차 클릭은 경고만, _UPDATE_CONFIRM_SECONDS 안의 재클릭만 진행
-            (재시작하면 receivable_offers 가 사라진다). 창은 시간으로 자동 만료.
+        받을 파일은 막지 않는다 — 재시작 뒤 복원된다(_restore_receivables, 함정 #51).
         """
         import shutil
         import webbrowser
@@ -2746,22 +2738,14 @@ class InfiniteClipboard:
         if info is None:
             return
         notice = None
-        refresh_later = False
         start = False
         with self._update_lock:
             if self._update_phase != "idle":
                 return
             with self._progress_lock:
                 busy = bool(self._transfer_progress)
-            pending = len(self.receivable_offers)
-            now = time.time()
             if busy:
                 notice = t("전송 중에는 업데이트할 수 없습니다 — 끝난 뒤 다시 누르세요", self._lang)
-            elif pending and now > self._update_confirm_until:
-                self._update_confirm_until = now + self._UPDATE_CONFIRM_SECONDS
-                notice = t("받을 파일 {n}개가 재시작하면 사라집니다 — 계속하려면 2분 안에 한 번 더 누르세요",
-                           self._lang).format(n=pending)
-                refresh_later = True
             else:
                 mode = updater.install_mode(
                     platform.system(), sys.executable,
@@ -2773,18 +2757,12 @@ class InfiniteClipboard:
                     webbrowser.open(info.html_url)
                     return
                 self._update_phase = "downloading"
-                self._update_confirm_until = 0.0
                 start = True
                 notice = t("v{version} 다운로드 중 — 끝나면 앱이 재시작됩니다",
                            self._lang).format(version=info.version)
         if notice:
             self._notify(t("업데이트", self._lang), notice)
         self._notify_state_changed()
-        if refresh_later:
-            # 창이 만료되면 메뉴 라벨(«그래도 업데이트 설치»)을 원래대로 되돌린다
-            timer = threading.Timer(self._UPDATE_CONFIRM_SECONDS + 0.5, self._notify_state_changed)
-            timer.daemon = True
-            timer.start()
         if start:
             threading.Thread(target=self._prepare_update_and_exit, args=(info, mode),
                              daemon=True).start()

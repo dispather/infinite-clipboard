@@ -124,8 +124,7 @@ def test_check_failure_silent_when_automatic(app):
 
 def test_status_snapshot_carries_update(app):
     snap = app.status_snapshot()["update"]
-    assert snap == {"version": None, "phase": "idle", "confirm_pending": False,
-                    "pending_receivables": 0}
+    assert snap == {"version": None, "phase": "idle"}
 
 
 def test_state_write_does_not_touch_settings_json(app, tmp_path):
@@ -189,25 +188,15 @@ def test_install_refused_during_transfer(app, monkeypatch):
     assert app._update_phase == "idle"
 
 
-def test_install_with_receivables_needs_second_click_within_window(app, monkeypatch):
+def test_install_with_receivables_proceeds_on_first_click(app, monkeypatch):
+    """받을 파일은 재시작 뒤 복원되므로(함정 #51) 업데이트를 막지 않는다 — 옛 2단계 가드 제거."""
     _silent(monkeypatch)
     app.receivable_offers["o1"] = {"filename": "x"}
-    clock = [1000.0]
-    import main as main_module
-    monkeypatch.setattr(main_module.time, "time", lambda: clock[0])
     with _Server(app):
-        app.update_available = updater.pick_update(
-            updater.fetch_releases(app._releases_url), "3.0.13", "Linux", "x86_64")
-        app.request_update_install()                    # 1차 — 경고만
-        assert app._post_exit is None and app._update_phase == "idle"
-        assert app.status_snapshot()["update"]["confirm_pending"] is True
-        assert "1개" in app._notes[-1]
-        clock[0] += 121                                  # 2분 경과 → 만료
-        app.request_update_install()                    # 다시 1차 취급
-        assert app._update_phase == "idle"
-        clock[0] += 5
-        app.request_update_install()                    # 창 안 2차 → 진행
+        app.check_for_update(manual=False)
+        app.request_update_install()
         assert _wait(lambda: app._post_exit is not None)
+    assert not any("사라집니다" in n for n in app._notes)
 
 
 def test_install_hash_mismatch_keeps_running(app, monkeypatch):

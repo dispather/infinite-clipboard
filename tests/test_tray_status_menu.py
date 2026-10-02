@@ -87,8 +87,7 @@ def test_update_menu_items_and_refresh_on_update_change():
     """2026-09-29 자동 업데이트: «업데이트 확인» 은 항상, «업데이트 설치 (vX)» 는 새 버전이 있을 때만.
     업데이트 상태가 바뀌면(상태 줄은 그대로여도) 메뉴를 다시 만든다."""
     app, tray = _make()
-    app.snap["update"] = {"version": None, "phase": "idle", "confirm_pending": False,
-                          "pending_receivables": 0}
+    app.snap["update"] = {"version": None, "phase": "idle"}
     tray.update_icon()
     texts = [getattr(i, "text", None) for i in tray._menu_items()]
     assert "Check for Updates" in texts

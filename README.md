@@ -153,7 +153,7 @@ From **v3.0.14** on, update from the tray menu (**Install Update (vX.Y.Z)**, or 
 - **Windows**: installs silently and relaunches the app. If you installed "for all users" (Program Files), the installer opens normally instead so Windows can ask for permission
 - **Linux (Arch package)**: a system password prompt appears once (the package is installed with `pacman -U`). If you cancel, the current version simply starts again
 - **macOS**: the app in `/Applications` is replaced and relaunched — no quarantine command needed for updates
-- The update is refused while a file transfer is in progress. If you have files waiting to be received, the first click warns you (they'd be lost on restart) and a second click within 2 minutes proceeds
+- The update is refused while a file transfer is in progress. Files waiting to be received stay in the Transfers window after the restart (v3.0.17+)
 - Running from source, or installed somewhere the app can't write to? The menu item opens the release page instead
 - The installer's log is `update-helper.log` next to the app's log file; after restarting, the app tells you whether the update was installed
 

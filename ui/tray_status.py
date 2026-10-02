@@ -153,9 +153,7 @@ def tooltip_text(snap: dict, lang: str) -> str:
 def update_menu_label(snap: dict, lang: str) -> Optional[str]:
     """2026-09-29 자동 업데이트: 트레이 «업데이트 설치» 항목 라벨. 새 버전이 없으면 None.
 
-    snap["update"] = {"version", "phase", "confirm_pending", "pending_receivables"}
-    (main.InfiniteClipboard.status_snapshot). confirm_pending 은 받을 파일이 있는 상태에서
-    1차 클릭 뒤 재클릭을 기다리는 2분 창 — 라벨이 그 결과(받을 파일 유실)를 말한다.
+    snap["update"] = {"version", "phase"} (main.InfiniteClipboard.status_snapshot).
     """
     upd = snap.get("update") or {}
     version = upd.get("version")
@@ -163,7 +161,4 @@ def update_menu_label(snap: dict, lang: str) -> Optional[str]:
         return None
     if upd.get("phase") == "downloading":
         return tr("업데이트 다운로드 중…", lang)
-    if upd.get("confirm_pending"):
-        return tr("그래도 업데이트 설치 — 받을 파일 {n}개 사라짐", lang).format(
-            n=upd.get("pending_receivables", 0))
     return tr("업데이트 설치 (v{version})", lang).format(version=version)
