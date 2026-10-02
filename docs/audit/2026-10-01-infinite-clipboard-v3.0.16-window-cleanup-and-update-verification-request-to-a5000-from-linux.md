@@ -1,7 +1,9 @@
 ---
 round_trip: request
-round_trip_status: open
-ball: a5000-workspace
+round_trip_status: closed
+ball: none
+closed_at: 2026-10-02
+closed_by: "회신 수령: 1·1(선택)·2 통과 — 원클릭 약 10초, 가드 2차 클릭 진행, 종료 시 창 0.010초 정리(docs/audit/2026-10-01-infinite-clipboard-v3.0.16-windows-window-cleanup-and-update-verification-result-from-a5000.md)"
 expects_reply: true
 from: infinite-clipboard (linux-desktop)
 to: a5000-workspace (a5000)
