@@ -220,8 +220,11 @@ jobs:
       - name: Install build tools (uv + pyenv + tcl-tk@8)
         # brew 는 macos-15 에 사전 설치. pyenv 와 uv 는 build_mac.sh 가 요구.
         # tcl-tk@8 은 함정 #11 회피용 Python 빌드 의존성.
+        # openssl@1.1 이 링크된 러너 이미지에선 pyenv 의존성 openssl@3 의 brew link 가 실패해
+        # 설치는 다 끝났는데 brew 가 exit 1 을 낸다(2026-10-02 v3.0.17 태그 빌드 실측) — 먼저 unlink.
         run: |
           brew update
+          brew unlink openssl@1.1 2>/dev/null || true
           brew install uv pyenv tcl-tk@8
 
       - name: Restore pyenv Python 3.12 cache
