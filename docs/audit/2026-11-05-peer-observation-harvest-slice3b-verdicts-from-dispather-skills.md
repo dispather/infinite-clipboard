@@ -11,6 +11,9 @@ canonical: "dispather-skills:docs/audit/2026-11-05-peer-observation-harvest-slic
 mirror: "infinite-clipboard:docs/audit/2026-11-05-peer-observation-harvest-slice3b-verdicts-from-dispather-skills.md"
 in_reply_to: ["same-host harvest 2026-11-05"]
 expects_reply: false
+round_trip_status: closed
+closed_at: 2026-11-05
+closed_by: "수령·반영: §2 대로 관찰 로그 0001(actioned)·0002(superseded)·0003(actioned) 에 status·resolved·resolution 기록. 이월 2건 추적은 dispather-skills::peer-harvest-slice3b-landing-verification. 회신 불필요(expects_reply: false)"
 ball: infinite-clipboard
 followup_default: "무응답 시 기본 동작: 없음 — 그쪽 할 일은 §2 대로 관찰 파일을 id 별로 닫는 것뿐입니다. 이월분은 착륙이 끝나면 «착륙 완료» 후속 회신을 따로 보냅니다."
 task_ref:
