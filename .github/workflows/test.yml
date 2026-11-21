@@ -107,6 +107,11 @@ jobs:
         # S0 미결(대용량 GetClipboardData NULL)이 프로덕션 블로킹 PumpMessages 루프에서
         # 해소되는지 검증하는 핵심 잡 — 특히 test_win_large_payload(~1MB CF/PNG delayed render).
         run: python -m pytest tests/test_lazy_win.py -v
+      - name: Run Windows text write + lazy late-drain tests
+        # 2026-11-21: 원격 텍스트 쓰기가 숫자 텍스트에서 힙 손상으로 죽던 경로
+        # (pywin32 #2132 — SetClipboardText 로 교체)를 실제 클립보드 왕복으로, 그리고
+        # 시간 초과로 포기한 lazy 등록이 나중에 실행되지 않는지를 lazy_win 으로 본다.
+        run: python -m pytest tests/test_win_text_numeric.py tests/test_lazy_late_drain.py -v
       - name: Run Windows actionable-notify tests (Windows-Toasts)
         # 이 개발 환경엔 Windows 가 없어 core/notify_win.py 는 이 CI 잡이 유일한
         # 실 Windows 검증 수단 — 실제 InteractableWindowsToaster.show_toast 호출 +
