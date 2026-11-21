@@ -47,7 +47,7 @@ from typing import Optional
 
 from core.lazy_clipboard import (
     LazyClipboardProvider, FetchedContent, FetchCallback,
-    KIND_FILE, KIND_IMAGE,
+    KIND_FILE, KIND_IMAGE, OwnerThreadCall, OwnerThreadBusy,
 )
 # 모니터(WindowsClipboardHandler)와 OpenClipboard 경합을 직렬화하는 프로세스 전역 락.
 # clipboard_manager 는 비-Windows 안전하게 import 되고 lazy_win 보다 먼저 로드돼 있다.
@@ -130,7 +130,7 @@ class WindowsLazyProvider(LazyClipboardProvider):
         self._offer: Optional[dict] = None
         self._fetch_cb: Optional[FetchCallback] = None
         self._cache: Optional[FetchedContent] = None
-        self._pending = None  # (offer, cb, done_event, result)
+        self._pending: Optional[OwnerThreadCall] = None  # 메시지 스레드에 맡긴 등록 1건
 
         self._hwnd = None
         self._hwnd_ready = threading.Event()
@@ -153,17 +153,24 @@ class WindowsLazyProvider(LazyClipboardProvider):
         kind = offer.get("kind") if isinstance(offer, dict) else None
         if not self.is_supported(kind):
             return False
-        done = threading.Event()
-        result = {"ok": False}
+        call = OwnerThreadCall(lambda: self._do_register(offer, fetch_callback))
         with self._lock:
-            self._pending = (offer, fetch_callback, done, result)
+            self._pending = call
         self._ensure_thread()
         # 창 생성 완료 후 메시지 스레드를 깨워 지연 등록 수행
+        t0 = time.monotonic()
         if self._hwnd_ready.wait(timeout=2.0) and self._hwnd:
             win32gui.PostMessage(self._hwnd, _WM_APP_DRAIN, 0, 0)
-        # _drain_pending 의 OpenClipboard 재시도(최대 ~1s)를 포함하도록 넉넉히 대기
-        done.wait(timeout=4.0)
-        return result["ok"]
+        # 이벤트 스레드가 집지 못한 채 시간이 지나면 취소 — 취소된 등록은 나중에도 실행되지
+        # 않는다(과거엔 늦게 실행돼 «받기 목록 + 뒤늦은 클립보드 가로채기» 이중 상태,
+        # lazy-register-late-drain). 이미 실행 중이면 끝까지 기다려 실제 결과를 돌려준다.
+        # 창 대기와 합쳐 4초 — _do_register 의 OpenClipboard 재시도(~1s)는 running 상태라
+        # 취소 대상이 아니다(끝까지 기다림).
+        try:
+            return bool(call.wait(timeout=max(0.5, 4.0 - (time.monotonic() - t0))))
+        except OwnerThreadBusy as e:
+            logger.warning(f"Windows lazy: 등록 대기 초과 — 받기 모드로: {e}")
+            return False
 
     def clear(self) -> None:
         # 소유는 유지하되 offer=None → WM_RENDERFORMAT 가 아무것도 제공 안 함
@@ -235,13 +242,12 @@ class WindowsLazyProvider(LazyClipboardProvider):
         )
 
     def _fail_pending(self) -> None:
+        """창 생성 실패 — 대기 중 등록을 실행 없이 False 로 끝낸다."""
         with self._lock:
-            pending = self._pending
+            call = self._pending
             self._pending = None
-        if pending is not None:
-            _, _, done, result = pending
-            result["ok"] = False
-            done.set()
+        if call is not None:
+            call.run()  # _hwnd 가 None 이라 _do_register 가 즉시 False
 
     # ── WndProc (메시지 스레드에서만 실행) ─────────────────────────────
 
@@ -289,11 +295,15 @@ class WindowsLazyProvider(LazyClipboardProvider):
     def _drain_pending(self) -> None:
         """register_offer 커맨드 처리: 지연 포맷 등록 (메시지 스레드 = 클립보드 소유자)."""
         with self._lock:
-            pending = self._pending
+            call = self._pending
             self._pending = None
-        if pending is None:
-            return
-        offer, cb, done, result = pending
+        if call is not None:
+            call.run()  # 취소된 호출(대기자가 포기)은 건너뜀
+
+    def _do_register(self, offer: dict, cb: FetchCallback) -> bool:
+        """지연 포맷 등록 (메시지 스레드 = 클립보드 소유자에서만)."""
+        if not self._hwnd:
+            return False  # 창 생성 실패(_fail_pending) — 클립보드 소유 불가
         try:
             # 모니터와의 내부 경합 직렬화 — 락을 쥔 채 재시도로 OpenClipboard.
             with WINDOWS_CLIPBOARD_LOCK:
@@ -312,13 +322,12 @@ class WindowsLazyProvider(LazyClipboardProvider):
                         _u32.SetClipboardData(
                             _FMT_DROPEFFECT, _hglobal(struct.pack("<I", _DROPEFFECT_COPY)),
                         )
-                    result["ok"] = True
                 finally:
                     win32clipboard.CloseClipboard()
+            return True
         except Exception as e:
             logger.warning(f"Windows lazy: 지연 등록 실패: {e}")
-            result["ok"] = False
-        done.set()
+            return False
 
     def _formats_for_kind(self, kind: str) -> list:
         if kind == KIND_IMAGE:

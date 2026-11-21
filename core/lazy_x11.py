@@ -33,7 +33,7 @@ from urllib.parse import quote
 
 from core.lazy_clipboard import (
     LazyClipboardProvider, FetchedContent, FetchCallback,
-    KIND_FILE, KIND_IMAGE,
+    KIND_FILE, KIND_IMAGE, OwnerThreadCall, OwnerThreadBusy,
 )
 
 # python-xlib — 부재 시 ImportError → 팩토리가 잡아 None (fallback)
@@ -111,14 +111,18 @@ class X11LazyProvider(LazyClipboardProvider):
         kind = offer.get("kind") if isinstance(offer, dict) else None
         if not self.is_supported(kind):
             return False
-        done = threading.Event()
-        result = {"ok": False}
+        call = OwnerThreadCall(lambda: self._do_register(offer, fetch_callback))
         with self._lock:
-            self._pending = (offer, fetch_callback, done, result)
+            self._pending = call
         self._ensure_thread()
-        # 이벤트 스레드가 소유권을 잡고 결과를 채울 때까지 대기 (graceful 타임아웃)
-        done.wait(timeout=2.0)
-        return result["ok"]
+        # 이벤트 스레드가 집지 못한 채 시간이 지나면 취소 — 취소된 등록은 나중에도 실행되지
+        # 않는다(과거엔 늦게 실행돼 «받기 목록 + 뒤늦은 클립보드 가로채기» 이중 상태,
+        # lazy-register-late-drain). 이미 실행 중이면 끝까지 기다려 실제 결과를 돌려준다.
+        try:
+            return bool(call.wait(timeout=2.0))
+        except OwnerThreadBusy as e:
+            logger.warning(f"X11 lazy: 등록 대기 초과 — 받기 모드로: {e}")
+            return False
 
     def clear(self) -> None:
         # 이벤트 스레드는 계속 돌되 offer=None 이면 모든 요청을 NONE 으로 거부.
@@ -172,13 +176,18 @@ class X11LazyProvider(LazyClipboardProvider):
                     logger.debug(f"X11 lazy 이벤트 처리 무시: {e}")
 
     def _drain_pending(self) -> None:
-        """register_offer 커맨드를 이벤트 스레드에서 처리 (Display I/O 격리)."""
+        """register_offer 커맨드를 이벤트 스레드에서 처리 (Display I/O 격리).
+
+        취소된 호출(대기자가 이미 포기)은 OwnerThreadCall.run 이 건너뛴다.
+        """
         with self._lock:
-            pending = self._pending
+            call = self._pending
             self._pending = None
-        if pending is None:
-            return
-        offer, cb, done, result = pending
+        if call is not None:
+            call.run()
+
+    def _do_register(self, offer: dict, cb: FetchCallback) -> bool:
+        """CLIPBOARD selection 소유 + offer 활성화 (이벤트 스레드에서만)."""
         with self._lock:
             self._offer = offer
             self._fetch_cb = cb
@@ -191,8 +200,7 @@ class X11LazyProvider(LazyClipboardProvider):
         except Exception as e:
             logger.warning(f"X11 lazy: CLIPBOARD 소유 실패: {e}")
             owned = False
-        result["ok"] = owned
-        done.set()
+        return owned
 
     def _targets_for_kind(self, kind: str) -> list:
         if kind == KIND_IMAGE:

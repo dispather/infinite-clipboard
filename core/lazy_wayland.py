@@ -41,7 +41,7 @@ from urllib.parse import quote
 
 from core.lazy_clipboard import (
     LazyClipboardProvider, FetchedContent, FetchCallback,
-    KIND_FILE, KIND_IMAGE,
+    KIND_FILE, KIND_IMAGE, OwnerThreadCall, OwnerThreadBusy,
 )
 
 # pywayland + vendored 바인딩 — 부재 시 ImportError → 팩토리가 잡아 None (fallback)
@@ -110,14 +110,18 @@ class WaylandLazyProvider(LazyClipboardProvider):
         kind = offer.get("kind") if isinstance(offer, dict) else None
         if not self.is_supported(kind):
             return False
-        done = threading.Event()
-        result = {"ok": False}
+        call = OwnerThreadCall(lambda: self._do_register(offer, fetch_callback))
         with self._lock:
-            self._pending = (offer, fetch_callback, done, result)
+            self._pending = call
         self._ensure_thread()
-        # 이벤트 스레드가 selection 을 잡고 결과를 채울 때까지 대기 (graceful 타임아웃)
-        done.wait(timeout=2.0)
-        return result["ok"]
+        # 이벤트 스레드가 집지 못한 채 시간이 지나면 취소 — 취소된 등록은 나중에도 실행되지
+        # 않는다(과거엔 늦게 실행돼 «받기 목록 + 뒤늦은 클립보드 가로채기» 이중 상태,
+        # lazy-register-late-drain). 이미 실행 중이면 끝까지 기다려 실제 결과를 돌려준다.
+        try:
+            return bool(call.wait(timeout=2.0))
+        except OwnerThreadBusy as e:
+            logger.warning(f"Wayland lazy: 등록 대기 초과 — 받기 모드로: {e}")
+            return False
 
     def clear(self) -> None:
         # 이벤트 스레드는 계속 돌되 offer=None 이면 send 를 빈 바이트로 응답.
@@ -202,12 +206,10 @@ class WaylandLazyProvider(LazyClipboardProvider):
     def _fail_pending(self) -> None:
         """바인딩 실패 시 대기 중 register_offer 커맨드를 ok=False 로 즉시 응답."""
         with self._lock:
-            pending = self._pending
+            call = self._pending
             self._pending = None
-        if pending is not None:
-            _, _, done, result = pending
-            result["ok"] = False
-            done.set()
+        if call is not None:
+            call.run()  # _bind_ok=False 라 _do_register 가 즉시 False
 
     def _drain_pending(self) -> None:
         """register_offer 커맨드를 이벤트 스레드에서 처리 (Display I/O 격리).
@@ -218,15 +220,15 @@ class WaylandLazyProvider(LazyClipboardProvider):
         옛 source 의 cancelled 가 방금 등록한 offer 를 지우지 않게 한다.
         """
         with self._lock:
-            pending = self._pending
+            call = self._pending
             self._pending = None
-        if pending is None:
-            return
-        offer, cb, done, result = pending
+        if call is not None:
+            call.run()  # 취소된 호출(대기자가 포기)은 건너뜀
+
+    def _do_register(self, offer: dict, cb: FetchCallback) -> bool:
+        """새 data source 생성 + set_selection (이벤트 스레드에서만)."""
         if not self._bind_ok:
-            result["ok"] = False
-            done.set()
-            return
+            return False
         with self._lock:
             self._offer = offer
             self._fetch_cb = cb
@@ -242,11 +244,10 @@ class WaylandLazyProvider(LazyClipboardProvider):
                 self._source = source
             self._device.set_selection(source)
             self._dpy.roundtrip()
-            result["ok"] = True
+            return True
         except Exception as e:
             logger.warning(f"Wayland lazy: selection 설정 실패: {e}")
-            result["ok"] = False
-        done.set()
+            return False
 
     def _mimes_for_kind(self, kind: str) -> list:
         base = [_MIME_PNG] if kind == KIND_IMAGE else [_MIME_URILIST, _MIME_GNOME]
