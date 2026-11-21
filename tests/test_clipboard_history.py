@@ -164,3 +164,55 @@ def test_status_snapshot_and_last_received_only_for_receive(tmp_path):
     last = app.status_snapshot()["last_received"]
     assert last["name"] == "in.png" and last["size"] == 20
     assert app.status_snapshot()["active"] == []
+
+
+# ── history-lost-on-restart: 재시작 뒤 이력 유지 ─────────────────────────
+
+def test_history_survives_restart(tmp_path, monkeypatch):
+    """재시작(새 인스턴스) 뒤 첫 새 항목이 이전 이력을 덮어쓰지 않는다.
+
+    과거: self.clipboard_history = [] 로 시작 → 첫 _add_to_history 가 파일을
+    1개짜리로 덮음(a5000 실측 30,890 B → 428 B, v3.0.15~17 업데이트 재시작마다).
+    """
+    history_file = tmp_path / "clipboard_history.json"
+
+    first = _make_app(history_size=5)
+    monkeypatch.setattr(first, "_get_history_file", lambda: str(history_file))
+    for t in ("one", "two", "three"):
+        first._add_to_history("text", t)
+
+    second = _make_app(history_size=5)
+    monkeypatch.setattr(second, "_get_history_file", lambda: str(history_file))
+    second._restore_clipboard_history()
+    second._add_to_history("text", "four")
+
+    saved = json.loads(history_file.read_text(encoding="utf-8"))
+    assert [e["content"] for e in saved] == ["four", "three", "two", "one"]
+
+
+def test_history_restore_respects_size_and_skips_garbage(tmp_path, monkeypatch):
+    history_file = tmp_path / "clipboard_history.json"
+    entries = [{"type": "text", "content": f"t{i}", "id": str(i)} for i in range(10)]
+    history_file.write_text(json.dumps(entries + ["junk", {"no_type": 1}]), encoding="utf-8")
+
+    app = _make_app(history_size=4)
+    monkeypatch.setattr(app, "_get_history_file", lambda: str(history_file))
+    app._restore_clipboard_history()
+    assert [e["content"] for e in app.clipboard_history] == ["t0", "t1", "t2", "t3"]
+
+
+def test_start_restores_history_before_network(tmp_path, monkeypatch):
+    """start() 가 네트워크보다 먼저 이력을 복원한다(첫 수신 항목이 덮기 전)."""
+    history_file = tmp_path / "clipboard_history.json"
+    history_file.write_text(json.dumps([{"type": "text", "content": "old"}]), encoding="utf-8")
+    app = _make_app()
+    monkeypatch.setattr(app, "_get_history_file", lambda: str(history_file))
+    monkeypatch.setattr(app, "_cleanup_staging", lambda notify=False: None)
+    monkeypatch.setattr(app, "_restore_receivables", lambda: None)
+    # start() 의 나머지(트레이·스레드)는 여기서 멈춘다
+    monkeypatch.setattr(app, "_start_client", lambda: (_ for _ in ()).throw(SystemExit))
+    try:
+        app.start()
+    except SystemExit:
+        pass
+    assert [e["content"] for e in app.clipboard_history] == ["old"]

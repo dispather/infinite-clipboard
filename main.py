@@ -263,6 +263,9 @@ class InfiniteClipboard:
         # 재시작 전 받을 파일 목록 — 네트워크·IPC 폴러보다 먼저(함정 #51)
         self._restore_receivables()
 
+        # 재시작 전 클립보드 이력 — 첫 새 항목이 파일을 덮기 «전»에 (history-lost-on-restart)
+        self._restore_clipboard_history()
+
         # v2.3 audit P2: staging TTL cleanup (시작 시 1회).
         # 진행 중 transfer 는 temp_dir 에 있고 staging 에는 완료 파일만 들어가므로
         # 시작 시 1회로 충분 — 주기 스레드 불필요. 사용자가 즉시 정리하려면
@@ -817,6 +820,25 @@ class InfiniteClipboard:
             if len(self.clipboard_history) > self.config.clipboard_history_size:
                 self.clipboard_history.pop()
             self._save_history_file()
+
+    def _restore_clipboard_history(self) -> None:
+        """시작 때 clipboard_history.json 을 메모리 이력으로 복원.
+
+        과거엔 self.clipboard_history = [] 로 시작해 재시작(설정 저장·자동 업데이트)
+        뒤 첫 새 항목이 파일을 그 1개로 덮었다(a5000 실측 30,890 B → 428 B). 이력 창은
+        파일을 직접 읽는 뷰라 메인 메모리가 곧 파일의 원본이어야 한다.
+        history_privacy_mode 는 «민감 패턴만 저장 안 함»(core/privacy.py) — 복원과 무관.
+        손상 파일은 로더가 .corrupt-<ts> 로 백업하고 빈 목록을 준다.
+        """
+        loaded, _corrupted = _load_clipboard_history_file(
+            Path(self._get_history_file()))
+        entries = [e for e in loaded if isinstance(e, dict) and e.get("type")]
+        limit = max(0, int(self.config.clipboard_history_size))
+        with self._history_lock:
+            # 시작 전에 이미 들어온 항목(드묾)이 있으면 그게 더 최신 — 앞에 둔다
+            self.clipboard_history = (self.clipboard_history + entries)[:limit]
+        if entries:
+            logger.info(f"[history] 이전 이력 {len(entries)}개 복원 (상한 {limit})")
 
     def _save_history_file(self):
         """이력을 JSON 파일에 저장 (별도 프로세스 History 창 공유용, 원자적 쓰기).
