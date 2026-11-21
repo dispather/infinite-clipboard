@@ -301,8 +301,13 @@ class WindowsClipboard:
             self.win32clipboard.EmptyClipboard()
 
             if content_type == "text":
-                self.win32clipboard.SetClipboardData(
-                    self.win32con.CF_UNICODETEXT, data
+                # SetClipboardData(CF_UNICODETEXT, str) 금지 — pywin32 ≤312 는 인자를 먼저
+                # 핸들로 해석해 숫자로만 된 텍스트('18621312165' 등)를 가짜 HGLOBAL 로 넘긴다
+                # → 오류 또는 힙 손상(0xc0000374)으로 조용히 사망(pywin32 #2132, 수정 #2819 은
+                # 2026-10-30 병합·미배포). a5000 06~10월 5회 사망의 원인 후보
+                # (win-text-receive-heap-crash). SetClipboardText 는 항상 새 버퍼를 할당한다.
+                self.win32clipboard.SetClipboardText(
+                    data, self.win32con.CF_UNICODETEXT
                 )
                 # v2.2 R1 privacy: INFO 로그에선 길이만, content 는 DEBUG 만
                 logger.info(f"텍스트 클립보드 설정: {len(data)}자")
