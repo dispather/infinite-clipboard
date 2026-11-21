@@ -178,6 +178,7 @@ class InfiniteClipboard:
         self.outgoing_files = {}      # {transfer_id: (metadata, [abs_path])} 발신 대기
         self._transfers_lock = threading.Lock()
         self._cancelled_transfers = set()  # 중단 요청된 transfer_id
+        self._relay_failed_tids = set()  # [서버] 중계 실패를 발신자에게 이미 알린 transfer_id
 
         # 전송 진행 상태 (TransferWindow JSON 공유용, _progress_lock으로 보호)
         self._transfer_progress = {}   # {transfer_id: {filename, total_size, bytes_transferred, direction, start_time}}
@@ -469,6 +470,31 @@ class InfiniteClipboard:
             self.server.broadcast(msg_type, data, exclude_sock=sock)
             return None
 
+    def _notify_relay_failure(self, sock, data):
+        """[서버 중계] 청크를 수신자에게 못 넘겼으면 발신자에게 FILE_ERROR 를 1회 보낸다.
+
+        과거엔 send_raw_to_peer 의 False 를 버려, 수신자가 끊긴 뒤에도 발신자는 파일
+        나머지를 계속 보냈고(서버 로그 «peer 없음 — drop» 수십 줄) 그동안
+        _outgoing_fetch_lock 을 쥔 채라 다른 PC 의 «받기» 가 줄을 섰다
+        (server-relay-hol-blocking). 발신자의 _handle_file_error_received 가
+        cancel_outgoing → chunk_callback 의 InterruptedError 로 전송을 멈춘다.
+        """
+        transfer_id = data.get("transfer_id") if isinstance(data, dict) else None
+        if not transfer_id or transfer_id in self._relay_failed_tids:
+            return
+        if len(self._relay_failed_tids) > 256:
+            self._relay_failed_tids.clear()
+        self._relay_failed_tids.add(transfer_id)
+        logger.warning(
+            f"[파일] 중계 실패 — 수신자 "
+            f"{str(data.get('receiver_peer', ''))[:8]}… 연결 없음, 발신자에게 중단 알림: "
+            f"{transfer_id}"
+        )
+        self.server.send_to(sock, MSG_FILE_ERROR, {
+            "transfer_id": transfer_id,
+            "error": "relay_failed: receiver disconnected",
+        })
+
     def _on_server_message(self, sock, message):
         """서버: 클라이언트로부터 메시지 수신"""
         msg_type = message.get("type")
@@ -527,10 +553,12 @@ class InfiniteClipboard:
                 if receiver_peer == self.config.peer_id:
                     self._handle_file_chunk(data)
                 elif raw:
-                    self.server.send_raw_to_peer(receiver_peer, raw)
+                    if not self.server.send_raw_to_peer(receiver_peer, raw):
+                        self._notify_relay_failure(sock, data)
                 else:
                     # raw 부재(드문 경로) — 재직렬화해서 targeted 전송
-                    self.server.send_to_peer(receiver_peer, msg_type, data)
+                    if not self.server.send_to_peer(receiver_peer, msg_type, data):
+                        self._notify_relay_failure(sock, data)
             else:
                 self._handle_file_chunk(data)
                 # 원본 와이어 바이트로 중계 (재직렬화 방지, 바이너리 프레임 유지)
@@ -2107,7 +2135,11 @@ class InfiniteClipboard:
                         receiver_peer=_rcv,
                     )
                     if _rcv:
-                        self._send_raw_to(raw, _rcv)
+                        if not self._send_raw_to(raw, _rcv):
+                            # 수신자 연결이 끊김(서버=라우팅 표에서 빠짐, 클라이언트=서버
+                            # 연결 끊김) — 나머지 청크를 허공에 보내며 outgoing 슬롯을
+                            # 붙잡지 않게 즉시 중단(server-relay-hol-blocking)
+                            raise ConnectionError(f"수신자 {_rcv[:8]}… 연결 끊김 — 전송 중단")
                     else:
                         self._send_raw_msg(raw)
                     bytes_sent += len(chunk_data)

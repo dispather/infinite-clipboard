@@ -11,6 +11,7 @@ import socket
 import threading
 import time
 import logging
+from collections import deque
 from typing import Dict, Any, Optional, Callable
 
 from core.protocol import (
@@ -48,6 +49,144 @@ CLIENT_RECV_TIMEOUT = 30
 # 그동안 같은 PC 의 재접속이 5초마다 거부됐다(2026-07~10 서버 로그 12회).
 # PING 주기의 2배 — 살아 있는 연결은 여기에 닿지 않아 H1(살아 있는 중복 거부)은 유지.
 STALE_PEER_SECONDS = 2 * CLIENT_RECV_TIMEOUT
+
+# 서버 → 클라이언트 송신은 소켓마다 전용 writer 스레드(_PeerWriter)가 맡는다. 과거엔
+# 송신 «호출자» 스레드(다른 발신자의 수신 처리 스레드, broadcast 루프)가 직접 sendall
+# 해서, 소켓을 안 읽는 수신자 한 대가 그 호출자를 소켓 타임아웃(30초)까지 붙잡았다
+# (head-of-line 차단 — 2026-09-29 a5000 «받기» 32초 무반응, server-relay-hol-blocking).
+#
+# 큐 상한: targeted 송신(send_to_peer/send_raw_to_peer — lazy 청크 스트림)은 이 바이트
+# 상한에서 대기해 발신자에게 TCP 역압을 그대로 전한다(서버 메모리가 파일 크기만큼
+# 부풀지 않게). broadcast·PING/PONG 은 기다리지 않는다 — 한 수신자 때문에 루프가 멈추면
+# 안 되므로. 그 경우 큐가 상한을 넘을 수 있으나 정지 판정으로 끊기면 비워진다.
+SEND_QUEUE_MAX_BYTES = 8 * 1024 * 1024
+
+# 송신 «진행»(소켓이 바이트를 받아 간 시점)이 이 시간 넘게 없으면 그 수신자를 끊는다.
+# 느리지만 읽고 있는 수신자는 진행이 계속 갱신되므로 끊지 않는다(진행량 기준).
+# 큐가 차서 대기 중인 발신자는 최대 이 시간만 막힌다 — 소켓 타임아웃(30초)보다 짧게.
+SEND_STALL_SECONDS = 15
+
+
+class _PeerWriter:
+    """소켓 하나의 핸드셰이크 이후 송신을 전부 맡는 writer 스레드 + 바이트 상한 큐.
+
+    한 소켓에 쓰는 스레드가 이것 하나뿐이라 프레임이 섞이지 않는다(옛 소켓별 write
+    lock 의 역할). 죽으면(송신 오류·정지 판정·kill) 큐를 비우고 소켓을 shutdown 해
+    수신 스레드를 깨우고, 이후 enqueue 는 즉시 False.
+    """
+
+    def __init__(self, sock: socket.socket, label: str,
+                 on_dead: Optional[Callable[["_PeerWriter", str], None]] = None):
+        self.sock = sock
+        self.label = label
+        self._on_dead = on_dead
+        self._q: "deque[bytes]" = deque()
+        self._bytes = 0
+        self._cv = threading.Condition()
+        self._dead = False
+        self.dead_reason = ""
+        self._last_progress = time.monotonic()
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name=f"ic-writer-{label}",
+        )
+        self._thread.start()
+
+    @property
+    def dead(self) -> bool:
+        return self._dead
+
+    @property
+    def queued_bytes(self) -> int:
+        return self._bytes
+
+    def enqueue(self, data: bytes, block: bool) -> bool:
+        """송신 큐에 넣는다. block=True 면 바이트 상한에서 진행을 기다린다(역압).
+
+        Returns: 큐에 넣었으면 True, writer 가 죽었(거나 대기 중 정지 판정)으면 False.
+        """
+        dead_reason = None
+        with self._cv:
+            if self._dead:
+                return False
+            if self.sock.fileno() < 0:
+                # 이미 닫힌 소켓 — 넣어 봐야 writer 가 나중에 실패할 뿐. 동기 False 로
+                # 호출자(M7 FETCH_FAIL_OFFLINE 등)가 바로 반응하게.
+                dead_reason = self._kill_locked("소켓 닫힘")
+            else:
+                if self._bytes == 0:
+                    # 비어 있던 큐 — 정지 판정 기준점을 지금으로(오래 조용했던 연결을
+                    # 첫 송신에서 «진행 없음»으로 오판하지 않게)
+                    self._last_progress = time.monotonic()
+                if block:
+                    while (not self._dead and self._bytes > 0
+                           and self._bytes + len(data) > SEND_QUEUE_MAX_BYTES):
+                        idle = time.monotonic() - self._last_progress
+                        if idle >= SEND_STALL_SECONDS:
+                            dead_reason = self._kill_locked(
+                                f"송신 정지 {idle:.0f}초 (큐 {self._bytes:,} B)")
+                            break
+                        self._cv.wait(min(SEND_STALL_SECONDS - idle, 0.5))
+                if not self._dead:
+                    self._q.append(data)
+                    self._bytes += len(data)
+                    self._cv.notify_all()
+                    return True
+        if dead_reason is not None:
+            self._finish_kill(dead_reason)
+        return False
+
+    def kill(self, reason: str) -> None:
+        """writer 를 멈추고 소켓을 shutdown. 멱등."""
+        with self._cv:
+            if self._dead:
+                return
+            reason = self._kill_locked(reason)
+        self._finish_kill(reason)
+
+    def _kill_locked(self, reason: str) -> str:
+        self._dead = True
+        self.dead_reason = reason
+        self._q.clear()
+        self._bytes = 0
+        self._cv.notify_all()
+        return reason
+
+    def _finish_kill(self, reason: str) -> None:
+        # 락 밖에서: shutdown 은 막혀 있던 writer 의 send 와 수신 스레드의 recv 를 깨운다
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        if self._on_dead:
+            try:
+                self._on_dead(self, reason)
+            except Exception as e:
+                logger.error(f"writer on_dead 콜백 오류 ({self.label}): {e}")
+
+    def _run(self) -> None:
+        while True:
+            with self._cv:
+                while not self._q and not self._dead:
+                    self._cv.wait()
+                if self._dead:
+                    return
+                data = self._q[0]
+            try:
+                view = memoryview(data)
+                while view:
+                    # 타임아웃 모드 소켓: 쓸 자리가 생길 때까지 최대 소켓 타임아웃 대기 후
+                    # 넣을 수 있는 만큼만 보낸다 — 부분 송신마다 진행 시각 갱신
+                    n = self.sock.send(view)
+                    view = view[n:]
+                    self._last_progress = time.monotonic()
+            except Exception as e:
+                self.kill(f"송신 오류: {e}")
+                return
+            with self._cv:
+                if self._q and self._q[0] is data:
+                    self._q.popleft()
+                    self._bytes -= len(data)
+                self._cv.notify_all()
 
 
 def _recv_all(sock: socket.socket, length: int) -> bytes:
@@ -148,7 +287,8 @@ class NetworkServer:
         # 쓰므로 값 변경 영향 없음. peer_id→socket 역조회는 Task 3 에서 추가.
         self.clients: Dict[socket.socket, Dict[str, str]] = {}
         self.clients_lock = threading.Lock()
-        self._write_locks: Dict[socket.socket, threading.Lock] = {}  # 소켓별 write 직렬화
+        # 소켓별 송신 전담 writer (핸드셰이크 이후 모든 송신은 이것을 거친다)
+        self._writers: Dict[socket.socket, _PeerWriter] = {}
 
         # H6: accept 됐으나 아직 _handle_client 스레드가 안 끝난 연결 수.
         # clients_lock 과 별개 — pending 은 handshake 미완료 연결도 포함해야 함
@@ -234,6 +374,8 @@ class NetworkServer:
 
         # 모든 클라이언트 연결 종료 — shutdown 먼저 호출로 recv 가 0byte EOF 반환
         with self.clients_lock:
+            writers = list(self._writers.values())
+            self._writers.clear()
             for client_socket in list(self.clients.keys()):
                 try:
                     client_socket.shutdown(socket.SHUT_RDWR)
@@ -245,7 +387,9 @@ class NetworkServer:
                 except OSError:
                     pass
             self.clients.clear()
-            self._write_locks.clear()
+        # 락 밖에서 — kill 의 on_dead 콜백이 clients_lock 을 다시 잡는다
+        for w in writers:
+            w.kill("서버 종료")
 
         with self._pending_lock:
             self._pending_count = 0
@@ -391,6 +535,7 @@ class NetworkServer:
             # 그 연결을 내보내고 새 연결을 받는다 — 살아 있는 중복만 거부한다.
             now = time.monotonic()
             stale = []
+            stale_writers = []
             with self.clients_lock:
                 conflict = False
                 for s, existing in self.clients.items():
@@ -406,11 +551,16 @@ class NetworkServer:
                         # 표시 — 그 콜백은 아래에서 새 연결 등록 «전» 순서로 부른다.
                         existing["evicted"] = True
                         del self.clients[s]
-                        self._write_locks.pop(s, None)
+                        w = self._writers.pop(s, None)
+                        if w is not None:
+                            stale_writers.append(w)
                     info = {"name": client_name, "peer_id": claimed_peer_id,
                             "address": address, "last_rx": now}
                     self.clients[sock] = info
-                    self._write_locks[sock] = threading.Lock()
+                    self._writers[sock] = _PeerWriter(
+                        sock, f"{client_name}/{claimed_peer_id[:8]}",
+                        on_dead=self._on_writer_dead,
+                    )
 
             if conflict:
                 logger.warning(
@@ -420,6 +570,10 @@ class NetworkServer:
                 return
 
             client_peer_id = claimed_peer_id
+
+            # 옛 연결의 writer 정지(막혀 있던 송신·대기 중인 발신자를 즉시 풀어 줌)
+            for w in stale_writers:
+                w.kill("새 연결로 교체")
 
             for old_sock, old in stale:
                 logger.warning(
@@ -478,15 +632,9 @@ class NetworkServer:
 
                 except socket.timeout:
                     # 타임아웃(30초) 시 PING 전송하여 연결 유지 확인
-                    try:
-                        wl = self._get_write_lock(sock)
-                        ping = self.protocol.create_message(MSG_PING)
-                        if wl:
-                            with wl:
-                                sock.sendall(ping)
-                        else:
-                            sock.sendall(ping)
-                    except Exception:
+                    # writer 경유 — 수신 스레드는 송신으로 절대 막히지 않는다(block=False)
+                    ping = self.protocol.create_message(MSG_PING)
+                    if not self._enqueue(sock, ping, block=False):
                         break
 
         except Exception as e:
@@ -510,7 +658,9 @@ class NetworkServer:
             with self.clients_lock:
                 if sock in self.clients:
                     del self.clients[sock]
-                self._write_locks.pop(sock, None)
+                writer = self._writers.pop(sock, None)
+            if writer is not None:
+                writer.kill("연결 종료")
 
             try:
                 sock.close()
@@ -530,100 +680,62 @@ class NetworkServer:
                 except Exception as e:
                     logger.error(f"on_client_disconnected 콜백 오류: {e}")
 
-    def _get_write_lock(self, sock: socket.socket) -> Optional[threading.Lock]:
-        """소켓별 write lock 을 clients_lock 보호 하에 조회 (M3 — dict 자체 조회를
-        lock 밖에서 하면 등록/제거와 레이스). 조회만 락 안에서 하고, 반환된 Lock
-        으로 실제 sendall 을 감싸는 건 호출부가 락 밖에서 수행 — 느린 클라이언트가
-        clients_lock 을 붙잡는 것은 방지."""
+    def _writer_for(self, sock: socket.socket) -> Optional[_PeerWriter]:
+        """소켓의 writer 를 clients_lock 보호 하에 조회(M3 — 등록/제거와 레이스 방지)."""
         with self.clients_lock:
-            return self._write_locks.get(sock)
+            return self._writers.get(sock)
+
+    def _enqueue(self, sock: socket.socket, data: bytes, block: bool) -> bool:
+        """소켓의 writer 큐에 넣는다. writer 없음(미등록·정리됨)/죽음이면 False."""
+        w = self._writer_for(sock)
+        if w is None:
+            return False
+        return w.enqueue(data, block)
+
+    def _on_writer_dead(self, writer: _PeerWriter, reason: str) -> None:
+        """writer 가 죽으면 라우팅 표에서 즉시 뺀다 — 이후 그 peer 행 송신은 바로 False.
+
+        소켓 close·on_client_disconnected 는 수신 스레드(_handle_client finally)가 한다
+        (writer 의 shutdown 이 그 recv 를 깨운다).
+        """
+        with self.clients_lock:
+            mine = self._writers.get(writer.sock) is writer
+            if mine:
+                del self._writers[writer.sock]
+            info = self.clients.pop(writer.sock, None) if mine else None
+        if info is not None and self.running and not info.get("evicted"):
+            logger.warning(
+                f"수신자 송신 중단 — {info.get('name')} peer={info.get('peer_id', '')[:8]}… "
+                f"연결을 끊음: {reason}"
+            )
+        else:
+            logger.debug(f"writer 정리 ({writer.label}): {reason}")
 
     def broadcast(self, msg_type: str, data: Any = None, exclude_sock: socket.socket = None):
         """
         모든 연결된 클라이언트에게 메시지를 전송합니다.
 
-        lock 안에서는 클라이언트 목록만 복사하고, lock 밖에서 전송합니다.
-        느린 클라이언트의 sendall 블로킹이 다른 클라이언트를 막지 않습니다.
+        각 수신자의 writer 큐에 넣기만 하고 기다리지 않는다(block=False) — 소켓을 안
+        읽는 수신자 한 대가 다른 수신자 전달을 막지 않는다(head-of-line 차단 방지).
 
         Args:
             msg_type: 메시지 타입 (MSG_* 상수)
             data: 전송할 데이터
             exclude_sock: 전송에서 제외할 소켓 (발신자 제외용)
         """
-        message_bytes = self.protocol.create_message(msg_type, data)
-
-        # lock 안에서 목록만 복사
-        with self.clients_lock:
-            targets = [
-                s for s in self.clients.keys()
-                if s != exclude_sock
-            ]
-
-        # lock 밖에서 전송 — 느린 클라이언트가 다른 전송을 블로킹하지 않음
-        failed = []
-        for client_socket in targets:
-            try:
-                wl = self._get_write_lock(client_socket)
-                if wl:
-                    with wl:
-                        client_socket.sendall(message_bytes)
-                else:
-                    client_socket.sendall(message_bytes)
-            except Exception as e:
-                # L3: stop() 이 소켓을 닫는 중이면 이 실패는 정상 종료의
-                # 자연스러운 결과 — self.running 이 False 인 그 경우만 debug 로.
-                if self.running:
-                    logger.error(f"브로드캐스트 전송 오류: {e}")
-                else:
-                    logger.debug(f"종료 중 브로드캐스트 정리: {e}")
-                failed.append(client_socket)
-
-        # 전송 실패한 소켓 정리
-        if failed:
-            with self.clients_lock:
-                for s in failed:
-                    self.clients.pop(s, None)
-                    try:
-                        s.close()
-                    except Exception:
-                        pass
+        self.broadcast_raw(self.protocol.create_message(msg_type, data), exclude_sock)
 
     def broadcast_raw(self, raw_message: bytes, exclude_sock: socket.socket = None):
-        """이미 직렬화된 메시지 바이트를 모든 클라이언트에게 전송합니다."""
+        """이미 직렬화된 메시지 바이트를 모든 클라이언트에게 전송합니다(기다리지 않음)."""
         with self.clients_lock:
-            targets = [
-                s for s in self.clients.keys()
-                if s != exclude_sock
-            ]
-
-        failed = []
-        for client_socket in targets:
-            try:
-                wl = self._get_write_lock(client_socket)
-                if wl:
-                    with wl:
-                        client_socket.sendall(raw_message)
-                else:
-                    client_socket.sendall(raw_message)
-            except Exception as e:
-                if self.running:
-                    logger.error(f"브로드캐스트(raw) 전송 오류: {e}")
-                else:
-                    logger.debug(f"종료 중 브로드캐스트(raw) 정리: {e}")
-                failed.append(client_socket)
-
-        if failed:
-            with self.clients_lock:
-                for s in failed:
-                    self.clients.pop(s, None)
-                    try:
-                        s.close()
-                    except Exception:
-                        pass
+            targets = [w for s, w in self._writers.items() if s != exclude_sock]
+        for w in targets:
+            # 죽은 writer 는 False — 이미 라우팅 표에서 빠지는 중이고 사유는 kill 때 기록됨
+            w.enqueue(raw_message, block=False)
 
     def send_to(self, sock: socket.socket, msg_type: str, data: Any = None):
         """
-        특정 클라이언트에게 메시지를 전송합니다.
+        특정 클라이언트에게 메시지를 전송합니다(기다리지 않음 — PONG 등 제어 메시지).
 
         Args:
             sock: 대상 클라이언트 소켓
@@ -632,17 +744,11 @@ class NetworkServer:
         """
         try:
             message_bytes = self.protocol.create_message(msg_type, data)
-            wl = self._get_write_lock(sock)
-            if wl:
-                with wl:
-                    sock.sendall(message_bytes)
-            else:
-                sock.sendall(message_bytes)
         except Exception as e:
-            if self.running:
-                logger.error(f"메시지 전송 오류: {e}")
-            else:
-                logger.debug(f"종료 중 메시지 전송 정리: {e}")
+            logger.error(f"메시지 직렬화 오류: {e}")
+            return
+        if not self._enqueue(sock, message_bytes, block=False):
+            logger.debug(f"send_to: 대상 연결 없음/종료됨 — drop ({msg_type})")
 
     # ── v3.0: targeted relay (peer_id → 특정 소켓) ─────────────────────
     # 별-토폴로지에서 서버가 receiver_peer 가진 메시지를 broadcast 대신 해당
@@ -658,42 +764,38 @@ class NetworkServer:
                     return sock
         return None
 
-    def _drop_socket(self, sock: socket.socket) -> None:
-        """전송 실패한 소켓을 정리 (broadcast 의 failed 처리와 동일)."""
-        with self.clients_lock:
-            self.clients.pop(sock, None)
-            self._write_locks.pop(sock, None)
-        try:
-            sock.close()
-        except Exception:
-            pass
+    def _send_targeted(self, peer_id: str, raw: bytes, what: str) -> bool:
+        """peer 의 writer 큐에 넣는다(block=True — 큐 상한에서 역압, 최대 SEND_STALL_SECONDS).
+
+        True 는 «큐에 넣음»이다(과거 «sendall 완료»). 수신자가 정지 판정으로 끊기면
+        그 시점 이후 호출은 False — 호출자는 대상 부재와 같게 다룬다.
+        """
+        sock = self._socket_for_peer(peer_id)
+        if sock is None:
+            logger.warning(f"{what}: peer {peer_id[:8]}… 없음 — drop")
+            return False
+        w = self._writer_for(sock)
+        if w is not None and w.enqueue(raw, block=True):
+            return True
+        reason = w.dead_reason if w is not None else ""
+        if self.running:
+            logger.warning(f"{what}: peer {peer_id[:8]}… 송신 불가(연결 끊김) — drop ({reason})")
+        else:
+            logger.debug(f"종료 중 {what} 정리 ({peer_id[:8]}…): {reason}")
+        return False
 
     def send_to_peer(self, peer_id: str, msg_type: str, data: Any = None) -> bool:
         """특정 peer 에게 JSON 메시지를 전송. 대상 없으면 warning + drop (graceful).
 
         Returns:
-            bool: 전송 시도 성공 여부 (대상 없음 / 전송 실패 시 False)
+            bool: 송신 큐 투입 성공 여부 (대상 없음 / 연결 끊김 시 False)
         """
-        sock = self._socket_for_peer(peer_id)
-        if sock is None:
-            logger.warning(f"send_to_peer: peer {peer_id[:8]}… 없음 — drop")
-            return False
         try:
             message_bytes = self.protocol.create_message(msg_type, data)
-            wl = self._get_write_lock(sock)
-            if wl:
-                with wl:
-                    sock.sendall(message_bytes)
-            else:
-                sock.sendall(message_bytes)
-            return True
         except Exception as e:
-            if self.running:
-                logger.error(f"send_to_peer 전송 오류 ({peer_id[:8]}…): {e}")
-            else:
-                logger.debug(f"종료 중 send_to_peer 정리 ({peer_id[:8]}…): {e}")
-            self._drop_socket(sock)
+            logger.error(f"send_to_peer 직렬화 오류 ({peer_id[:8]}…): {e}")
             return False
+        return self._send_targeted(peer_id, message_bytes, "send_to_peer")
 
     def send_raw_to_peer(self, peer_id: str, raw_message: bytes) -> bool:
         """특정 peer 에게 이미 직렬화된 바이트(바이너리 chunk 등)를 전송.
@@ -701,27 +803,9 @@ class NetworkServer:
         대상 없으면 warning + drop. 바이너리 chunk 의 targeted relay 경로.
 
         Returns:
-            bool: 전송 시도 성공 여부.
+            bool: 송신 큐 투입 성공 여부.
         """
-        sock = self._socket_for_peer(peer_id)
-        if sock is None:
-            logger.warning(f"send_raw_to_peer: peer {peer_id[:8]}… 없음 — drop")
-            return False
-        try:
-            wl = self._get_write_lock(sock)
-            if wl:
-                with wl:
-                    sock.sendall(raw_message)
-            else:
-                sock.sendall(raw_message)
-            return True
-        except Exception as e:
-            if self.running:
-                logger.error(f"send_raw_to_peer 전송 오류 ({peer_id[:8]}…): {e}")
-            else:
-                logger.debug(f"종료 중 send_raw_to_peer 정리 ({peer_id[:8]}…): {e}")
-            self._drop_socket(sock)
-            return False
+        return self._send_targeted(peer_id, raw_message, "send_raw_to_peer")
 
 
 # ── 클라이언트 ──────────────────────────────────────────────────────────
