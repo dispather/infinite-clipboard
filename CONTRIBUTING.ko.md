@@ -12,7 +12,7 @@
 
 ### 공통 전제
 
-- Python 3.10 이상
+- Python 3.11 이상
 - Git으로 클론된 프로젝트 폴더 또는 클라우드 동기화된 폴더
 - 인터넷 연결 (첫 빌드 시 의존성 다운로드)
 
@@ -212,7 +212,7 @@ DMG를 열면 `/Applications` 심볼릭 링크가 함께 있어 드래그 설치
 #### (a) PyInstaller onedir 번들
 
 ```cmd
-:: 전제: Python 3.10+ 설치됨 (PATH 에 등록), assets\generated\ 가 동기화됨
+:: 전제: Python 3.11+ 설치됨 (PATH 에 등록), assets\generated\ 가 동기화됨
 build\build_win.bat
 ```
 
@@ -347,7 +347,7 @@ sudo pacman -S libayatana-appindicator python-gobject
 
 ## 요구사항 요약 (빌드)
 
-- Python 3.10+ (빌드 전용 — 배포판은 Python 포함)
+- Python 3.11+ (빌드 전용 — 배포판은 Python 포함)
 - Tailscale 권장 (없으면 동일 LAN 에서 직접 IP 연결 가능)
 - Linux: `wl-clipboard` (Wayland) 또는 `xclip`/`xsel` (X11), `libayatana-appindicator`, `python-gobject`
 - Windows: 추가 의존성 없음 (빌드 시 pywin32 자동 설치)

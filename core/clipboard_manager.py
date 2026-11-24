@@ -55,6 +55,21 @@ def _decode_clipboard_bytes(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def _image_to_png_bytes(image: Image.Image) -> bytes:
+    """Encode a clipboard image as PNG bytes.
+
+    Pillow 13 removed saving mode "I" (32-bit int) as PNG — up to 12.x it silently
+    clipped to 16 bits with a DeprecationWarning. Such images can come from e.g. a
+    32-bit grayscale TIFF on the macOS pasteboard. Convert to "I;16" first to keep the
+    12.x result (clip to 16 bits) instead of raising OSError and dropping the copy.
+    """
+    if image.mode == "I":
+        image = image.convert("I;16")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 class ClipboardManager:
     """크로스 플랫폼 클립보드를 관리하는 클래스 (OS 분기 팩토리)"""
 
@@ -281,9 +296,7 @@ class WindowsClipboard:
                 data = self.win32clipboard.GetClipboardData(self.win32con.CF_DIB)
                 image = self._dib_to_image(data)
                 if image:
-                    buffer = io.BytesIO()
-                    image.save(buffer, format="PNG")
-                    return ("image", buffer.getvalue())
+                    return ("image", _image_to_png_bytes(image))
 
             return ("empty", None)
 
@@ -480,9 +493,7 @@ class MacClipboard:
             # 이미지 확인 (PyObjC 사용)
             image = self._get_image_from_clipboard()
             if image:
-                buffer = io.BytesIO()
-                image.save(buffer, format="PNG")
-                return ("image", buffer.getvalue())
+                return ("image", _image_to_png_bytes(image))
 
             # 텍스트 확인 (pbpaste 사용) — 바이트로 읽고 인코딩 자동 탐지
             # RDP 세션이 CP949/CP1252/UTF-16 을 주입하는 경우 대비
@@ -626,7 +637,7 @@ class MacClipboard:
                 image = Image.open(io.BytesIO(image_bytes))
 
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-                    image.save(f, format="PNG")
+                    f.write(_image_to_png_bytes(image))
                     temp_path = f.name
 
                 script = f"""
@@ -980,9 +991,7 @@ class LinuxClipboard:
 
             image = self._get_image_from_clipboard() if has_image else None
             if image:
-                buffer = io.BytesIO()
-                image.save(buffer, format="PNG")
-                return ("image", buffer.getvalue())
+                return ("image", _image_to_png_bytes(image))
 
             # 바이트로 읽고 인코딩 자동 탐지 — RDP/Windows 원격 주입 대비
             if self.tool == "wl-paste":
@@ -1040,9 +1049,7 @@ class LinuxClipboard:
 
                     image = self._get_image_from_clipboard()
                     if image:
-                        buffer = io.BytesIO()
-                        image.save(buffer, format="PNG")
-                        self._klipper_cached_content = ("image", buffer.getvalue())
+                        self._klipper_cached_content = ("image", _image_to_png_bytes(image))
                         return self._klipper_cached_content
 
                 if text:
