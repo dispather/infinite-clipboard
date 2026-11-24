@@ -32,7 +32,7 @@ ledger_changed: false
 ## 4. 보류 질문 (사람만 답함)
 
 1. **Apple Developer Program($99/년)은 여전히 보류인가?** → `Apple Developer Program 등록`, `pending-receive-tray-signal`(맥 알림 실패의 원인이 ad-hoc 서명[문서: 원장 condition]) 두 건이 갈림. 보류면 후자는 «트레이 대기 배지» 쪽 설계로만 진행.
-2. **Windows 실기 시험 호스트를 어디로 할까?** (a5000 계속 / pm-vm-win11 / 사람 직접) → `update-win-allusers-interactive-verify`, `restart-path-window-tooltip` 의 툴팁 부분, `tray-menu-closes-on-update` 의 Windows 확인이 한꺼번에 풀림.
+2. **Windows 실기 시험 호스트를 어디로 할까?** (지금 쓰는 Windows 실기 / 이 PC 의 Windows VM / 사람 직접) → `update-win-allusers-interactive-verify`, `restart-path-window-tooltip` 의 툴팁 부분, `tray-menu-closes-on-update` 의 Windows 확인이 한꺼번에 풀림.
 3. **AUR 제출을 계속할 것인가?** (계정 가입·SSH 키는 사람만 가능) → `AUR 계정 가입` 1건. 안 하면 ⓓ 로 버릴 수 있게 됨.
 4. **«공유할 기기 선택»의 범위** (받기만 거를지 / 보내기도 / 텍스트 포함) → `per-client-peer-filter`. 보내기를 넣으면 프로토콜 변경.
 5. `Mac→Windows 대용량 간헐 실패` — 사람 질문은 아니고 확인 길만 있음: Windows 실사용 로그에서 `[diag-largefile]` 태그를 grep(v3.0.12, 07-13 이후 계측). 히트 0이면 «재발 없음»으로 닫기 후보.
