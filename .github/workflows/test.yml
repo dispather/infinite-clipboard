@@ -102,7 +102,7 @@ jobs:
         # Windows-Toasts: core.notify_win (알림 받기/무시 액션 버튼, 2026-07-10)
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest pywin32 "pillow>=12.2.0" Windows-Toasts
+          python -m pip install pytest pywin32 "pillow>=13.0.0" Windows-Toasts
       - name: Run Windows lazy tests (delayed render round-trip)
         # S0 미결(대용량 GetClipboardData NULL)이 프로덕션 블로킹 PumpMessages 루프에서
         # 해소되는지 검증하는 핵심 잡 — 특히 test_win_large_payload(~1MB CF/PNG delayed render).

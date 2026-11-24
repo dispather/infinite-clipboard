@@ -12,7 +12,7 @@ How to produce a native package for each OS. Use this when you've changed the so
 
 ### Common prerequisites
 
-- Python 3.10 or newer
+- Python 3.11 or newer
 - A git-cloned project folder, or a cloud-synced folder
 - Internet access (to download dependencies on the first build)
 
@@ -212,7 +212,7 @@ The DMG includes an `/Applications` symlink for the standard drag-to-install UX.
 #### (a) PyInstaller onedir bundle
 
 ```cmd
-:: Prerequisite: Python 3.10+ installed (on PATH), assets\generated\ already synced
+:: Prerequisite: Python 3.11+ installed (on PATH), assets\generated\ already synced
 build\build_win.bat
 ```
 
@@ -347,7 +347,7 @@ The venv must be created with `--system-site-packages` for GI binding access.
 
 ## Requirements summary (build)
 
-- Python 3.10+ (build-only — the release packages bundle their own Python)
+- Python 3.11+ (build-only — the release packages bundle their own Python)
 - Tailscale recommended (without it, you can still connect directly by IP on the same LAN)
 - Linux: `wl-clipboard` (Wayland) or `xclip`/`xsel` (X11), `libayatana-appindicator`, `python-gobject`
 - Windows: no extra dependencies (pywin32 installs automatically at build time)

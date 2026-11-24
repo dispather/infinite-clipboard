@@ -2,10 +2,10 @@
 name = "infinite-clipboard"
 version = "3.0.18"
 description = "Tailscale VPN으로 연결된 PC 간 클립보드/파일 실시간 공유"
-requires-python = ">=3.10"
+requires-python = ">=3.11"  # Pillow 13 dropped 3.10 (2026-11-24)
 
 dependencies = [
-    "pillow>=12.2.0",  # Dependabot #1-5 (2026-07): PSD/FITS/PDF OOB·DoS CVE, 12.2.0 에서 패치
+    "pillow>=13.0.0",  # Dependabot 2026-11: 43건(critical 5·high 24 — APNG/BMP 디코더 등) 13.0.0 에서 패치. 이전 #1-5 는 12.2.0
     "pystray>=0.19.0",
     "customtkinter>=5.2.0",
     "plyer>=2.1.0",
