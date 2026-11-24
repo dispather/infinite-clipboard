@@ -15,7 +15,7 @@ ledger_changed: false
 
 1. `stop-called-twice` — 설정 재시작 때 두 스레드가 `stop()` 을 동시에 실행 → 서버 포트가 아직 열린 채 재시작될 수 있음. `main.py:343` 에 락 없음 [실측 grep `_stop_lock` 0건].
 2. `file-clipboard-log-spam` (+ 중복 `file-clipboard-detect-log-spam`) — 한 번 고치면 2건이 닫힘. `core/clipboard_manager.py:265·477` 이 아직 `logger.info` [실측].
-3. `dependabot-setuptools` — 보안 경고. `uv.lock:455` setuptools 82.0.1, 요구치 ≥83 [실측]. 명령 2~3개짜리.
+3. `dependabot-setuptools` — **범위를 Pillow 까지 넓혀야 함**. 원장은 «setuptools 경고 2건»이지만 2026-11-24 `gh api …/dependabot/alerts` 로 보면 현행 `uv.lock` 에만 Pillow 43건(critical 5·high 24·medium 14, 고침 판 13.0.0) + setuptools 2건이 열려 있음 [실측]. `uv.lock:166` pillow 12.3.0. Pillow 는 다른 PC 가 보낸 클립보드 이미지를 해석하는 경로라 실제 노출면이 있음 [추정]. 이 판정으로 1순위로 올림. 평탄화 전 경로(`infinite-clipboard/uv.lock`, 파일 없음)의 경고는 화면에서 dismiss.
 4. `ux-b3-pairing-auto-button` 의 A3 부분만 — 「자동」 버튼이 클라이언트 호스트칸에 자기 IP 를 넣는 사용자 체감 버그. `ui/settings_window.py:644` 에 그대로 있음 [실측]. B3 나머지(피어 선택)는 설계 판단이라 분리.
 5. `mac-tests-restore-pasteboard` — 실사용 맥에서 테스트를 돌리면 사용자 클립보드가 사라지고 가짜 PNG 가 다른 PC 로 퍼짐. `tests/conftest.py` 에 Darwin/pasteboard fixture 0건 [실측].
 
