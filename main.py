@@ -230,6 +230,10 @@ class InfiniteClipboard:
         # 미지원/헤드리스면 None — 기존 plyer 기반 _notify() 로 폴백.
         self.actionable_notifier = None
         self._actionable_notifier_inited = False
+        # [receiver 측] 액션 알림 없이 plyer/tray 일반 «받기» 알림을 이미 띄운 발신자.
+        # 그 발신자의 받을 항목이 남아 있는 동안 새 offer(대체)는 일반 알림을 또 띄우지
+        # 않는다 — 추적·닫기 불가 알림이 offer 마다 쌓이던 것(linux-notify-pileup ④).
+        self._fallback_notified_peers: set = set()
         # [receiver 측] 알림의 "받기"와 전송창의 "받기"가 서로 다른 트리거(같은
         # offer 를 동시에 겨냥 가능)라 in-flight 중복 수신을 막는 가드.
         self._receiving_offer_ids: set = set()
@@ -1214,6 +1218,12 @@ class InfiniteClipboard:
             for oid in stale_receivable:
                 self.receivable_offers.pop(oid, None)
             old_receivable = bool(stale_receivable)
+        for oid in sorted(stale_receivable):
+            # 파일명은 넣지 않는다(stale-receivable-clear-log) — 대체 사실만.
+            logger.info(
+                f"[offer] 이전 받기 항목 대체: old={oid[:8]}… new={offer_id[:8]}… "
+                f"peer={source_peer[:8]}…"
+            )
         # v3.0.5: 기본은 명시적 '받기' 모드 — 받는 PC 가 클립보드를 소유하지 않으므로
         # 클립보드 매니저/파일인식 앱의 자동 read 가 paste 없이 전송을 트리거하지 못한다
         # (함정 #28: Wayland 는 peek vs paste 구분 신호가 없어 paste-트리거 lazy 가 샘).
@@ -1256,6 +1266,10 @@ class InfiniteClipboard:
             logger.info(f"[offer] 수신·등록(OK, lazy-paste): offer={offer_id[:8]}…")
             if old_receivable:
                 self._save_transfer_state(force=True)  # 옛 받기 목록 비움 반영
+                # 받기 알림이 새로 뜨지 않으니(교체 없음) 옛 «받기» 알림은 직접 회수.
+                for oid in stale_receivable:
+                    self._withdraw_receivable_notification(oid)
+                self._fallback_notified_peers.discard(source_peer)
         else:
             # 기본 경로 — 명시적 '받기' (알림 + 전송창 받기 행). 자동 전송 없음.
             self._add_receivable(offer)
@@ -1586,6 +1600,7 @@ class InfiniteClipboard:
         self._save_transfer_state(force=True)
 
         offer_id = offer["offer_id"]
+        source_peer = offer["source_peer"]
         title = t("파일 받기", self._lang)
         notifier = self._ensure_actionable_notifier()
         shown = False
@@ -1600,16 +1615,37 @@ class InfiniteClipboard:
                     on_receive=lambda oid=offer_id: threading.Thread(
                         target=self._receive_offer, args=(oid,), daemon=True,
                     ).start(),
+                    # 발신자별 슬롯 — 같은 발신자의 새 offer 는 옛 알림을 교체한다.
+                    slot=source_peer,
                 )
             except Exception as e:
                 logger.warning(f"actionable 알림 실패 — 일반 알림으로 폴백: {e}")
                 shown = False
-        if not shown:
-            # 폴백 — 액션 버튼 없는 일반 알림, 전송 창에서 수동으로 받아야 함을 안내.
-            self._notify(
-                title,
-                t("{name} — 전송 창에서 [받기]", self._lang).format(name=name),
-            )
+        if shown:
+            self._fallback_notified_peers.discard(source_peer)
+            return
+        # 폴백 — 액션 버튼 없는 일반 알림, 전송 창에서 수동으로 받아야 함을 안내.
+        # 같은 발신자 연속은 1건만: 받을 항목이 남은 동안 재알림하지 않는다(전송창이 최신 목록).
+        with self._offer_lock:
+            already = source_peer in self._fallback_notified_peers
+            self._fallback_notified_peers.add(source_peer)
+        if already:
+            logger.debug(f"[offer] 일반 받기 알림 생략 — 같은 발신자 미수신 항목 있음: peer={source_peer[:8]}…")
+            return
+        self._notify(
+            title,
+            t("{name} — 전송 창에서 [받기]", self._lang).format(name=name),
+        )
+
+    def _withdraw_receivable_notification(self, offer_id) -> None:
+        """그 offer 의 «받기» 알림 회수 — 백엔드 미초기화/미구현이면 no-op (크래시 금지)."""
+        notifier = self.actionable_notifier
+        if notifier is None:
+            return
+        try:
+            notifier.withdraw(offer_id)
+        except Exception as e:
+            logger.debug(f"받기 알림 회수 실패(무시): offer={offer_id[:8]}… {e}")
 
     def _restore_receivables(self) -> None:
         """재시작 전 «받을 파일» 목록 복원 — 그 «뒤»에 상태 파일을 한 번 쓴다 (함정 #51).
@@ -1655,8 +1691,14 @@ class InfiniteClipboard:
             logger.info(f"[받기] 재시작 전 목록 복원: {restored}개 (버림 {dropped}개 — 만료·형식 오류)")
 
     def _clear_receivable(self, offer_id) -> None:
+        """받음(알림·전송창 어느 쪽이든)·terminal 실패로 항목 제거 + 그 알림 회수."""
         with self._offer_lock:
             existed = self.receivable_offers.pop(offer_id, None)
+            if existed:
+                peer = existed.get("source_peer")
+                if not any(o.get("source_peer") == peer for o in self.receivable_offers.values()):
+                    self._fallback_notified_peers.discard(peer)
+        self._withdraw_receivable_notification(offer_id)
         if existed:
             self._save_transfer_state(force=True)
 

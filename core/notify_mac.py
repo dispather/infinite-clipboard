@@ -104,7 +104,11 @@ class MacActionableNotifier(ActionableNotifier):
 
     def notify_receivable(
         self, offer_id, title, message, accept_label, dismiss_label, on_receive: OnReceive,
+        slot=None,
     ) -> bool:
+        # slot(발신자별 교체)·withdraw(회수)는 이 백엔드에서 미구현 — 기본 no-op
+        # (actionable_notify.ActionableNotifier.withdraw). 실기 검증 없이 OS 알림 API 를
+        # 바꾸지 않는다(linux-notify-pileup 은 Linux 만 실측된 결함).
         if not self.is_supported():
             return False
         request_id = f"ic-receivable-{offer_id}"

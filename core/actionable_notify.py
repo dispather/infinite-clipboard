@@ -39,7 +39,12 @@ class ActionableNotifier(ABC):
     """OS별 액션 버튼 알림 백엔드의 공통 인터페이스.
 
     수명주기: `notify_receivable()` 로 알림 표시(성공 시 True) → 사용자가
-    "받기" 클릭 시 `on_receive()` 발화 → `stop()` 으로 백엔드 완전 종료.
+    "받기" 클릭 시 `on_receive()` 발화 → 받음·대체·terminal 실패 시
+    `withdraw(offer_id)` 로 그 알림 회수 → `stop()` 으로 백엔드 완전 종료.
+
+    `slot` 은 발신자 식별자(main 은 source_peer) — 같은 slot 의 새 알림은 이전
+    알림을 교체해도 된다(Linux 는 replaces_id). 🔴 slot 은 발신자별이어야 한다 —
+    전역 단일 슬롯은 다른 발신자의 «받기» 버튼을 지운다(linux-notify-pileup).
     """
 
     @abstractmethod
@@ -54,6 +59,7 @@ class ActionableNotifier(ABC):
     def notify_receivable(
         self, offer_id: str, title: str, message: str,
         accept_label: str, dismiss_label: str, on_receive: OnReceive,
+        slot: Optional[str] = None,
     ) -> bool:
         """"받기"/"무시" 액션 버튼이 있는 알림을 표시.
 
@@ -63,6 +69,14 @@ class ActionableNotifier(ABC):
                 백엔드 자체가 계약을 지키는 편이 안전).
         """
         raise NotImplementedError
+
+    def withdraw(self, offer_id: str) -> None:
+        """그 offer 의 알림을 회수(화면·이력에서 닫기). 받음·대체·terminal 실패 때 main 이 부른다.
+
+        기본은 no-op — 회수를 구현하지 않은 백엔드(현재 macOS·Windows)는 알림이
+        OS 정책대로 사라질 때까지 남는다. 예외를 던지지 말 것(main 도 방어한다).
+        """
+        return
 
     def pump(self) -> None:
         """백엔드가 자체 이벤트 루프를 수동으로 돌려야 할 때만 override.

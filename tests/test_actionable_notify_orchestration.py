@@ -45,7 +45,8 @@ class _StubNotifier:
     def is_supported(self):
         return self._supported
 
-    def notify_receivable(self, offer_id, title, message, accept_label, dismiss_label, on_receive):
+    def notify_receivable(self, offer_id, title, message, accept_label, dismiss_label, on_receive,
+                          slot=None):
         self.calls.append({
             "offer_id": offer_id, "title": title, "message": message,
             "accept_label": accept_label, "dismiss_label": dismiss_label,
