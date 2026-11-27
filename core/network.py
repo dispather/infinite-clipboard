@@ -7,6 +7,7 @@ Protocol 모듈을 사용하여 메시지 생성/파싱, 3-step mutual HMAC 핸�
 콜백 패턴으로 상위 계층에 이벤트 전달.
 """
 
+import errno
 import socket
 import threading
 import time
@@ -37,6 +38,31 @@ MAX_MESSAGE_SIZE = 32 * 1024 * 1024
 # 기기 수(수 대~십수 대)보다 넉넉하되, handshake 를 완료하지 않고 연결만 열어
 # 스레드/fd 를 고갈시키는 slow-loris 류 공격을 차단 (H6).
 MAX_PENDING_CONNECTIONS = 32
+
+# 피어가 연결을 닫아 생기는 정상 끊김의 errno — ECONNRESET·EPIPE·ECONNABORTED·ENOTCONN
+# 과 Windows WSA 대응값(10054 reset · 10053 aborted · 10058 shutdown 후 송수신).
+_PEER_DISCONNECT_ERRNOS = {
+    errno.ECONNRESET, errno.EPIPE, errno.ECONNABORTED, errno.ENOTCONN,
+    10053, 10054, 10058,
+}
+
+
+class PeerClosed(ConnectionError):
+    """수신 도중 상대가 연결을 닫음(EOF) — 정상 끊김의 한 형태."""
+
+
+def is_peer_disconnect(exc: BaseException) -> bool:
+    """피어 쪽 정상 끊김(재부팅·앱 종료·네트워크 전환)이면 True.
+
+    로그 레벨 기준(main.py 상단): 끊김은 «고쳐야 할 것»이 아니라 INFO 다 — ERROR 에 섞이면
+    진짜 결함이 묻힌다(2026-11 실측 ERROR 163건 중 121건이 ECONNRESET).
+    """
+    if isinstance(exc, (PeerClosed, ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
+        return True
+    if isinstance(exc, OSError):
+        code = getattr(exc, "winerror", None) or exc.errno
+        return code in _PEER_DISCONNECT_ERRNOS
+    return False
 
 # 클라이언트 소켓 수신 타임아웃 — 이 시간 동안 아무것도 안 오면 PING 을 보낸다.
 # 양쪽 다 PING 을 받으면 PONG 으로 답하므로, 살아 있는 연결은 이 주기 + 왕복
@@ -644,6 +670,8 @@ class NetworkServer:
             # 상대 종료 때 WinError 10058 로 끝난다(2026-10-01 Windows CI 실측)
             if info is not None and info.get("evicted"):
                 logger.debug(f"교체된 옛 연결 수신 종료 ({client_name}): {e}")
+            elif self.running and is_peer_disconnect(e):
+                logger.info(f"클라이언트 연결 끊김 ({client_name}): {e}")
             elif self.running:
                 logger.error(f"클라이언트 처리 오류 ({client_name}): {e}")
             else:
@@ -1086,12 +1114,12 @@ class NetworkClient:
         try:
             header = _recv_all(self.socket, Protocol.HEADER_SIZE)
             if len(header) < Protocol.HEADER_SIZE:
-                raise ConnectionError("연결 끊김")
+                raise PeerClosed("연결 끊김")
 
             msg_len = Protocol.read_header(header)
             data = _recv_all(self.socket, msg_len)
             if len(data) < msg_len:
-                raise ConnectionError("데이터 수신 실패")
+                raise PeerClosed("데이터 수신 실패")
 
             message = self.protocol.parse_message(data)
             if message:
@@ -1116,7 +1144,9 @@ class NetworkClient:
 
         except Exception as e:
             # v2.1: 의식적 종료 중에는 socket close → recv OSError 가 정상
-            if self.running:
+            if self.running and is_peer_disconnect(e):
+                logger.info(f"서버 연결 끊김: {e}")
+            elif self.running:
                 logger.error(f"수신 오류: {e}")
             else:
                 logger.debug(f"종료 중 수신 정리: {e}")

@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 CHUNK_SIZE = 1024 * 1024          # 1MB 청크
 MAX_FILE_SIZE = 10 * 1024**3      # 기본 최대 10GB
 
+
+class TransferSizeExceeded(ValueError):
+    """전체 크기가 max_file_size 를 넘어 전송을 거절함 — 결함이 아니라 설정된 한도(로그 WARNING)."""
+
 # ── metadata schema 화이트리스트 ──────────────────────────────────────
 _VALID_TRANSFER_TYPES = frozenset({"file", "files", "folder"})
 
@@ -665,7 +669,7 @@ class FileTransferManager:
 
         # 크기 제한 검사
         if total_size > self.max_file_size:
-            raise ValueError(
+            raise TransferSizeExceeded(
                 f"전체 크기({format_size(total_size)})가 "
                 f"최대 허용 크기({format_size(self.max_file_size)})를 초과합니다."
             )

@@ -55,6 +55,44 @@ def _decode_clipboard_bytes(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def _note_files_detected(handler, files: List[str]) -> None:
+    """«파일/폴더 클립보드 감지» INFO 를 목록이 바뀔 때 1회만 남긴다.
+
+    폴링(약 0.5초)마다 같은 목록을 다시 읽으므로 매번 남기면 22초에 44줄이 쌓여
+    5MB 로그 순환이 진단에 필요한 앞 로그를 밀어낸다(2026-09 실측).
+    """
+    key = tuple(files)
+    if key != getattr(handler, "_last_logged_files", None):
+        handler._last_logged_files = key
+        logger.info(f"파일/폴더 클립보드 감지: {len(files)}개 항목")
+
+
+def _forget_files_detected(handler) -> None:
+    """클립보드가 파일이 아닌 내용으로 바뀌면 기억을 지운다 — 같은 파일을 다시 복사하면 다시 1줄."""
+    handler._last_logged_files = None
+
+
+def _decode_image_once(handler, raw, label: str = "이미지 가져오기 오류") -> Optional[Image.Image]:
+    """이미지 바이트를 해석한다. 해석에 실패한 내용은 기억해 두고 같은 내용이면 다시 해석하지 않는다.
+
+    폴링마다 getter 가 같은 깨진 이미지를 다시 해석해 ERROR 를 반복하던 문제(맥 실측
+    30초 56줄)를 막는다 — has_changed 의 해시 기록은 getter 호출 이후라 여기서 막아야 한다.
+    Image.open 은 지연 해석이라 load() 까지 불러 실패를 이 자리에서 잡는다.
+    """
+    digest = hashlib.sha256(raw).digest()
+    if digest == getattr(handler, "_bad_image_digest", None):
+        return None
+    try:
+        image = Image.open(io.BytesIO(raw))
+        image.load()
+    except Exception as e:
+        handler._bad_image_digest = digest
+        logger.error(f"{label}: {e}")
+        return None
+    handler._bad_image_digest = None
+    return image
+
+
 def _image_to_png_bytes(image: Image.Image) -> bytes:
     """Encode a clipboard image as PNG bytes.
 
@@ -277,10 +315,11 @@ class WindowsClipboard:
                     if data:
                         files = list(data)
                         if files:
-                            logger.info(f"파일/폴더 클립보드 감지: {len(files)}개 항목")
+                            _note_files_detected(self, files)
                             return ("files", files)
                 except Exception as e:
                     logger.error(f"파일 클립보드 읽기 오류: {e}")
+            _forget_files_detected(self)
 
             # 텍스트 확인
             if self.win32clipboard.IsClipboardFormatAvailable(
@@ -324,7 +363,6 @@ class WindowsClipboard:
                 )
                 # v2.2 R1 privacy: INFO 로그에선 길이만, content 는 DEBUG 만
                 logger.info(f"텍스트 클립보드 설정: {len(data)}자")
-                logger.debug(f"  preview: {data[:50]}{'...' if len(data) > 50 else ''}")
 
             elif content_type == "image":
                 image_data = base64.b64decode(data)
@@ -387,10 +425,10 @@ class WindowsClipboard:
                 + b"\x36\x00\x00\x00"
             )
             bmp_data = bmp_header + dib_data
-            return Image.open(io.BytesIO(bmp_data))
         except Exception as e:
             logger.error(f"DIB 변환 오류: {e}")
             return None
+        return _decode_image_once(self, bmp_data, label="DIB 변환 오류")
 
 
 # ---------------------------------------------------------------------------
@@ -487,8 +525,9 @@ class MacClipboard:
             # 파일/폴더 확인 먼저
             files = self.get_files()
             if files:
-                logger.info(f"파일/폴더 클립보드 감지: {len(files)}개 항목")
+                _note_files_detected(self, files)
                 return ("files", files)
+            _forget_files_detected(self)
 
             # 이미지 확인 (PyObjC 사용)
             image = self._get_image_from_clipboard()
@@ -514,7 +553,6 @@ class MacClipboard:
                     return False
                 # v2.2 R1 privacy: INFO 로그에선 길이만, content 는 DEBUG 만
                 logger.info(f"텍스트 클립보드 설정: {len(data)}자")
-                logger.debug(f"  preview: {data[:50]}{'...' if len(data) > 50 else ''}")
                 return True
 
             elif content_type == "image":
@@ -563,12 +601,12 @@ class MacClipboard:
             # PNG 먼저 시도
             png_data = pasteboard.dataForType_(NSPasteboardTypePNG)
             if png_data:
-                return Image.open(io.BytesIO(png_data.bytes()))
+                return _decode_image_once(self, png_data.bytes())
 
             # TIFF 시도
             tiff_data = pasteboard.dataForType_(NSPasteboardTypeTIFF)
             if tiff_data:
-                return Image.open(io.BytesIO(tiff_data.bytes()))
+                return _decode_image_once(self, tiff_data.bytes())
 
         except ImportError:
             # PyObjC가 없으면 osascript 사용
@@ -597,9 +635,10 @@ class MacClipboard:
                 )
 
                 if result.stdout.strip() == "success" and os.path.exists(temp_path):
-                    image = Image.open(temp_path)
+                    with open(temp_path, "rb") as f:
+                        raw = f.read()
                     os.unlink(temp_path)
-                    return image
+                    return _decode_image_once(self, raw, label="osascript 이미지 가져오기 오류")
 
                 if os.path.exists(temp_path):
                     os.unlink(temp_path)
@@ -922,7 +961,7 @@ class LinuxClipboard:
             else:
                 return None
             if result.returncode == 0 and result.stdout:
-                return Image.open(io.BytesIO(result.stdout))
+                return _decode_image_once(self, result.stdout)
         except Exception as e:
             logger.error(f"이미지 가져오기 오류: {e}")
         return None
@@ -1087,11 +1126,10 @@ class LinuxClipboard:
                 import shutil as _sh
 
                 # 1순위: wl-copy (Wayland 표준)
-                # v2.2 R1 privacy: INFO 로그에선 길이만, content preview 는 DEBUG 만
+                # privacy: 로그엔 길이·종류만 — 본문(앞부분 미리보기 포함)은 어느 레벨에도 쓰지 않는다
                 if _sh.which("wl-copy"):
                     if _write_via_subprocess(["wl-copy"], data.encode("utf-8")):
                         logger.info(f"텍스트 클립보드 설정 (wl-copy): {len(data)}자")
-                        logger.debug(f"  preview: {data[:50]}{'...' if len(data) > 50 else ''}")
                         return True
                     logger.warning("wl-copy 실패, 다음 도구 시도")
 
@@ -1106,7 +1144,6 @@ class LinuxClipboard:
                 if cmd is not None:
                     if _write_via_subprocess(cmd, data.encode("utf-8")):
                         logger.info(f"텍스트 클립보드 설정 ({cmd[0]}): {len(data)}자")
-                        logger.debug(f"  preview: {data[:50]}{'...' if len(data) > 50 else ''}")
                         return True
                     logger.warning(f"{cmd[0]} 실패, Klipper D-Bus 폴백 시도")
 

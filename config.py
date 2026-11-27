@@ -314,6 +314,10 @@ class AppConfig:
 
 CONFIG_FILE = _get_config_dir() / "settings.json"
 LOG_FILE = _get_config_dir() / "infinite-clipboard.log"
+# 네이티브 크래시(faulthandler) 전용 — 로테이션 없이 append. 일반 로그 핸들러와
+# 분리하는 이유: faulthandler 는 fd 에 직접 쓰므로 RotatingFileHandler 의 파일
+# 교체를 따라가지 못한다. Windows: %APPDATA%\InfiniteClipboard\crash.log
+CRASH_LOG_FILE = _get_config_dir() / "crash.log"
 
 
 def _backup_corrupt_config() -> None:

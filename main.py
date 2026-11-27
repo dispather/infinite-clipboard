@@ -53,7 +53,7 @@ from core.network import NetworkServer, NetworkClient
 from core.protocol import Protocol
 from core.clipboard_manager import ClipboardManager
 from core.file_transfer import (
-    FileTransferManager, FileMetadata, CheckpointManager, Checkpoint,
+    FileTransferManager, TransferSizeExceeded, FileMetadata, CheckpointManager, Checkpoint,
     format_size, CHUNK_SIZE,
 )
 from core.privacy import detect_sensitive_kind
@@ -64,7 +64,56 @@ from core import updater
 from ui.i18n import get_language, t
 
 # 로깅 설정 — 콘솔 + 파일 이중 출력
-from config import LOG_FILE
+from config import LOG_FILE, CRASH_LOG_FILE
+
+# 로그 레벨 기준: ERROR 는 «고쳐야 할 것»(우리 코드·설정·환경의 결함)만.
+# 피어의 정상 끊김·사용자 입력 거절(크기 초과 등)처럼 예상된 사건은 INFO/WARNING.
+# 이유: ERROR 가 잡음으로 묻히면(2026-11 실측 ERROR 의 3/4 이 피어 끊김) 진짜 결함을 못 찾는다.
+
+# faulthandler 대상 파일 — 프로세스가 끝날 때까지 열어 둬야 한다(닫히면 크래시 때 쓸 fd 가 없다)
+_crash_log_handle = None
+
+
+def _install_crash_capture(crash_path) -> None:
+    """크래시·미처리 예외를 로그에 남긴다.
+
+    - faulthandler: 네이티브 크래시(segfault·힙 손상 등)의 파이썬 스택을 crash_path 에 append.
+      창 모드 PyInstaller 번들은 sys.stderr 가 None 이라 기본 대상으로는 아무 데도 안 남는다.
+    - sys.excepthook / threading.excepthook: 미처리 예외를 logger.critical(트레이스백 포함)로.
+      스레드 예외의 기본 동작은 stderr 출력뿐이라 창 모드에선 흔적 없이 사라진다.
+    """
+    global _crash_log_handle
+    import faulthandler
+
+    try:
+        if _crash_log_handle is None or _crash_log_handle.closed:
+            _crash_log_handle = open(str(crash_path), "a", encoding="utf-8")
+        faulthandler.enable(file=_crash_log_handle, all_threads=True)
+    except (OSError, ValueError, RuntimeError) as e:
+        logging.getLogger("infinite-clipboard").warning(f"crash.log 설정 실패: {e}")
+
+    crash_logger = logging.getLogger("infinite-clipboard.crash")
+
+    def _excepthook(exc_type, exc_value, exc_tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+            return
+        crash_logger.critical(
+            "미처리 예외 (메인 스레드)", exc_info=(exc_type, exc_value, exc_tb)
+        )
+
+    def _thread_excepthook(args):
+        if args.exc_type is SystemExit:
+            return
+        name = args.thread.name if args.thread is not None else "?"
+        crash_logger.critical(
+            f"미처리 예외 (스레드 {name})",
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+
+    sys.excepthook = _excepthook
+    threading.excepthook = _thread_excepthook
+
 
 def _setup_logging(debug=False):
     """로깅 초기화: 콘솔(INFO) + 파일(DEBUG)"""
@@ -96,6 +145,14 @@ def _setup_logging(debug=False):
     console_handler.setLevel(logging.DEBUG if debug else logging.INFO)
     console_handler.setFormatter(fmt)
     root_logger.addHandler(console_handler)
+
+    # 크래시·미처리 예외 기록 — `--window` UI 서브프로세스도 main() 의 이 호출을 탄다
+    _install_crash_capture(CRASH_LOG_FILE)
+    if os.name == "posix":
+        try:
+            os.chmod(str(CRASH_LOG_FILE), 0o600)
+        except OSError:
+            pass
 
 logger = logging.getLogger("infinite-clipboard")
 
@@ -1043,6 +1100,9 @@ class InfiniteClipboard:
         self._cleanup_offer_image()  # 이전 offer 가 이미지였으면 스냅샷 temp 정리
         try:
             metadata = self.file_manager.collect_metadata(file_paths)
+        except TransferSizeExceeded as e:
+            logger.warning(f"offer 메타데이터 수집 거절: {e}")
+            return
         except Exception as e:
             logger.error(f"offer 메타데이터 수집 오류: {e}")
             return
@@ -2026,6 +2086,9 @@ class InfiniteClipboard:
         """
         try:
             metadata = self.file_manager.collect_metadata(file_paths)
+        except TransferSizeExceeded as e:
+            logger.warning(f"파일 메타데이터 수집 거절: {e}")
+            return
         except Exception as e:
             logger.error(f"파일 메타데이터 수집 오류: {e}")
             return
