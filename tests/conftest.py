@@ -54,6 +54,21 @@ def _no_real_desktop_notifications(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_plain_dbus_notifications(monkeypatch):
+    """TrayApp.notify on Linux sends plain notifications through
+    core.notify_linux.send_plain_notification (Gio D-Bus) before plyer — stub it to
+    «failed» so tests fall through to the muted plyer above instead of popping a
+    real desktop notification. tests/test_tray_plain_notify_linux.py calls the real
+    function it captured at import time, with a fake `gi`.
+    """
+    try:
+        from core import notify_linux
+    except ImportError:
+        return
+    monkeypatch.setattr(notify_linux, "send_plain_notification", lambda *_a, **_k: False)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_actionable_notifications(monkeypatch):
     """테스트가 실제 액션 버튼 알림(D-Bus Notify 등)을 띄우지 않도록 기본 비활성화.
 

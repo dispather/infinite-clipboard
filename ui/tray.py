@@ -299,7 +299,20 @@ class TrayApp:
             self._badge_timer.start()
 
     def notify(self, title: str, message: str) -> None:
-        """OS 토스트 알림"""
+        """OS 토스트 알림.
+
+        Linux: explicit-signature Gio D-Bus first (core/notify_linux.send_plain_notification),
+        plyer only when that fails — plyer's dbus-python path intermittently cannot guess
+        the signature of empty actions/hints and the notification was lost
+        (linux-plain-notify-dbus-signature, 2026-11-28).
+        """
+        if platform.system() == "Linux":
+            try:
+                from core.notify_linux import send_plain_notification
+                if send_plain_notification(title, message):
+                    return
+            except Exception as e:
+                logger.debug(f"D-Bus 일반 알림 경로 예외 — plyer 로 폴백: {e}")
         try:
             from plyer import notification
             notification.notify(

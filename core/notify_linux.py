@@ -50,6 +50,49 @@ _APP_NAME = "Infinite Clipboard"
 _ACTION_RECEIVE = "receive"
 _ACTION_DISMISS = "dismiss"
 _EXPIRE_MS = 15000
+_NOTIFY_SIGNATURE = "(susssasa{sv}i)"
+PLAIN_EXPIRE_MS = 5000
+
+
+def send_plain_notification(title: str, message: str, expire_ms: int = PLAIN_EXPIRE_MS) -> bool:
+    """Send a button-less notification over D-Bus with an explicit signature.
+
+    Why not plyer (2026-11-28, linux-plain-notify-dbus-signature): plyer's Linux
+    backend goes through dbus-python, which must *guess* the Notify signature.
+    With empty actions `[]` / hints `{}` it fails with «Unable to guess signature
+    from an empty list» whenever introspection data is not available — the
+    installed bundle logged it 3 times (2026-09-29, 10-01, 11-28) and the user
+    saw no notification. GVariant here carries the signature, so empty
+    containers are unambiguous.
+
+    replaces_id is always 0: plain notifications must never take over a
+    sender's «받기» slot (LinuxActionableNotifier._slots, linux-notify-pileup).
+
+    Returns True when the daemon accepted the call, False otherwise (no gi, no
+    session bus, daemon refused) so the caller can fall back to plyer. Never raises.
+    """
+    try:
+        import gi
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio, GLib
+    except Exception as e:
+        logger.debug(f"gi/Gio 부재 — 일반 알림은 plyer 로: {e}")
+        return False
+    try:
+        conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        conn.call_sync(
+            "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+            "org.freedesktop.Notifications", "Notify",
+            GLib.Variant(
+                _NOTIFY_SIGNATURE,
+                (_APP_NAME, 0, "", str(title), str(message), [], {}, int(expire_ms)),
+            ),
+            GLib.VariantType.new("(u)"), Gio.DBusCallFlags.NONE, 2000, None,
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"D-Bus 일반 알림 실패 — plyer 폴백: {e}")
+        return False
 
 
 class LinuxActionableNotifier(ActionableNotifier):
@@ -146,7 +189,7 @@ class LinuxActionableNotifier(ActionableNotifier):
                 "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
                 "org.freedesktop.Notifications", "Notify",
                 self._glib.Variant(
-                    "(susssasa{sv}i)",
+                    _NOTIFY_SIGNATURE,
                     (
                         _APP_NAME, replaces_id, "", title, message,
                         [_ACTION_RECEIVE, accept_label, _ACTION_DISMISS, dismiss_label],
