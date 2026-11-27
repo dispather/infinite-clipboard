@@ -482,21 +482,21 @@ class HistoryWindow(customtkinter.CTkToplevel):
         log = logging.getLogger(__name__)
         content_type = entry.get("type", "text")
         content = entry.get("content")
-        preview = entry.get("preview", "")[:40]
+        # privacy: 미리보기는 클립보드 본문 앞부분이라 로그에 쓰지 않는다 — 길이·종류만
 
         if content is None:
-            log.warning(f"[history] 재복사 불가: content=None (type={content_type}, preview={preview!r})")
+            log.warning(f"[history] 재복사 불가: content=None (type={content_type})")
             return
 
         # 비텍스트 타입의 경우 _add_to_history 가 "[image]" 같은 표식을
         # content 로 저장했으므로 실제로는 복사 불가. 텍스트만 지원.
         if content_type != "text":
-            log.warning(f"[history] 재복사 미지원 타입: {content_type} (preview={preview!r})")
+            log.warning(f"[history] 재복사 미지원 타입: {content_type}")
             return
 
         try:
             ok = self.clipboard_manager.set_clipboard_content("text", content)
-            log.info(f"[history] 재복사 성공={ok}, 길이={len(content)}, preview={preview!r}")
+            log.info(f"[history] 재복사 성공={ok}, 길이={len(content)}")
         except Exception as e:
             log.error(f"[history] 재복사 실패: {e}")
 

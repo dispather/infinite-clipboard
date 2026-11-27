@@ -138,3 +138,87 @@ def test_no_preview_logging_left_in_source():
     import inspect
     src = inspect.getsource(cm)
     assert "preview: {data" not in src
+
+
+def test_text_copy_send_and_receive_paths_do_not_log_body(tmp_path, monkeypatch, caplog):
+    """복사 → 모니터 → 이력 → 네트워크 송신, 그리고 수신 → 클립보드 설정 → 이력 전 경로에서
+    클립보드 본문이 어느 레벨 로그에도 안 남는다."""
+    import main
+    from config import AppConfig
+    from core import network as net
+    from core.protocol import Protocol, MSG_CLIPBOARD, generate_peer_id
+
+    caplog.set_level(logging.DEBUG)
+    body = "clipboard body marker " + "z9" * 30
+
+    # ── 송신 측 ──
+    sender = main.InfiniteClipboard(AppConfig(
+        mode="client", auth_key="x" * 32, peer_id=generate_peer_id(),
+    ))
+    monkeypatch.setattr(sender, "_get_history_file", lambda: str(tmp_path / "h1.json"))
+    sent = []
+
+    class _CaptureSock:
+        def sendall(self, b):
+            sent.append(b)
+
+    client = net.NetworkClient("127.0.0.1", 1, "k", "test-device")
+    client.running = True
+    client.connected = True
+    client.socket = _CaptureSock()
+    sender.client = client
+    monkeypatch.setattr(sender, "_is_network_active", lambda: True)
+    monkeypatch.setattr(sender.clipboard, "has_changed", lambda: (True, "text", body))
+    sender.running = True
+
+    def _stop_after_one(_s):
+        sender.running = False
+
+    monkeypatch.setattr(main.time, "sleep", _stop_after_one)
+    sender._monitor_clipboard()
+
+    assert len(sent) == 1
+    frame = sent[0]
+    message = client.protocol.parse_message(frame[Protocol.HEADER_SIZE:])
+    assert message["type"] == MSG_CLIPBOARD and message["data"]["content"] == body
+
+    # ── 수신 측 (실제 LinuxClipboard.set_content, 쓰기 도구만 가짜) ──
+    receiver = main.InfiniteClipboard(AppConfig(
+        mode="client", auth_key="x" * 32, peer_id=generate_peer_id(),
+    ))
+    monkeypatch.setattr(receiver, "_get_history_file", lambda: str(tmp_path / "h2.json"))
+    handler = _make_linux_handler(monkeypatch, tool="xclip")
+    receiver.clipboard._handler = handler
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr(cm, "_write_via_subprocess", lambda *a, **k: True)
+    receiver._on_client_message(message)
+
+    assert receiver.clipboard_history[0]["content"] == body
+    assert any("[클립보드] 수신: text" in r.getMessage() for r in caplog.records)
+    for r in caplog.records:
+        rendered = r.getMessage() + (logging.Formatter().formatException(r.exc_info) if r.exc_info else "")
+        assert body[:20] not in rendered, f"본문이 로그에 남음: {r.name} {r.levelname}"
+    assert body[:20] not in caplog.text
+
+
+def test_history_recopy_does_not_log_preview(caplog):
+    """이력 창 재복사 로그가 미리보기(본문 앞 80자)를 남기지 않는다 — 창 생성 없이 메서드만."""
+    import pytest
+    pytest.importorskip("customtkinter")
+    from ui.history_window import HistoryWindow
+
+    caplog.set_level(logging.DEBUG)
+    body = "clipboard body marker " + "h4" * 30
+
+    class _FakeSelf:
+        class clipboard_manager:
+            @staticmethod
+            def set_clipboard_content(kind, data):
+                return True
+
+    HistoryWindow._recopy(_FakeSelf(), {"type": "text", "content": body, "preview": body[:80]})
+    HistoryWindow._recopy(_FakeSelf(), {"type": "image", "content": "[image]", "preview": body[:80]})
+    HistoryWindow._recopy(_FakeSelf(), {"type": "text", "content": None, "preview": body[:80]})
+    assert "재복사 성공=True" in caplog.text
+    assert body[:20] not in caplog.text
