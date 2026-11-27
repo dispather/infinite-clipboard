@@ -503,11 +503,124 @@ def log_file_set(log_file: Path) -> List[Path]:
     return [p for p in files if p.exists()]
 
 
+# ── 옛 버전(≤ v3.0.19)이 남긴 클립보드 앞부분 줄 지우기 ────────────────
+#
+# v3.0.19 이하는 `<asctime> - core.clipboard_manager - DEBUG -   preview: <본문 앞 50자>` 를
+# 남겼다(237f310 에서 제거). 본문에 줄바꿈이 있으면 시각 없는 연속 줄로 이어진다.
+# 시작 때 1회 자기 로그에서 지우고(purge_legacy_preview_logs), 진단 묶음·전체 로그 응답도
+# 같은 판정으로 거른다(표식 전 상태·검산 불성립으로 남은 파일 방어).
+
+_RE_LOG_RECORD_START = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
+_RE_LEGACY_PREVIEW = re.compile(
+    r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} - \S+ - DEBUG -   preview: ")
+# 본문 앞 50자에는 줄바꿈이 최대 50개 → 연속 줄은 최대 50줄. 그 뒤의 시각 없는 줄은 남의 것.
+LEGACY_PREVIEW_MAX_CONT = 50
+LEGACY_PREVIEW_MARKER = "legacy-preview-purged"
+
+
+def _split_keepends(text: str) -> List[str]:
+    """'\\n' 만으로 자른다(str.splitlines 는 \\r·\\x0c 등에서도 잘라 연속 줄 수가 틀어진다)."""
+    parts = text.split("\n")
+    lines = [p + "\n" for p in parts[:-1]]
+    if parts[-1]:
+        lines.append(parts[-1])
+    return lines
+
+
+def strip_legacy_preview(text: str):
+    """옛 preview 줄 + 그 «바로 뒤» 시각 없는 연속 줄을 지운다.
+
+    Returns: (남긴 텍스트, 지운 preview 줄 수, 지운 연속 줄 수).
+    다른 레코드 뒤의 트레이스백(시각 없는 줄)은 preview 바로 뒤가 아니므로 남는다.
+    """
+    kept: List[str] = []
+    n_preview = n_cont = 0
+    cont_left = 0
+    for line in _split_keepends(text):
+        if _RE_LEGACY_PREVIEW.match(line):
+            n_preview += 1
+            cont_left = LEGACY_PREVIEW_MAX_CONT
+            continue
+        if cont_left and not _RE_LOG_RECORD_START.match(line):
+            n_cont += 1
+            cont_left -= 1
+            continue
+        cont_left = 0
+        kept.append(line)
+    return "".join(kept), n_preview, n_cont
+
+
+def _strip_log_bytes(data: bytes) -> bytes:
+    # surrogateescape — 깨진 바이트도 그대로 왕복(가리기는 뒤 단계에서)
+    text = data.decode("utf-8", errors="surrogateescape")
+    if "preview: " not in text:
+        return data
+    return strip_legacy_preview(text)[0].encode("utf-8", errors="surrogateescape")
+
+
+def purge_legacy_preview_logs(log_file: Path, marker: Optional[Path] = None) -> dict:
+    """[시작 때 1회] 자기 로그 4개에서 옛 preview 줄을 지운다. 파일 핸들러를 붙이기 «전»에 부른다.
+
+    - 활성 로그도 inode 유지(r+ → 앞에서 다시 쓰기 → truncate), 권한 600.
+    - 검산(입력 줄 = 남김 + preview + 연속, 바이트도 같은 식) 불성립 파일은 건드리지 않는다.
+    - 끝나면 marker 파일을 남겨 다음 시작부터 건너뛴다. OSError 가 난 파일이 있으면 표식을
+      남기지 않아 다음 시작에 다시 시도한다(검산 불성립은 결정적이라 표식을 남긴다).
+    - 로그에는 줄 수·파일 이름만(내용은 쓰지 않는다) — 이 함수는 로깅하지 않고 결과만 돌려준다.
+
+    Returns: {"skipped": bool, "preview": int, "cont": int, "files": int,
+              "check_failed": [이름], "io_failed": [이름]}
+    """
+    log_file = Path(log_file)
+    marker = Path(marker) if marker is not None else log_file.parent / LEGACY_PREVIEW_MARKER
+    result = {"skipped": False, "preview": 0, "cont": 0, "files": 0,
+              "check_failed": [], "io_failed": []}
+    if marker.exists():
+        result["skipped"] = True
+        return result
+    for p in log_file_set(log_file):
+        try:
+            with open(p, "r+b") as f:
+                raw = f.read()
+                text = raw.decode("utf-8", errors="surrogateescape")
+                if "preview: " not in text:
+                    continue
+                kept, n_preview, n_cont = strip_legacy_preview(text)
+                if n_preview == 0:
+                    continue
+                new = kept.encode("utf-8", errors="surrogateescape")
+                n_in = len(_split_keepends(text))
+                n_kept = len(_split_keepends(kept))
+                if n_in != n_kept + n_preview + n_cont or len(new) >= len(raw):
+                    result["check_failed"].append(p.name)
+                    continue
+                f.seek(0)
+                f.write(new)
+                f.truncate()
+            _chmod600(p)
+            result["files"] += 1
+            result["preview"] += n_preview
+            result["cont"] += n_cont
+        except OSError:
+            result["io_failed"].append(p.name)
+    if not result["io_failed"]:
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(_utc_iso() + "\n", encoding="utf-8")
+            _chmod600(marker)
+        except OSError:
+            result["io_failed"].append(marker.name)
+    return result
+
+
 def build_log_tail(log_file: Path, crash_file: Optional[Path], redactor: Redactor,
                    max_raw: int = LOG_BUNDLE_MAX_RAW) -> bytes:
-    """로그 4개 + crash.log 의 «최근» max_raw 바이트를 하나로 이어 붙인다(가린 뒤)."""
+    """로그 4개 + crash.log 의 «최근» max_raw 바이트를 하나로 이어 붙인다(가린 뒤).
+
+    로그 파일은 옛 preview 줄을 거른 뒤 붙인다(파일마다 — 머리줄이 연속 줄로 먹히지 않게).
+    """
     parts: List[bytes] = []
-    paths = log_file_set(log_file)
+    log_paths = log_file_set(log_file)
+    paths = list(log_paths)
     if crash_file is not None and Path(crash_file).exists():
         paths = paths + [Path(crash_file)]
     for p in paths:
@@ -515,6 +628,8 @@ def build_log_tail(log_file: Path, crash_file: Optional[Path], redactor: Redacto
             data = p.read_bytes()
         except OSError:
             continue
+        if p in log_paths:
+            data = _strip_log_bytes(data)
         parts.append(f"\n===== {p.name} =====\n".encode("utf-8") + data)
     blob = b"".join(parts)
     if len(blob) > max_raw:
@@ -554,14 +669,18 @@ def write_diagnostic_bundle(dest_dir: Path, log_file: Path, crash_file: Optional
     }
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("info.json", json.dumps(info, ensure_ascii=False, indent=2))
-        srcs = log_file_set(log_file)
+        log_paths = log_file_set(log_file)
+        srcs = list(log_paths)
         if crash_file is not None and Path(crash_file).exists():
             srcs.append(Path(crash_file))
         for p in srcs:
             try:
-                text = p.read_bytes().decode("utf-8", errors="replace")
+                data = p.read_bytes()
             except OSError:
                 continue
+            if p in log_paths:
+                data = _strip_log_bytes(data)   # 옛 preview 줄 방어(표식 전·검산 불성립 파일)
+            text = data.decode("utf-8", errors="replace")
             zf.writestr(p.name, redactor(text) or "")
     _chmod600(path)
     return path
