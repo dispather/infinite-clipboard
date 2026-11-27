@@ -42,8 +42,12 @@ def _no_real_desktop_notifications(monkeypatch):
     monkeypatch 하는 경우엔 그 테스트 함수 안의 patch 가 이 기본값을 그대로 덮어써
     정상 동작한다(monkeypatch 는 LIFO 로 되돌아가므로 서로 간섭 없음).
     """
+    # 🔴 `import plyer.notification` 은 쓰지 말 것 — plyer 의 notification 은 하위 모듈이 아니라
+    # `plyer/__init__.py` 의 Proxy 속성이라 그 import 는 항상 ModuleNotFoundError 다.
+    # 예전 코드가 그렇게 써서 이 fixture 가 늘 조용히 빠졌고, pytest 1회마다 실제 알림
+    # 약 60개가 개발자 데스크톱에 쌓였다(2026-11-28 실측, 사용자 스크린샷).
     try:
-        import plyer.notification
+        import plyer
     except ImportError:
         return
     monkeypatch.setattr(plyer.notification, "notify", lambda **_kwargs: None, raising=False)
