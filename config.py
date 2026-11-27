@@ -138,6 +138,11 @@ class AppConfig:
     # 마지막 확인 시각 등 런타임 상태는 update_state.json 에 둔다 — settings.json 은
     # mtime 이 바뀌면 앱이 재시작되므로(main._watch_config_for_restart) 여기엔 사용자 토글만.
     auto_update_check: bool = True
+    # 2026-11-27 에러 로그(d1): «내 기기들의 오류 기록을 서버 PC 에 모으기» — 기본 꺼짐(옵트인).
+    # 켜면 WARNING 이상 로그·crash.log 를 «오류 사건»으로 묶어(core/error_events.py) 앱 연결로만
+    # 서버 모드 PC 에 보낸다(앱 밖·인터넷으로는 안 나감). 서버 PC 도 켜야 받아 저장한다 —
+    # 보내는 쪽·받는 쪽 양쪽 동의. 전체 로그 요청에 응답할지도 이 값으로 정한다.
+    collect_error_logs: bool = False
 
     def __post_init__(self):
         if not self.device_name:
@@ -302,6 +307,11 @@ class AppConfig:
                 f"auto_update_check={self.auto_update_check!r} not bool, reset to True"
             )
             self.auto_update_check = True
+        if not isinstance(self.collect_error_logs, bool):
+            _logger.warning(
+                f"collect_error_logs={self.collect_error_logs!r} not bool, reset to False"
+            )
+            self.collect_error_logs = False
 
         # v3.0: peer_id 형식 검증 (32-char lowercase hex). settings.json 이
         # 손상된 값을 담고 있으면 재생성 — 라우팅이 깨진 id 로 동작하는 것 방지.

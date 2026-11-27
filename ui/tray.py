@@ -214,6 +214,11 @@ class TrayApp:
         yield pystray.MenuItem(tr("파일 전송", lang), self._show_transfers)
         yield pystray.MenuItem(tr("설정", lang), self._show_settings)
         yield pystray.MenuItem(tr("로그 보기", lang), self._view_log)
+        # 에러 로그(d1) — 로그 폴더·진단 묶음·전체 로그 요청(서버 모드만)
+        yield pystray.MenuItem(tr("로그 폴더 열기", lang), self._open_log_folder)
+        yield pystray.MenuItem(tr("진단 묶음 내보내기", lang), self._export_diagnostics)
+        if getattr(getattr(self.app, "config", None), "mode", "") == "server":
+            yield pystray.MenuItem(tr("연결된 PC 전체 로그 요청", lang), self._request_peer_logs)
         yield pystray.MenuItem(tr("임시 파일 정리", lang), self._cleanup_staging)
         yield pystray.Menu.SEPARATOR
         # 2026-09-29 자동 업데이트 — 새 버전이 있을 때만 «업데이트 설치 (vX)»
@@ -413,25 +418,44 @@ class TrayApp:
         """
         self._launch_window("about")
 
+    @staticmethod
+    def _open_path(path: str, prefer_editor: bool = False) -> None:
+        """파일·폴더를 OS 기본 앱으로 연다. prefer_editor: Linux 에서 kate 우선(텍스트 파일)."""
+        system = platform.system()
+        if system == "Linux":
+            # KDE → kate, GNOME → xdg-open
+            if prefer_editor and shutil.which("kate"):
+                subprocess.Popen(["kate", path])
+            elif shutil.which("xdg-open"):
+                subprocess.Popen(["xdg-open", path])
+        elif system == "Darwin":
+            subprocess.Popen(["open", path])
+        elif system == "Windows":
+            os.startfile(path)
+
     def _view_log(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
         """로그 파일을 OS 기본 텍스트 편집기로 열기"""
         from config import LOG_FILE
-        log_path = str(LOG_FILE)
-
         try:
-            system = platform.system()
-            if system == "Linux":
-                # KDE → kate, GNOME → xdg-open
-                if shutil.which("kate"):
-                    subprocess.Popen(["kate", log_path])
-                elif shutil.which("xdg-open"):
-                    subprocess.Popen(["xdg-open", log_path])
-            elif system == "Darwin":
-                subprocess.Popen(["open", log_path])
-            elif system == "Windows":
-                os.startfile(log_path)
+            self._open_path(str(LOG_FILE), prefer_editor=True)
         except Exception as e:
             logger.error(f"로그 파일 열기 실패: {e}")
+
+    def _open_log_folder(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
+        """로그·crash.log·collected-logs(서버) 가 있는 설정 폴더 열기."""
+        from config import LOG_FILE
+        try:
+            self._open_path(str(Path(LOG_FILE).parent))
+        except Exception as e:
+            logger.warning(f"로그 폴더 열기 실패: {e}")
+
+    def _export_diagnostics(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
+        """진단 묶음 zip(다운로드 폴더) — 파일 읽기·압축이라 메뉴 스레드를 막지 않게."""
+        threading.Thread(target=self.app.export_diagnostic_bundle, daemon=True).start()
+
+    def _request_peer_logs(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
+        """연결된 PC 전체 로그 요청 — 응답 대기(최대 30초)가 있어 스레드로."""
+        threading.Thread(target=self.app.request_peer_logs, daemon=True).start()
 
     def _quit(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
         logger.info("[트레이] 종료 요청")

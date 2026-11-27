@@ -122,6 +122,20 @@ STRINGS: dict[str, dict[str, str]] = {
 
         # ui/tray.py 메뉴 + ui/tray_status.py 상태 줄 (2026-09-28 UX 검토 B1)
         "로그 보기": "View Log",
+        # 에러 로그(d1) — ui/tray.py · ui/settings_window.py · main.py 알림
+        "로그 폴더 열기": "Open Log Folder",
+        "진단 묶음 내보내기": "Export Diagnostics",
+        "연결된 PC 전체 로그 요청": "Request Full Logs from Connected PCs",
+        "내 기기들의 오류 기록을 서버 PC 에 모으기": "Collect my devices' error records on the server PC",
+        "전체 로그 요청": "Full Log Request",
+        "설정에서 «오류 기록을 서버 PC 에 모으기» 를 먼저 켜세요": (
+            "Turn on \u201cCollect error records on the server PC\u201d in Settings first"
+        ),
+        "받음 {saved}대 · 수집 꺼짐 {declined}대 · 응답 없음 {none}대(옛 버전이거나 끊김)": (
+            "Received {saved} · collection off {declined} · no answer {none} "
+            "(older version or disconnected)"
+        ),
+        "만들지 못했어요": "Could not create it",
         "종료": "Quit",
         "✕ 서버 시작 실패 — 포트 {port} 사용 불가": "✕ Server failed to start — port {port} unavailable",
         "● 서버 실행 중 — 기기 {n}대 연결": "● Server running — {n} device(s) connected",

@@ -48,7 +48,10 @@ from core.protocol import (
     CLIP_OFFER_KIND_FILE, CLIP_OFFER_KIND_IMAGE,
     FETCH_FAIL_SUPERSEDED, FETCH_FAIL_EXPIRED, FETCH_FAIL_MISSING,
     FETCH_FAIL_OFFLINE, FETCH_FAIL_ERROR,
+    # 에러 로그(d1) — 서버 종착 메시지(중계 안 함)
+    MSG_ERROR_EVENTS, MSG_LOG_REQUEST, MSG_LOG_BUNDLE,
 )
+from core import error_events
 from core.network import NetworkServer, NetworkClient
 from core.protocol import Protocol
 from core.clipboard_manager import ClipboardManager
@@ -123,8 +126,8 @@ def _setup_logging(debug=False):
     fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
     # 파일 핸들러 — 항상 DEBUG 레벨, 최대 5MB 로테이션
-    from logging.handlers import RotatingFileHandler
-    file_handler = RotatingFileHandler(
+    # 회전 때 새로 만드는 파일도 0o600 (RotatingFileHandler 기본은 umask 644 — 수집 전제)
+    file_handler = error_events.make_secure_rotating_handler(
         str(LOG_FILE), maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8",
     )
     file_handler.setLevel(logging.DEBUG)
@@ -316,6 +319,12 @@ class InfiniteClipboard:
         self.tray = None
         # 트레이 없이(콘솔 모드) 띄운 창 프로세스 — 종료 때 닫는다(stop → _close_windows)
         self._fallback_window_procs = []
+        # 에러 로그(d1) — collect_error_logs 가 켜졌을 때만 생성(_start_error_collection)
+        self._error_collector = None
+        self._error_service = None
+        self._error_store = None
+        self._log_requests = error_events.LogRequestTracker()
+        self._last_log_response = 0.0
 
     def start(self):
         """앱 시작"""
@@ -337,6 +346,10 @@ class InfiniteClipboard:
             self._start_server()
         else:
             self._start_client()
+
+        # 에러 로그(d1) 자동 수집 — 옵트인. start() 는 메인 서비스 프로세스만 탄다
+        # (`--window` UI 서브프로세스는 InfiniteClipboard 를 만들지 않음 → outbox 경합 없음)
+        self._start_error_collection()
 
         # 클립보드 모니터링 시작
         monitor_thread = threading.Thread(target=self._monitor_clipboard, daemon=True)
@@ -404,6 +417,10 @@ class InfiniteClipboard:
     def stop(self):
         """앱 종료"""
         self.running = False
+        if self._error_service is not None:
+            self._error_service.stop()
+        if self._error_collector is not None:
+            logging.getLogger().removeHandler(self._error_collector)
         if hasattr(self.clipboard, 'cleanup'):
             self.clipboard.cleanup()
         # v3.0: lazy provider 백엔드 스레드 정리 (규칙 #9 silent)
@@ -657,6 +674,17 @@ class InfiniteClipboard:
         elif msg_type == MSG_FILE_ACK:
             self.server.broadcast(msg_type, data, exclude_sock=sock)
 
+        # ── 에러 로그(d1): 셋 다 서버 종착 — broadcast·relay 하지 않는다(규칙 7) ──
+        elif msg_type == MSG_ERROR_EVENTS:
+            self._handle_error_events(sock, data)
+
+        elif msg_type == MSG_LOG_BUNDLE:
+            self._handle_log_bundle(sock, data)
+
+        elif msg_type == MSG_LOG_REQUEST:
+            # 요청은 서버만 낸다 — 클라이언트가 보낸 요청은 무시(다른 PC 로그를 끌어가는 것 차단)
+            logger.debug("[에러 로그] 클라이언트가 보낸 log_request 무시")
+
         elif msg_type == MSG_PING:
             self.server.send_to(sock, MSG_PONG)
 
@@ -689,6 +717,9 @@ class InfiniteClipboard:
             f"[클라이언트] 서버 연결 성공 "
             f"(server_peer={server_peer[:8]}… my_peer={self.config.peer_id[:8]}…)"
         )
+        # 오프라인 동안 쌓인 오류 사건을 재접속 직후 보낸다
+        if self._error_service is not None:
+            self._error_service.kick()
         self._notify_state_changed()
 
     def _on_client_disconnected(self, reason: str = ""):
@@ -754,8 +785,159 @@ class InfiniteClipboard:
         elif msg_type == MSG_FILE_CANCEL_ACK:
             self._handle_file_cancel_ack(data)
 
+        elif msg_type == MSG_LOG_REQUEST:
+            # 서버 PC 사람이 «연결된 PC 전체 로그 요청» 을 눌렀다 — 별도 스레드(파일 읽기·압축)
+            threading.Thread(target=self._handle_log_request, args=(data,), daemon=True).start()
+
         elif msg_type == MSG_PING:
             self.client.send(MSG_PONG)
+
+    # ── 에러 로그 (d1): 자동 수집 · 진단 묶음 · 전체 로그 요청 ─────────────
+    # 정본 설명·events.jsonl 스키마: core/error_events.py 모듈 docstring.
+
+    @staticmethod
+    def log_dir() -> Path:
+        """로그·crash.log·collected-logs 가 있는 설정 폴더."""
+        return Path(LOG_FILE).parent
+
+    def _error_redactor(self):
+        return error_events.Redactor(secrets=[self.config.auth_key])
+
+    def _start_error_collection(self) -> None:
+        """collect_error_logs 가 켜졌으면 수집기(루트 로거 핸들러)와 주기 전송 스레드를 세운다."""
+        if not self.config.collect_error_logs or self._error_service is not None:
+            return
+        from version import __version__
+        d = self.log_dir()
+        self._error_collector = error_events.ErrorEventCollector(
+            d / "error-events-outbox.jsonl", __version__, self._error_redactor(),
+        )
+        logging.getLogger().addHandler(self._error_collector)
+        kwargs = {}
+        if self.config.mode == "server":
+            self._error_store = error_events.CollectedLogStore(d / "collected-logs")
+            kwargs = {"store": self._error_store, "self_device": self.config.device_name,
+                      "self_peer": self.config.peer_id}
+        else:
+            kwargs = {"send_fn": self._send_error_events}
+        self._error_service = error_events.ErrorCollectionService(
+            self._error_collector, crash_path=Path(CRASH_LOG_FILE),
+            state_path=d / "error-events-state.json", **kwargs,
+        )
+        self._error_service.start()
+        logger.info(f"[에러 로그] 오류 사건 수집 켜짐 ({self.config.mode})")
+
+    def _send_error_events(self, events) -> bool:
+        """[클라이언트] 사건 묶음을 서버로. 성공 여부는 send_raw(bool) — send() 는 늘 None."""
+        client = self.client
+        if client is None or not self.connected:
+            return False
+        raw = self.protocol.create_message(MSG_ERROR_EVENTS, {"events": events})
+        return client.send_raw(raw)
+
+    def _peer_identity(self, sock):
+        """서버: 핸드셰이크로 확인된 (기기 이름, peer_id). payload 자기신고는 쓰지 않는다."""
+        with self.server.clients_lock:
+            info = dict(self.server.clients.get(sock, {}))
+        return info.get("name", ""), info.get("peer_id", "")
+
+    def _handle_error_events(self, sock, data) -> None:
+        """[서버] MSG_ERROR_EVENTS — 서버도 옵트인이어야 저장. 중계 안 함."""
+        if self._error_store is None:
+            logger.debug("[에러 로그] 수집 꺼짐 — 받은 오류 사건 버림")
+            return
+        name, peer_id = self._peer_identity(sock)
+        if not peer_id:
+            return
+        events = error_events.validate_events(data)
+        if not events:
+            return
+        try:
+            n = self._error_store.append(name, peer_id, events)
+            logger.debug(f"[에러 로그] {name} 사건 {n}건 저장")
+        except OSError as e:
+            logger.debug(f"[에러 로그] 저장 실패: {e}")
+
+    def _handle_log_bundle(self, sock, data) -> None:
+        """[서버] MSG_LOG_BUNDLE — 진행 중 요청의 응답만 저장."""
+        name, peer_id = self._peer_identity(sock)
+        if not peer_id or not isinstance(data, dict):
+            return
+        declined = bool(data.get("declined"))
+        saved_path = None
+        if not declined and self._error_store is not None:
+            try:
+                saved_path = self._error_store.save_log_bundle(name, peer_id, data)
+            except OSError as e:
+                logger.debug(f"[에러 로그] 전체 로그 저장 실패: {e}")
+        self._log_requests.on_response(
+            data.get("request_id"), peer_id, saved=saved_path is not None, declined=declined,
+        )
+
+    def _handle_log_request(self, data) -> None:
+        """[클라이언트] 서버의 전체 로그 요청 — 이 PC 도 옵트인일 때만 보낸다(아니면 declined)."""
+        if not isinstance(data, dict) or not isinstance(data.get("request_id"), str):
+            return
+        request_id = data["request_id"][:64]
+        now = time.monotonic()
+        if now - self._last_log_response < error_events.LOG_RESPONSE_MIN_INTERVAL:
+            return
+        self._last_log_response = now
+        payload = {"request_id": request_id}
+        if not self.config.collect_error_logs:
+            payload["declined"] = True
+        else:
+            try:
+                body = error_events.build_log_tail(
+                    Path(LOG_FILE), Path(CRASH_LOG_FILE), self._error_redactor(),
+                )
+                payload["gz_b64"] = error_events.encode_log_bundle(body)
+            except OSError as e:
+                logger.debug(f"[에러 로그] 전체 로그 묶기 실패: {e}")
+                payload["declined"] = True
+        if self.client is not None:
+            self.client.send_raw(self.protocol.create_message(MSG_LOG_BUNDLE, payload))
+
+    def request_peer_logs(self, timeout: float = error_events.LOG_REQUEST_TIMEOUT) -> dict:
+        """[서버, 트레이] 연결된 PC 들에 전체 로그를 요청하고 timeout 뒤 결과를 알린다(블로킹)."""
+        if self.config.mode != "server" or self.server is None:
+            return {"error": "not_server"}
+        if self._error_store is None:
+            self._notify(t("전체 로그 요청", self._lang),
+                         t("설정에서 «오류 기록을 서버 PC 에 모으기» 를 먼저 켜세요", self._lang))
+            return {"error": "collect_off"}
+        request_id = uuid.uuid4().hex
+        peers = dict(self.peers)
+        if not self._log_requests.begin(request_id, peers):
+            return {"error": "busy"}
+        self.server.broadcast(MSG_LOG_REQUEST, {"request_id": request_id})
+        result = self._log_requests.wait(timeout)
+        self._notify(
+            t("전체 로그 요청", self._lang),
+            t("받음 {saved}대 · 수집 꺼짐 {declined}대 · 응답 없음 {none}대(옛 버전이거나 끊김)",
+              self._lang).format(saved=len(result["saved"]), declined=len(result["declined"]),
+                                 none=len(result["no_answer"])),
+        )
+        logger.info(
+            f"[에러 로그] 전체 로그 요청 결과: 받음 {len(result['saved'])} · "
+            f"거절 {len(result['declined'])} · 응답 없음 {len(result['no_answer'])}"
+        )
+        return result
+
+    def export_diagnostic_bundle(self):
+        """[트레이] 진단 묶음 zip 을 다운로드 폴더에 만든다. Returns: 경로 또는 None."""
+        from version import __version__
+        try:
+            path = error_events.write_diagnostic_bundle(
+                Path(self.config.download_path), Path(LOG_FILE), Path(CRASH_LOG_FILE),
+                self.config, __version__, self._error_redactor(),
+            )
+        except OSError as e:
+            logger.warning(f"[에러 로그] 진단 묶음 만들기 실패: {e}")
+            self._notify(t("진단 묶음 내보내기", self._lang), t("만들지 못했어요", self._lang))
+            return None
+        self._notify(t("진단 묶음 내보내기", self._lang), str(path))
+        return path
 
     # ── 클립보드 처리 ──────────────────────────────────────────────────
 

@@ -53,6 +53,12 @@ MSG_CLIP_OFFER = "clip_offer"            # copy 시점 경로 알림 (broadcast)
 MSG_CLIP_FETCH = "clip_fetch"            # paste 시점 fetch 요청 (source 로 routed)
 MSG_CLIP_FETCH_FAIL = "clip_fetch_fail"  # fetch 실패 응답 (requester 로 routed)
 
+# v3.0.20 — 오류 사건 수집(d1, 옵트인). 셋 다 «서버 종착» — 서버는 중계·broadcast 하지 않는다.
+# 옛 버전 피어는 모르는 type 을 조용히 무시한다(핸들러 elif 체인 밖) → 요청 측은 타임아웃으로 판정.
+MSG_ERROR_EVENTS = "error_events"   # client → server: 오류 사건 묶음 (core/error_events 스키마)
+MSG_LOG_REQUEST = "log_request"     # server → clients: 전체 로그 요청 (사람이 누를 때만)
+MSG_LOG_BUNDLE = "log_bundle"       # client → server: 전체 로그 응답 (gzip+base64, 또는 declined)
+
 # ── 파일 전송 설정 ───────────────────────────────────────────────────────
 
 FILE_CHUNK_SIZE = 1024 * 1024                # 1MB 청크

@@ -551,6 +551,23 @@ class SettingsWindow(customtkinter.CTkToplevel):
         ).pack(side="left", fill="x", expand=True)
         row_upd.pack(fill="x", pady=(t.SP[2], 0))
 
+        # 2026-11-27 에러 로그(d1): 오류 사건 자동 수집 — 기본 꺼짐(옵트인). 보내는 PC·서버 PC
+        # 양쪽 다 켜야 모인다. 앱 연결 밖(인터넷·개발자)으로는 안 나간다.
+        self._collect_logs_var = customtkinter.BooleanVar(value=self._config.collect_error_logs)
+        row_col = customtkinter.CTkFrame(inner, fg_color="transparent")
+        col_img = load_icon("file-text", size=16, color="dim")
+        if col_img is not None:
+            customtkinter.CTkLabel(row_col, text="", image=col_img).pack(side="left", padx=(0, t.SP[2] - 2))
+        customtkinter.CTkSwitch(
+            row_col, text=tr("내 기기들의 오류 기록을 서버 PC 에 모으기", self._lang),
+            variable=self._collect_logs_var, onvalue=True, offvalue=False,
+            text_color=t.terminal_text,
+            font=t.FONT_BODY,
+            progress_color=t.signal_ok,
+            fg_color=t.relay_raised,
+        ).pack(side="left", fill="x", expand=True)
+        row_col.pack(fill="x", pady=(t.SP[2], 0))
+
     # ─── 헬퍼 ──────────────────────────────────────────────────
 
     def _cleanup_staging_now(self) -> None:
@@ -732,6 +749,8 @@ class SettingsWindow(customtkinter.CTkToplevel):
         self._config.lazy_paste = bool(self._lazy_paste_var.get())
         # 2026-09-29 자동 업데이트 확인 스위치
         self._config.auto_update_check = bool(self._auto_update_var.get())
+        # 2026-11-27 에러 로그(d1) 옵트인
+        self._config.collect_error_logs = bool(self._collect_logs_var.get())
 
         # 2026-07-12: 자동 수신 문턱(macOS 전용 위젯 — Darwin 아니면 속성 자체가 없음)
         if hasattr(self, "_lazy_threshold_entry"):
