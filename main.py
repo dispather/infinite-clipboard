@@ -118,10 +118,21 @@ def _install_crash_capture(crash_path) -> None:
     threading.excepthook = _thread_excepthook
 
 
-def _setup_logging(debug=False):
-    """로깅 초기화: 콘솔(INFO) + 파일(DEBUG)"""
+def _setup_logging(debug=False, purge_legacy=False):
+    """로깅 초기화: 콘솔(INFO) + 파일(DEBUG)
+
+    purge_legacy: 메인 서비스 프로세스만 True — 옛 버전이 남긴 클립보드 preview 줄을
+    파일 핸들러를 붙이기 «전»에 1회 지운다(`--window` 서브프로세스는 하지 않는다).
+    """
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
+
+    purge = None
+    if purge_legacy:
+        try:
+            purge = error_events.purge_legacy_preview_logs(Path(LOG_FILE))
+        except Exception as e:  # 정리 실패가 시작을 막으면 안 된다
+            purge = {"error": type(e).__name__}
 
     fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
@@ -156,6 +167,22 @@ def _setup_logging(debug=False):
             os.chmod(str(CRASH_LOG_FILE), 0o600)
         except OSError:
             pass
+
+    # 핸들러가 붙은 뒤에 결과를 남긴다 — 줄 수·파일 이름만(지운 내용은 절대 쓰지 않는다)
+    if purge is not None and not purge.get("skipped"):
+        _log = logging.getLogger("infinite-clipboard")
+        if "error" in purge:
+            _log.warning(f"[로그 정리] 옛 클립보드 미리보기 줄 정리 실패: {purge['error']}")
+        else:
+            if purge["preview"]:
+                _log.info(f"[로그 정리] 옛 클립보드 미리보기 줄 {purge['preview']}개"
+                          f"(+연속 줄 {purge['cont']}개)를 로그 {purge['files']}개에서 지웠습니다")
+            if purge["check_failed"]:
+                _log.warning(f"[로그 정리] 검산 불일치로 건드리지 않은 로그: "
+                             f"{', '.join(purge['check_failed'])}")
+            if purge["io_failed"]:
+                _log.warning(f"[로그 정리] 읽기/쓰기 실패(다음 시작에 재시도): "
+                             f"{', '.join(purge['io_failed'])}")
 
 logger = logging.getLogger("infinite-clipboard")
 
@@ -3425,7 +3452,7 @@ def main():
     args = parser.parse_args()
 
     # 로깅 초기화
-    _setup_logging(debug=args.debug)
+    _setup_logging(debug=args.debug, purge_legacy=not args.window)
 
     if args.check_notify_mac:
         _check_notify_mac()
