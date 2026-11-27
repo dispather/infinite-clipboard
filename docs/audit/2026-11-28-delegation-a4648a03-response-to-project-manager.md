@@ -30,6 +30,7 @@ task_ref: infinite-clipboard::legacy-preview-log-purge
 - **OSError 가 난 파일이 있으면 표식을 남기지 않는다**(다음 시작에 재시도) — 잠김 같은 일시 오류일 수 있어서. **검산 불성립은 결정적이라 표식을 남긴다** — 매 시작 WARNING 이 오류 사건으로 쌓이는 것을 피하고, 남은 줄은 묶음 필터가 막는다. 포기: 검산 불성립 파일의 자동 재시도.
 - 연속 줄 상한 50줄 — 51번째부터의 시각 없는 줄은 preview 것이 아니라고 보고 남긴다(다른 레코드를 지우는 쪽보다 남기는 쪽이 안전).
 - 한계 `[문서]`: 클립보드 본문 줄 자체가 `YYYY-MM-DD HH:MM:SS` 로 시작하면 그 줄부터는 다른 레코드로 보고 남긴다(보수적).
+- 실기 확인(v3.0.21 배포 뒤 상주가 다른 PC «진단 묶음»에서 preview 0 확인)은 원장 condition 에 이미 상주 몫으로 적힌 기존 단계라 leftover 로 따로 적지 않았다.
 - 되돌리려면 `git revert 0fdfc19`.
 
 ## 종료 보고
@@ -42,9 +43,9 @@ done:
 - pytest 전체 green `[실측]` `696 passed, 76 skipped, 1 warning in 61.97s` (`.venv/bin/python -m pytest -q -x`, 2026-11-28)
 - 테스트 내용은 전부 가짜 문자열(`FAKE-SECRET-CLIP`, `/home/fakeuser`) — 실제 기기명·사용자명·IP 없음
 leftover:
-- 없음 (실기 확인 — v3.0.21 배포 뒤 상주가 다른 PC «진단 묶음»에서 preview 0 확인 — 은 원장 condition 에 이미 상주 몫으로 적혀 있는 기존 단계라 새 항목이 아니다)
+- 없음
 blocked:
 - 없음
 produced:
 - 커밋 0fdfc19 — `core/error_events.py`, `main.py`, `tests/test_legacy_preview_purge.py`
-- 이 회신 문서 + 수신 사본 종결 스탬프(같은 브랜치의 다음 커밋)
+- 커밋 bfdca4a — 이 회신 문서 + 수신 사본 종결 스탬프
