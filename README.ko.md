@@ -162,6 +162,12 @@ Gatekeeper가 ad-hoc 서명된 앱을 막음. Finder에서 `.app` 을 **우클�
 infinite-clipboard --version
 ```
 
+### 로그와 오류 기록
+- **트레이 메뉴**(v3.0.20 부터): **로그 폴더 열기**, **진단 묶음 내보내기**(로그와 `crash.log` 를 zip 으로 설정의 저장 폴더에 저장, 인증 키는 빠짐), 서버 PC 에서는 **연결된 PC 전체 로그 요청**
+- **내 기기들의 오류 기록을 서버 PC 에 모으기**(설정, **기본 꺼짐**): 각 PC 가 경고·오류·크래시 요약을 10분마다 서버 PC 로 보낸다. 보내는 PC 와 서버 PC 양쪽 다 켜야 한다
+- 이 기록은 내 Infinite Clipboard 연결 안에서만 오간다. 개발자나 인터넷 어디로도 보내지 않는다. 클립보드 내용과 인증 키는 넣지 않는다
+- 서버 PC 는 설정 폴더 안 `collected-logs/<기기>/events.jsonl` 에 저장한다(Linux `~/.config/InfiniteClipboard/`, macOS `~/Library/Application Support/InfiniteClipboard/`, Windows `%APPDATA%\InfiniteClipboard\`)
+
 ---
 
 ## 소스 빌드 / 기여

@@ -162,6 +162,12 @@ Check the installed version:
 infinite-clipboard --version
 ```
 
+### Logs and error records
+- **Tray menu** (v3.0.20+): **Open Log Folder**, **Export Diagnostics** (a zip of the logs and `crash.log` in the download folder set in Settings, without the auth key), and on the server PC **Request Full Logs from Connected PCs**
+- **Collect my devices' error records on the server PC** (Settings, **off by default**): each PC sends a summary of its warnings, errors and crashes to the server PC every 10 minutes. Both the sending PC and the server PC must have it turned on
+- These records travel only over your own Infinite Clipboard connection. Nothing is sent to the developer or anywhere on the internet. Clipboard contents and the auth key are never included
+- The server PC keeps them in `collected-logs/<device>/events.jsonl` inside the settings folder (`~/.config/InfiniteClipboard/` on Linux, `~/Library/Application Support/InfiniteClipboard/` on macOS, `%APPDATA%\InfiniteClipboard\` on Windows)
+
 ---
 
 ## Building from source / Contributing
