@@ -44,6 +44,7 @@ done:
 
 leftover:
 - `test_peer_reconnect_with_same_peer_id_eventually_succeeds` 가 3회 중 1회 실패(flaky 의심, 원인 미조사 — 알림 변경과 무관한 재연결 타이밍) · task_ref: infinite-clipboard::flaky-peer-reconnect-same-peer-id-test · ⛳착수: `tests/test_coverage_gaps_2026_07_03.py` 의 그 테스트를 `pytest --count` 없이 루프 20회 돌려 실패율·실패 assert 메시지를 먼저 잰 뒤 `_wait_until` timeout(5.0s)·서버의 옛 소켓 정리 순서를 본다 · 중복 확인: 작성 훅이 비슷한 ref `infinite-clipboard::server-stale-peer-blocks-reconnect` 를 제안했지만 본 체크아웃 `.next-tasks.json`(jq `.tasks[]`), 레포 전체 json grep, `git log --all -S`, `docs/` grep 4곳 모두에서 찾지 못했다 — 등록 시 조율자가 그 이름의 항목이 다른 곳에 있는지 한 번 확인해 달라
+  근거: 본 체크아웃에서 `jq '.. | objects | select(.task_ref?=="infinite-clipboard::server-stale-peer-blocks-reconnect")' .next-tasks.json` → 0건 · `grep -rl server-stale-peer-blocks-reconnect --include='*.json' --include='*.jsonl' .` → 0건 · `git log --all --oneline -S server-stale-peer-blocks-reconnect` → 0건 · `grep -rl server-stale-peer-blocks-reconnect docs` → 0건 (원장 아카이브 파일은 이 레포에 `.next-tasks.json` 하나뿐이라 따로 없다)
 
 blocked:
 - 없음
