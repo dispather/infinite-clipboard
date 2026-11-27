@@ -3,7 +3,7 @@ round_trip: response
 ball: project-manager
 expects_reply: false
 disposition: done-in-reply
-title: "회신 — 분배 dlg-20261127-1c5477cb — 에러 로그 (a)(b)(c)(e) 정리 (코드 커밋 237f310)"
+title: "회신 — 분배 dlg-20261127-1c5477cb — 에러 로그 (a)(b)(c)(e) 정리 (코드 커밋 237f310·fc794a1)"
 date: 2026-11-27
 from: infinite-clipboard
 from_host: linux-desktop
@@ -21,7 +21,7 @@ task_ref: infinite-clipboard::log-crash-capture-levels
 # 회신 — 에러 로그 (a)(b)(c)(e) 정리
 
 작업 ID `dlg-20261127-1c5477cb` / 원장 `infinite-clipboard::log-crash-capture-levels` 의 condition 을 구현했다.
-코드 커밋: **`237f310`** (브랜치 `dispatch/dlg-20261127-1c5477cb`, push 안 함). 되돌리려면 `git revert 237f310`.
+코드 커밋: **`237f310`**, **`fc794a1`** (브랜치 `dispatch/dlg-20261127-1c5477cb`, push 안 함). 되돌리려면 `git revert fc794a1 237f310`.
 
 ## 무엇을 바꿨나
 
@@ -30,23 +30,27 @@ task_ref: infinite-clipboard::log-crash-capture-levels
 | (a) 크래시 기록 | `main.py`, `config.py` | `_install_crash_capture()` — `faulthandler.enable(file=crash.log, all_threads=True)`, 파일은 append 로 열어 모듈 전역에 붙잡아 프로세스 끝까지 유지. `sys.excepthook`·`threading.excepthook` → `logger.critical(..., exc_info=…)`(트레이스백 포함, KeyboardInterrupt·SystemExit 은 제외). `_setup_logging()` 이 부르므로 `--window` UI 서브프로세스도 같은 설정을 탄다 — `main()` 이 `--window` 분기보다 먼저 `_setup_logging()` 을 부른다 [문서 `main.py` `main()`]. POSIX 는 crash.log 도 0o600 |
 | (b) 레벨 정리 | `core/network.py`, `core/file_transfer.py`, `main.py` | `is_peer_disconnect()` — ConnectionReset·BrokenPipe·ConnectionAborted, errno ECONNRESET·EPIPE·ECONNABORTED·ENOTCONN, WinError 10053·10054·10058, 수신 중 EOF(`PeerClosed`, 기존 `ConnectionError("연결 끊김"/"데이터 수신 실패")` 를 이 하위형으로). 서버 «클라이언트 처리 오류»·클라이언트 «수신 오류» 두 곳에서 끊김이면 INFO «… 연결 끊김». 크기 초과는 `TransferSizeExceeded(ValueError)` 로 던지고 `main.py` 의 «offer 메타데이터 수집»·«파일 메타데이터 수집» 두 곳에서 WARNING «… 거절». 레벨 기준 한 줄은 `main.py` 로깅 설정 위 주석 |
 | (c) 반복 로그 | `core/clipboard_manager.py` | `_note_files_detected()` — «파일/폴더 클립보드 감지» INFO 는 목록이 바뀔 때 1회(Windows·macOS 두 곳; 파일 아닌 내용으로 바뀌면 기억을 지워 같은 파일 재복사는 다시 1줄). `_decode_image_once()` — 이미지 바이트 sha256 을 기억해 해석 실패한 같은 내용은 재해석·ERROR 생략, `Image.open` 뒤 `load()` 까지 불러 지연 해석 실패도 그 자리에서 잡음. 적용: macOS PNG·TIFF(PyObjC)·osascript, Linux wl-paste/xclip, Windows DIB |
-| (e) 본문 로그 제거 | `core/clipboard_manager.py` | `set_content` 의 DEBUG «preview:»(앞 50자) 4곳 삭제 — Windows 1·macOS 1·Linux 2. 길이(«N자»)·종류 로그는 유지 |
+| (e) 본문 로그 제거 | `core/clipboard_manager.py`, `ui/history_window.py` | `set_content` 의 DEBUG «preview:»(앞 50자) 4곳 삭제 — Windows 1·macOS 1·Linux 2 (`237f310`). 이력 창 재복사 로그 3곳의 `preview={preview!r}`(이력 미리보기 = 본문 앞 40자) 삭제 (`fc794a1`). 길이(«N자»)·종류 로그는 유지 |
 
 **crash.log 위치** (진행중 `infinite-clipboard::win-text-receive-heap-crash` 계측용): 설정 폴더와 같은 곳 — Windows `%APPDATA%\InfiniteClipboard\crash.log`, macOS `~/Library/Application Support/InfiniteClipboard/crash.log`, Linux `~/.config/InfiniteClipboard/crash.log` [문서 `config.py` `_get_config_dir`]. 일반 로그(`infinite-clipboard.log`)와 분리한 이유: faulthandler 는 fd 에 직접 써서 RotatingFileHandler 의 파일 교체를 못 따라간다. 로테이션이 없지만 크래시 때만 쓰이므로 크기 문제는 작다 [추정].
 
-**(e) 다른 곳 확인**: `main.py`·`config.py`·`core/`·`ui/` 의 logger 호출을 슬라이스(`[:N]`)·`{text|data|content|…}`·`!r` 패턴으로 grep — 클립보드 본문을 쓰는 곳은 위 4곳뿐, 나머지는 타입명(`[클립보드] 변경 감지: {content_type}`)·파일 경로·id 앞자리 [실측 grep]. 파일 경로는 본문이 아니라 범위 밖으로 뒀다.
+**(e) 다른 곳 확인 — 두 가지 방법**:
+1. 첫 grep(한 줄 f-string, 정해 둔 변수명만)은 `core/clipboard_manager.py` 의 4곳만 찾았다. 이 방법은 `%s` 인자·여러 줄 호출·다른 변수명을 놓친다.
+2. 그래서 `main.py`·`config.py`·`core/*.py`·`ui/**/*.py` 의 logger 호출 **전부**를 AST 로 다시 훑었다. 본문을 담을 법한 이름(text·data·content·message·msg·payload·entry·item·preview·body·raw 등)이 `len()`·속성·문자열 키 접근 없이 그대로 들어간 호출을 찾았고, 4건이 나왔다 [실측]. 그중 `ui/history_window.py` 3곳은 이력 미리보기 = 본문 노출이라 고쳤다. `core/file_transfer.py` 1곳(`entry`)은 staging 폴더 경로라 본문이 아니다.
+3. 경로 테스트 `test_text_copy_send_and_receive_paths_do_not_log_body` 로 확인했다. 복사 → 모니터 → 이력 → `NetworkClient.send`(실제 직렬화) → 수신 `_on_client_message` → 실제 `LinuxClipboard.set_content` → 이력, 이 전 경로를 DEBUG 로 돌려도 표식 문자열이 로그에 없다. 고치기 전 `clipboard_manager.py` 로 바꾸면 이 테스트가 실패한다(음성 대조) [실측]. 재복사 테스트도 고치기 전 `history_window.py` 에서 실패한다 [실측].
+파일 경로는 본문이 아니라 범위 밖으로 뒀다.
 
 **(b) 기준을 `core/CLAUDE.md` 가 아니라 코드 주석에 둔 이유**: `core/CLAUDE.md` 는 gitignore 대상이라 이 worktree 에 없고, CLAUDE.md 변경은 이 세션이 먼저 물어야 하는 범위다. condition 이 «core/CLAUDE.md 또는 코드 주석 한 줄» 이라 주석을 골랐다.
 
 ## 검증
 
-- 새 테스트 `tests/test_logging_crash_levels.py`(16) · `tests/test_clipboard_log_repeat.py`(8) — 24 passed [실측]. 통과 기준과 대응:
+- 새 테스트 `tests/test_logging_crash_levels.py`(16) · `tests/test_clipboard_log_repeat.py`(10) — 26 passed [실측]. 통과 기준과 대응:
   - excepthook → CRITICAL + 트레이스백: `test_excepthook_logs_critical_with_traceback`, 스레드는 `test_thread_exception_logs_critical_with_traceback`. 실제 네이티브 크래시는 `test_native_crash_lands_in_crash_log` — 자식 프로세스에서 `sys.stderr=None`(창 모드 번들 조건) 후 `faulthandler._sigsegv()` → crash.log 에 «Fatal Python error» (POSIX 만, Windows 는 skip)
   - 끊김 예외 → ERROR 아님: `test_client_receive_disconnect_is_not_error`(reset·EOF), 분류 parametrize 8건
   - 같은 파일 목록 10회 → INFO 1줄: `test_same_file_list_polled_10_times_logs_info_once`
   - 같은 깨진 이미지 10회 → ERROR 1줄: `test_same_broken_image_10_times_logs_error_once`(원장의 재현 입력 `b"\x89PNG\r\n\x1a\n" + b"x"*100`, `Image.open` 호출 1회까지 확인), Windows DIB `test_windows_dib_broken_10_times_logs_error_once`
-  - 텍스트 복사 시 로그에 본문 없음: `test_text_copy_does_not_log_clipboard_text`
-- 전체: `.venv/bin/python -m pytest -q` → **656 passed, 76 skipped** [실측, 이 PC Linux]
+  - 텍스트 복사 시 로그에 본문 없음: `test_text_copy_send_and_receive_paths_do_not_log_body`(송신·수신 전 경로), `test_text_copy_does_not_log_clipboard_text`(쓰기), `test_history_recopy_does_not_log_preview`(이력 재복사)
+- 전체: `.venv/bin/python -m pytest -q` → **658 passed, 76 skipped** [실측, 이 PC Linux, `fc794a1` 기준]
 - 실기(macOS·Windows) 검증은 안 했다 — macOS PyObjC 경로와 Windows WinError 분류는 단위 테스트(헬퍼 직접 호출·가짜 errno)까지만.
 
 ## 고른 것 · 포기한 것
@@ -61,8 +65,8 @@ done:
 - (a) faulthandler → crash.log(append·유지) + sys/threading excepthook → CRITICAL+트레이스백, `--window` 서브프로세스 포함 — 커밋 `237f310`, 테스트 4건
 - (b) 피어 정상 끊김 ERROR→INFO(서버·클라이언트 수신 2곳), 크기 초과 → WARNING(2곳), 기준 주석 — 커밋 `237f310`, 테스트 12건
 - (c) «파일/폴더 클립보드 감지» 목록 변경 시 1회, 해석 실패 이미지 재해석·ERROR 반복 중단(macOS·Linux·Windows DIB) — 커밋 `237f310`, 테스트 6건
-- (e) 클립보드 본문 미리보기 로그 4곳 제거 + 나머지 logger 호출 grep 확인 — 커밋 `237f310`, 테스트 2건
-- pytest 전체 656 passed / 76 skipped
+- (e) 클립보드 본문 미리보기 로그 7곳 제거(clipboard_manager 4 + history_window 3), logger 호출 전수 AST 조사, 송신·수신 전 경로 테스트 — 커밋 `237f310`·`fc794a1`, 테스트 4건
+- pytest 전체 658 passed / 76 skipped
 - `.next-tasks.json` 은 이 브랜치에서 안 바뀜(이 레포에서 추적 안 되는 파일이기도 함)
 
 leftover:
@@ -78,4 +82,5 @@ blocked:
 
 produced:
 - 커밋 `237f310` — `main.py`, `config.py`, `core/network.py`, `core/clipboard_manager.py`, `core/file_transfer.py`, `tests/test_logging_crash_levels.py`, `tests/test_clipboard_log_repeat.py`
+- 커밋 `fc794a1` — `ui/history_window.py`, `tests/test_clipboard_log_repeat.py`
 - 이 회신 문서 `docs/audit/2026-11-27-delegation-1c5477cb-response-to-project-manager.md`
