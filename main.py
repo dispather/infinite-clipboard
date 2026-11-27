@@ -351,7 +351,9 @@ class InfiniteClipboard:
         self._error_service = None
         self._error_store = None
         self._log_requests = error_events.LogRequestTracker()
-        self._last_log_response = 0.0
+        # None = 아직 응답한 적 없음. 0.0 으로 두면 monotonic 이 «부팅 뒤 경과»라
+        # 켜진 지 60초 안 된 PC 가 첫 요청까지 무시한다(CI 새 러너에서 실측 2026-11-28).
+        self._last_log_response = None
 
     def start(self):
         """앱 시작"""
@@ -907,7 +909,8 @@ class InfiniteClipboard:
             return
         request_id = data["request_id"][:64]
         now = time.monotonic()
-        if now - self._last_log_response < error_events.LOG_RESPONSE_MIN_INTERVAL:
+        if (self._last_log_response is not None
+                and now - self._last_log_response < error_events.LOG_RESPONSE_MIN_INTERVAL):
             return
         self._last_log_response = now
         payload = {"request_id": request_id}

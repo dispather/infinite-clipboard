@@ -247,6 +247,16 @@ def test_optin_off_sends_nothing(app_factory):
     assert not any(m["type"] == MSG_ERROR_EVENTS for m in msgs)
 
 
+def test_first_log_request_answered_right_after_boot(app_factory, monkeypatch):
+    """monotonic 이 «부팅 뒤 경과»라 켜진 지 60초 안 된 PC 에서도 첫 요청은 답해야 한다."""
+    import main
+    monkeypatch.setattr(main.time, "monotonic", lambda: 5.0)
+    app = app_factory("client", collect=False)
+    app.client = _FakeClient()
+    app._handle_log_request({"request_id": "boot"})
+    assert [m["type"] for m in _types(app.client.raw)] == [MSG_LOG_BUNDLE]
+
+
 def test_optin_on_client_sends_events(app_factory):
     app = app_factory("client", collect=True)
     app.client = _FakeClient()
